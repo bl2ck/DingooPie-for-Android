@@ -1,0 +1,66 @@
+plugins { id 'com.android.application' }
+
+def releaseStoreFile = System.getenv('DINGOO_PIE_RELEASE_STORE_FILE')
+def releaseStorePassword = System.getenv('DINGOO_PIE_RELEASE_STORE_PASSWORD')
+def releaseKeyAlias = System.getenv('DINGOO_PIE_RELEASE_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('DINGOO_PIE_RELEASE_KEY_PASSWORD')
+def releaseSigningAvailable = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+def unsignedReleaseAllowed = System.getenv('DINGOO_PIE_ALLOW_UNSIGNED_RELEASE') == '1'
+def releaseRequested = gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }
+
+if (releaseRequested && !releaseSigningAvailable && !unsignedReleaseAllowed) {
+    throw new GradleException('Release signing variables are required unless the build explicitly allows an unsigned release.')
+}
+
+android {
+    namespace 'com.dingoopie.android'
+    compileSdk 35
+    ndkVersion '26.3.11579264'
+    defaultConfig {
+        applicationId 'com.dingoopie.android'
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+        externalNativeBuild {
+            ndkBuild {
+                arguments 'APP_PLATFORM=android-23'
+                abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+            }
+        }
+    }
+    signingConfigs {
+        if (releaseSigningAvailable) {
+            release {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        debug { debuggable true }
+        release {
+            if (releaseSigningAvailable) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    externalNativeBuild { ndkBuild { path file('jni/Android.mk') } }
+    packaging {
+        jniLibs.useLegacyPackaging = true
+    }
+    sourceSets.main {
+        jniLibs.srcDir 'libs'
+        assets.exclude '**/*.app', '**/*.APP'
+    }
+
+    applicationVariants.configureEach { variant ->
+        variant.outputs.configureEach {
+            outputFileName = 'DingooPie.apk'
+        }
+    }
+}

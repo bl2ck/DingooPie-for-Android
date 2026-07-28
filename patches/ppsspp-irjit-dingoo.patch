@@ -1,0 +1,1386 @@
+diff --git a/Core/MIPS/ARM64/Arm64IRJit.h b/Core/MIPS/ARM64/Arm64IRJit.h
+--- a/Core/MIPS/ARM64/Arm64IRJit.h
++++ b/Core/MIPS/ARM64/Arm64IRJit.h
+@@ -142,0 +143,9 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	const u8 *dingooRead8Fallback_ = nullptr;
++	const u8 *dingooRead16Fallback_ = nullptr;
++	const u8 *dingooRead32Fallback_ = nullptr;
++	const u8 *dingooWrite8Fallback_ = nullptr;
++	const u8 *dingooWrite16Fallback_ = nullptr;
++	const u8 *dingooWrite32Fallback_ = nullptr;
++#endif
++
+diff --git a/Core/MIPS/ARM64/Arm64IRAsm.cpp b/Core/MIPS/ARM64/Arm64IRAsm.cpp
+index fd518d4..45800a4 100644
+--- a/Core/MIPS/ARM64/Arm64IRAsm.cpp
++++ b/Core/MIPS/ARM64/Arm64IRAsm.cpp
+@@ -28,0 +29,3 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
+@@ -149,0 +153,24 @@ void Arm64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	constexpr uint32_t dingooFallbackGPRs = 0x0000FFFFu;
++	constexpr uint32_t dingooFallbackFPRs = 0xFFFFFFF0u;
++	auto generateDingooMemoryFallback = [&](const void *helper, bool write) {
++		const u8 *entry = AlignCode16();
++		fp_.ABI_PushRegisters(dingooFallbackGPRs, dingooFallbackFPRs);
++		MOV(W0, SCRATCH1);
++		if (write)
++			MOV(W1, SCRATCH2);
++		QuickCallFunction(SCRATCH1_64, helper);
++		if (!write)
++			MOV(SCRATCH1, W0);
++		fp_.ABI_PopRegisters(dingooFallbackGPRs, dingooFallbackFPRs);
++		RET();
++		return entry;
++	};
++	dingooRead8Fallback_ = generateDingooMemoryFallback((const void *)&ppssppShimRead8, false);
++	dingooRead16Fallback_ = generateDingooMemoryFallback((const void *)&ppssppShimRead16, false);
++	dingooRead32Fallback_ = generateDingooMemoryFallback((const void *)&ppssppShimRead32, false);
++	dingooWrite8Fallback_ = generateDingooMemoryFallback((const void *)&ppssppShimWrite8, true);
++	dingooWrite16Fallback_ = generateDingooMemoryFallback((const void *)&ppssppShimWrite16, true);
++	dingooWrite32Fallback_ = generateDingooMemoryFallback((const void *)&ppssppShimWrite32, true);
++#endif
++
+@@ -156,0 +184,3 @@ void Arm64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	MOVP2R(MEMBASEREG, ppssppShimFastPageBases());
++#else
+@@ -157,0 +188 @@ void Arm64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#endif
+@@ -206,0 +238,22 @@ void Arm64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++			if (ppssppShimCodeHookPageMap()) {
++				LSR(SCRATCH2, SCRATCH1, 12);
++				MOVP2R(X0, ppssppShimCodeHookPageMap());
++				LDRB(SCRATCH2, X0, ArithOption(SCRATCH2_64));
++				FixupBranch skipCodeHook = CBZ(SCRATCH2);
++				SaveStaticRegisters();
++				MOV(W0, SCRATCH1);
++				QuickCallFunction(SCRATCH2_64, &ppssppShimRunCodeHook);
++				STR(INDEX_UNSIGNED, W0, CTXREG, offsetof(MIPSState, pc));
++				LoadStaticRegisters();
++				MovFromPC(SCRATCH1);
++				SetJumpTarget(skipCodeHook);
++			} else {
++				SaveStaticRegisters();
++				MOV(W0, SCRATCH1);
++				QuickCallFunction(SCRATCH2_64, &ppssppShimRunCodeHook);
++				STR(INDEX_UNSIGNED, W0, CTXREG, offsetof(MIPSState, pc));
++				LoadStaticRegisters();
++				MovFromPC(SCRATCH1);
++			}
++#endif
+@@ -210,0 +264,23 @@ void Arm64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++			if (ppssppShimFastPageBases()) {
++				LSR(SCRATCH2, SCRATCH1, 12);
++				LSL(SCRATCH2_64, SCRATCH2_64, 3);
++				LDR(SCRATCH2_64, MEMBASEREG, ArithOption(SCRATCH2_64));
++				FixupBranch fallbackRead = CBZ(SCRATCH2_64);
++				LDR(SCRATCH1, SCRATCH2_64, ArithOption(SCRATCH1));
++				FixupBranch doneRead = B();
++				SetJumpTarget(fallbackRead);
++				SaveStaticRegisters();
++				MOV(W0, SCRATCH1);
++				QuickCallFunction(SCRATCH2_64, &ppssppShimRead32);
++				MOV(SCRATCH1, W0);
++				LoadStaticRegisters();
++				SetJumpTarget(doneRead);
++			} else {
++				SaveStaticRegisters();
++				MOV(W0, SCRATCH1);
++				QuickCallFunction(SCRATCH2_64, &ppssppShimRead32);
++				MOV(SCRATCH1, W0);
++				LoadStaticRegisters();
++			}
++#else
+@@ -211,0 +288,2 @@ void Arm64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#endif
++			FixupBranch needsCompile;
+@@ -220,0 +299 @@ void Arm64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++			SetJumpTarget(needsCompile);
+diff --git a/Core/MIPS/ARM64/Arm64IRCompLoadStore.cpp b/Core/MIPS/ARM64/Arm64IRCompLoadStore.cpp
+index d0fde9f..af8b601 100644
+--- a/Core/MIPS/ARM64/Arm64IRCompLoadStore.cpp
++++ b/Core/MIPS/ARM64/Arm64IRCompLoadStore.cpp
+@@ -24,0 +25,3 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
+@@ -163,0 +167,4 @@ void Arm64JitBackend::CompIR_CondStore(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	CompIR_Generic(inst);
++	return;
++#endif
+@@ -198,0 +206,38 @@ void Arm64JitBackend::CompIR_FLoad(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	if (!ppssppShimFastPageBases()) {
++		regs_.FlushBeforeCall();
++		if (regs_.IsGPRImm(inst.src1))
++			MOVI2R(W0, regs_.GetGPRImm(inst.src1));
++		else if (regs_.IsGPRMapped(inst.src1))
++			MOV(W0, regs_.R(inst.src1));
++		else
++			LDR(INDEX_UNSIGNED, W0, CTXREG, regs_.GetIRRegOffset(inst.src1));
++		ADDI2R(W0, W0, inst.constant, W1);
++		QuickCallFunction(SCRATCH2_64, &ppssppShimRead32);
++		MOV(SCRATCH1, W0);
++	} else {
++		if (regs_.IsGPRImm(inst.src1))
++			MOVI2R(SCRATCH1, regs_.GetGPRImm(inst.src1));
++		else if (regs_.IsGPRMapped(inst.src1))
++			MOV(SCRATCH1, regs_.R(inst.src1));
++		else
++			LDR(INDEX_UNSIGNED, SCRATCH1, CTXREG, regs_.GetIRRegOffset(inst.src1));
++		ADDI2R(SCRATCH1, SCRATCH1, inst.constant, SCRATCH2);
++		ANDI2R(SCRATCH2, SCRATCH1, 0xFFF);
++		ADDI2R(SCRATCH2, SCRATCH2, 4);
++		FixupBranch fallbackCrossPage = TBNZ(SCRATCH2, 12);
++		LSR(SCRATCH2, SCRATCH1, 12);
++		LSL(SCRATCH2_64, SCRATCH2_64, 3);
++		LDR(SCRATCH2_64, MEMBASEREG, ArithOption(SCRATCH2_64));
++		FixupBranch fallbackUnmapped = CBZ(SCRATCH2_64);
++		LDR(SCRATCH1, SCRATCH2_64, ArithOption(SCRATCH1));
++		FixupBranch fastDone = B();
++		SetJumpTarget(fallbackCrossPage);
++		SetJumpTarget(fallbackUnmapped);
++		BL(dingooRead32Fallback_);
++		SetJumpTarget(fastDone);
++	}
++	regs_.MapFPR(inst.dest, MIPSMap::NOINIT);
++	fp_.FMOV(regs_.F(inst.dest), SCRATCH1);
++	return;
++#endif
+@@ -221,0 +267,46 @@ void Arm64JitBackend::CompIR_FStore(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	if (regs_.IsFPRMapped(inst.src3)) {
++		int lane = regs_.GetFPRLane(inst.src3);
++		if (lane == 0)
++			fp_.FMOV(S0, regs_.F(inst.src3));
++		else
++			fp_.DUP(32, Q0, regs_.F(inst.src3), lane);
++	} else {
++		fp_.LDR(32, INDEX_UNSIGNED, S0, CTXREG, regs_.GetIRRegOffset(inst.src3 + 32));
++	}
++	if (!ppssppShimFastPageBases()) {
++		regs_.FlushBeforeCall();
++		if (regs_.IsGPRImm(inst.src1))
++			MOVI2R(W0, regs_.GetGPRImm(inst.src1));
++		else if (regs_.IsGPRMapped(inst.src1))
++			MOV(W0, regs_.R(inst.src1));
++		else
++			LDR(INDEX_UNSIGNED, W0, CTXREG, regs_.GetIRRegOffset(inst.src1));
++		ADDI2R(W0, W0, inst.constant, W2);
++		fp_.FMOV(W1, S0);
++		QuickCallFunction(SCRATCH2_64, &ppssppShimWrite32);
++		return;
++	}
++	if (regs_.IsGPRImm(inst.src1))
++		MOVI2R(SCRATCH1, regs_.GetGPRImm(inst.src1));
++	else if (regs_.IsGPRMapped(inst.src1))
++		MOV(SCRATCH1, regs_.R(inst.src1));
++	else
++		LDR(INDEX_UNSIGNED, SCRATCH1, CTXREG, regs_.GetIRRegOffset(inst.src1));
++	ADDI2R(SCRATCH1, SCRATCH1, inst.constant, SCRATCH2);
++	ANDI2R(SCRATCH2, SCRATCH1, 0xFFF);
++	ADDI2R(SCRATCH2, SCRATCH2, 4);
++	FixupBranch fallbackCrossPage = TBNZ(SCRATCH2, 12);
++	LSR(SCRATCH2, SCRATCH1, 12);
++	LSL(SCRATCH2_64, SCRATCH2_64, 3);
++	LDR(SCRATCH2_64, MEMBASEREG, ArithOption(SCRATCH2_64));
++	FixupBranch fallbackUnmapped = CBZ(SCRATCH2_64);
++	fp_.STR(32, S0, SCRATCH2_64, ArithOption(SCRATCH1));
++	FixupBranch fastDone = B();
++	SetJumpTarget(fallbackCrossPage);
++	SetJumpTarget(fallbackUnmapped);
++	fp_.FMOV(SCRATCH2, S0);
++	BL(dingooWrite32Fallback_);
++	SetJumpTarget(fastDone);
++	return;
++#endif
+@@ -244,0 +336,97 @@ void Arm64JitBackend::CompIR_Load(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	uintptr_t *fastPages = ppssppShimFastPageBases();
++	if (!fastPages) {
++		regs_.FlushBeforeCall();
++		if (regs_.IsGPRImm(inst.src1))
++			MOVI2R(W0, regs_.GetGPRImm(inst.src1));
++		else if (regs_.IsGPRMapped(inst.src1))
++			MOV(W0, regs_.R(inst.src1));
++		else
++			LDR(INDEX_UNSIGNED, W0, CTXREG, regs_.GetIRRegOffset(inst.src1));
++		ADDI2R(W0, W0, inst.constant, W1);
++		switch (inst.op) {
++		case IROp::Load8:
++		case IROp::Load8Ext:
++			QuickCallFunction(SCRATCH2_64, &ppssppShimRead8);
++			break;
++		case IROp::Load16:
++		case IROp::Load16Ext:
++			QuickCallFunction(SCRATCH2_64, &ppssppShimRead16);
++			break;
++		case IROp::Load32:
++		case IROp::Load32Linked:
++			QuickCallFunction(SCRATCH2_64, &ppssppShimRead32);
++			break;
++		default:
++			CompIR_Generic(inst);
++			return;
++		}
++		MOV(SCRATCH1, W0);
++	} else {
++		if (regs_.IsGPRImm(inst.src1))
++			MOVI2R(SCRATCH1, regs_.GetGPRImm(inst.src1));
++		else if (regs_.IsGPRMapped(inst.src1))
++			MOV(SCRATCH1, regs_.R(inst.src1));
++		else
++			LDR(INDEX_UNSIGNED, SCRATCH1, CTXREG, regs_.GetIRRegOffset(inst.src1));
++		ADDI2R(SCRATCH1, SCRATCH1, inst.constant, SCRATCH2);
++
++		const int accessSize = IROpToByteWidth(inst.op);
++		ANDI2R(SCRATCH2, SCRATCH1, 0xFFF);
++		ADDI2R(SCRATCH2, SCRATCH2, accessSize);
++		FixupBranch fallbackCrossPage = TBNZ(SCRATCH2, 12);
++		LSR(SCRATCH2, SCRATCH1, 12);
++		LSL(SCRATCH2_64, SCRATCH2_64, 3);
++		LDR(SCRATCH2_64, MEMBASEREG, ArithOption(SCRATCH2_64));
++		FixupBranch fallbackUnmapped = CBZ(SCRATCH2_64);
++		switch (inst.op) {
++		case IROp::Load8:
++		case IROp::Load8Ext:
++			LDRB(SCRATCH1, SCRATCH2_64, ArithOption(SCRATCH1));
++			break;
++		case IROp::Load16:
++		case IROp::Load16Ext:
++			LDRH(SCRATCH1, SCRATCH2_64, ArithOption(SCRATCH1));
++			break;
++		case IROp::Load32:
++		case IROp::Load32Linked:
++			LDR(SCRATCH1, SCRATCH2_64, ArithOption(SCRATCH1));
++			break;
++		default:
++			CompIR_Generic(inst);
++			return;
++		}
++		FixupBranch fastDone = B();
++		SetJumpTarget(fallbackCrossPage);
++		SetJumpTarget(fallbackUnmapped);
++		switch (inst.op) {
++		case IROp::Load8:
++		case IROp::Load8Ext:
++			BL(dingooRead8Fallback_);
++			break;
++		case IROp::Load16:
++		case IROp::Load16Ext:
++			BL(dingooRead16Fallback_);
++			break;
++		case IROp::Load32:
++		case IROp::Load32Linked:
++			BL(dingooRead32Fallback_);
++			break;
++		default:
++			break;
++		}
++		SetJumpTarget(fastDone);
++	}
++	if (inst.dest != MIPS_REG_ZERO) {
++		regs_.MapGPR(inst.dest, MIPSMap::NOINIT);
++		if (inst.op == IROp::Load8Ext)
++			SXTB(regs_.R(inst.dest), SCRATCH1);
++		else if (inst.op == IROp::Load16Ext)
++			SXTH(regs_.R(inst.dest), SCRATCH1);
++		else
++			MOV(regs_.R(inst.dest), SCRATCH1);
++	}
++	if (inst.op == IROp::Load32Linked)
++		regs_.SetGPRImm(IRREG_LLBIT, 1);
++	return;
++#endif
+@@ -324,0 +513,4 @@ void Arm64JitBackend::CompIR_LoadShift(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	CompIR_Generic(inst);
++	return;
++#endif
+@@ -340,0 +533,88 @@ void Arm64JitBackend::CompIR_Store(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	uintptr_t *fastPages = ppssppShimFastPageBases();
++	if (!fastPages) {
++		regs_.FlushBeforeCall();
++		if (regs_.IsGPRImm(inst.src1))
++			MOVI2R(W0, regs_.GetGPRImm(inst.src1));
++		else if (regs_.IsGPRMapped(inst.src1))
++			MOV(W0, regs_.R(inst.src1));
++		else
++			LDR(INDEX_UNSIGNED, W0, CTXREG, regs_.GetIRRegOffset(inst.src1));
++		ADDI2R(W0, W0, inst.constant, W2);
++		if (regs_.IsGPRImm(inst.src3))
++			MOVI2R(W1, regs_.GetGPRImm(inst.src3));
++		else if (regs_.IsGPRMapped(inst.src3))
++			MOV(W1, regs_.R(inst.src3));
++		else
++			LDR(INDEX_UNSIGNED, W1, CTXREG, regs_.GetIRRegOffset(inst.src3));
++		switch (inst.op) {
++		case IROp::Store8:
++			QuickCallFunction(SCRATCH2_64, &ppssppShimWrite8);
++			break;
++		case IROp::Store16:
++			QuickCallFunction(SCRATCH2_64, &ppssppShimWrite16);
++			break;
++		case IROp::Store32:
++			QuickCallFunction(SCRATCH2_64, &ppssppShimWrite32);
++			break;
++		default:
++			CompIR_Generic(inst);
++			return;
++		}
++		return;
++	}
++
++	regs_.SpillLockGPR(inst.src3, inst.src1);
++	ARM64Reg dingooValueReg = regs_.TryMapTempImm(inst.src3);
++	if (dingooValueReg == INVALID_REG)
++		dingooValueReg = regs_.MapGPR(inst.src3);
++	if (regs_.IsGPRImm(inst.src1))
++		MOVI2R(SCRATCH1, regs_.GetGPRImm(inst.src1));
++	else if (regs_.IsGPRMapped(inst.src1))
++		MOV(SCRATCH1, regs_.R(inst.src1));
++	else
++		LDR(INDEX_UNSIGNED, SCRATCH1, CTXREG, regs_.GetIRRegOffset(inst.src1));
++	ADDI2R(SCRATCH1, SCRATCH1, inst.constant, SCRATCH2);
++
++	const int accessSize = IROpToByteWidth(inst.op);
++	ANDI2R(SCRATCH2, SCRATCH1, 0xFFF);
++	ADDI2R(SCRATCH2, SCRATCH2, accessSize);
++	FixupBranch fallbackCrossPage = TBNZ(SCRATCH2, 12);
++	LSR(SCRATCH2, SCRATCH1, 12);
++	LSL(SCRATCH2_64, SCRATCH2_64, 3);
++	LDR(SCRATCH2_64, MEMBASEREG, ArithOption(SCRATCH2_64));
++	FixupBranch fallbackUnmapped = CBZ(SCRATCH2_64);
++	switch (inst.op) {
++	case IROp::Store8:
++		STRB(dingooValueReg, SCRATCH2_64, ArithOption(SCRATCH1));
++		break;
++	case IROp::Store16:
++		STRH(dingooValueReg, SCRATCH2_64, ArithOption(SCRATCH1));
++		break;
++	case IROp::Store32:
++		STR(dingooValueReg, SCRATCH2_64, ArithOption(SCRATCH1));
++		break;
++	default:
++		CompIR_Generic(inst);
++		return;
++	}
++	FixupBranch fastDone = B();
++	SetJumpTarget(fallbackCrossPage);
++	SetJumpTarget(fallbackUnmapped);
++	MOV(SCRATCH2, dingooValueReg);
++	switch (inst.op) {
++	case IROp::Store8:
++		BL(dingooWrite8Fallback_);
++		break;
++	case IROp::Store16:
++		BL(dingooWrite16Fallback_);
++		break;
++	case IROp::Store32:
++		BL(dingooWrite32Fallback_);
++		break;
++	default:
++		break;
++	}
++	SetJumpTarget(fastDone);
++	return;
++#endif
+@@ -389,0 +670,4 @@ void Arm64JitBackend::CompIR_StoreShift(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	CompIR_Generic(inst);
++	return;
++#endif
+@@ -405,0 +690,15 @@ void Arm64JitBackend::CompIR_VecLoad(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	regs_.FlushBeforeCall();
++	if (regs_.IsGPRImm(inst.src1))
++		MOVI2R(W0, regs_.GetGPRImm(inst.src1));
++	else if (regs_.IsGPRMapped(inst.src1))
++		MOV(W0, regs_.R(inst.src1));
++	else
++		LDR(INDEX_UNSIGNED, W0, CTXREG, regs_.GetIRRegOffset(inst.src1));
++	ADDI2R(W0, W0, inst.constant, W1);
++	ADDI2R(X1, CTXREG, regs_.GetIRRegOffset(inst.dest + 32), X2);
++	MOVI2R(W2, 16);
++	QuickCallFunction(X3, &ppssppShimReadBlock);
++	regs_.MapVec4(inst.dest, MIPSMap::INIT);
++	return;
++#endif
+@@ -428,0 +728,14 @@ void Arm64JitBackend::CompIR_VecStore(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	regs_.FlushBeforeCall();
++	if (regs_.IsGPRImm(inst.src1))
++		MOVI2R(W0, regs_.GetGPRImm(inst.src1));
++	else if (regs_.IsGPRMapped(inst.src1))
++		MOV(W0, regs_.R(inst.src1));
++	else
++		LDR(INDEX_UNSIGNED, W0, CTXREG, regs_.GetIRRegOffset(inst.src1));
++	ADDI2R(W0, W0, inst.constant, W1);
++	ADDI2R(X1, CTXREG, regs_.GetIRRegOffset(inst.src3 + 32), X2);
++	MOVI2R(W2, 16);
++	QuickCallFunction(X3, &ppssppShimWriteBlock);
++	return;
++#endif
+diff --git a/Core/MIPS/ARM64/Arm64IRCompSystem.cpp b/Core/MIPS/ARM64/Arm64IRCompSystem.cpp
+index 54a759f..80265b0 100644
+--- a/Core/MIPS/ARM64/Arm64IRCompSystem.cpp
++++ b/Core/MIPS/ARM64/Arm64IRCompSystem.cpp
+@@ -374,0 +375,37 @@ void Arm64JitBackend::CompIR_ValidateAddress(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	if (regs_.IsGPRImm(inst.src1))
++		MOVI2R(SCRATCH1, regs_.GetGPRImm(inst.src1));
++	else if (regs_.IsGPRMapped(inst.src1))
++		MOV(SCRATCH1, regs_.R(inst.src1));
++	else
++		LDR(INDEX_UNSIGNED, SCRATCH1, CTXREG, regs_.GetIRRegOffset(inst.src1));
++	ADDI2R(SCRATCH1, SCRATCH1, inst.constant, SCRATCH2);
++	STR(INDEX_UNSIGNED, SCRATCH1, CTXREG, offsetof(MIPSState, temp));
++	regs_.FlushAll();
++	LDR(INDEX_UNSIGNED, SCRATCH1, CTXREG, offsetof(MIPSState, temp));
++
++	std::vector<FixupBranch> fallbackJumps;
++	if (alignment == 2)
++		fallbackJumps.push_back(TBNZ(SCRATCH1, 0));
++	else if (alignment != 1) {
++		TSTI2R(SCRATCH1, alignment - 1, SCRATCH2);
++		fallbackJumps.push_back(B(CC_NEQ));
++	}
++	LSR(SCRATCH2, SCRATCH1, 12);
++	LSL(SCRATCH2_64, SCRATCH2_64, 3);
++	LDR(SCRATCH2_64, MEMBASEREG, ArithOption(SCRATCH2_64));
++	fallbackJumps.push_back(CBZ(SCRATCH2_64));
++	FixupBranch done = B();
++	for (FixupBranch &fallback : fallbackJumps)
++		SetJumpTarget(fallback);
++	MOV(W0, SCRATCH1);
++	MOVI2R(W1, alignment);
++	MOVI2R(W2, isWrite ? 1 : 0);
++	SaveStaticRegisters();
++	QuickCallFunction(SCRATCH2_64, &ppssppShimValidateAddress);
++	LoadStaticRegisters();
++	CBNZ(W0, dispatcherCheckCoreState_);
++	SetJumpTarget(done);
++	return;
++#endif
++
+diff --git a/Core/MIPS/ARM64/Arm64IRJit.cpp b/Core/MIPS/ARM64/Arm64IRJit.cpp
+index f9b206f..5307e64 100644
+--- a/Core/MIPS/ARM64/Arm64IRJit.cpp
++++ b/Core/MIPS/ARM64/Arm64IRJit.cpp
+@@ -26,0 +27,3 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
+@@ -278,0 +282,3 @@ void Arm64JitBackend::CompIR_Interpret(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	QuickCallFunction(SCRATCH2_64, &ppssppShimInterpretFallback);
++#else
+@@ -279,0 +286 @@ void Arm64JitBackend::CompIR_Interpret(IRInst inst) {
++#endif
+diff --git a/Core/MIPS/ARM64/Arm64IRRegCache.h b/Core/MIPS/ARM64/Arm64IRRegCache.h
+index f3f0b58..a428ba6 100644
+--- a/Core/MIPS/ARM64/Arm64IRRegCache.h
++++ b/Core/MIPS/ARM64/Arm64IRRegCache.h
+@@ -68,0 +69 @@ public:
++	int GetIRRegOffset(IRReg reg) { return GetMipsRegOffset(reg); }
+diff --git a/Core/MIPS/IR/IRCompALU.cpp b/Core/MIPS/IR/IRCompALU.cpp
+index d3813ba..c16b174 100644
+--- a/Core/MIPS/IR/IRCompALU.cpp
++++ b/Core/MIPS/IR/IRCompALU.cpp
+@@ -99,0 +100 @@ void IRFrontend::Comp_RType2(MIPSOpcode op) {
++	case 32: // MIPS32 SPECIAL2 clz.
+@@ -102,0 +104 @@ void IRFrontend::Comp_RType2(MIPSOpcode op) {
++	case 33: // MIPS32 SPECIAL2 clo.
+@@ -178,0 +181,4 @@ void IRFrontend::Comp_RType3(MIPSOpcode op) {
++	case 2: // MIPS32 SPECIAL2 mul: R(rd) = low32(R(rs) * R(rt)).
++		ir.Write(IROp::MulLow, rd, rs, rt);
++		break;
++
+@@ -378,0 +385 @@ void IRFrontend::Comp_MulDivType(MIPSOpcode op) {
++	case 0: // MIPS32 SPECIAL2 madd.
+@@ -382,0 +390 @@ void IRFrontend::Comp_MulDivType(MIPSOpcode op) {
++	case 1: // MIPS32 SPECIAL2 maddu.
+@@ -386,0 +395 @@ void IRFrontend::Comp_MulDivType(MIPSOpcode op) {
++	case 4: // MIPS32 SPECIAL2 msub.
+@@ -390,0 +400 @@ void IRFrontend::Comp_MulDivType(MIPSOpcode op) {
++	case 5: // MIPS32 SPECIAL2 msubu.
+diff --git a/Core/MIPS/IR/IRInst.cpp b/Core/MIPS/IR/IRInst.cpp
+index 62f6375..7256670 100644
+--- a/Core/MIPS/IR/IRInst.cpp
++++ b/Core/MIPS/IR/IRInst.cpp
+@@ -37,0 +38 @@ static const IRMeta irMeta[] = {
++	{ IROp::MulLow, "MulLow", "GGG" },
+diff --git a/Core/MIPS/IR/IRInst.h b/Core/MIPS/IR/IRInst.h
+index 4348d52..7a4e4f7 100644
+--- a/Core/MIPS/IR/IRInst.h
++++ b/Core/MIPS/IR/IRInst.h
+@@ -36,0 +37 @@ enum class IROp : uint8_t {
++	MulLow,
+diff --git a/Core/MIPS/IR/IRInterpreter.cpp b/Core/MIPS/IR/IRInterpreter.cpp
+index ac8bd08..33ffd6d 100644
+--- a/Core/MIPS/IR/IRInterpreter.cpp
++++ b/Core/MIPS/IR/IRInterpreter.cpp
+@@ -187,0 +188,3 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst) {
++		case IROp::MulLow:
++			mips->r[inst->dest] = mips->r[inst->src1] * mips->r[inst->src2];
++			break;
+diff --git a/Core/MIPS/IR/IRJit.cpp b/Core/MIPS/IR/IRJit.cpp
+index f495d4f..c86646c 100644
+--- a/Core/MIPS/IR/IRJit.cpp
++++ b/Core/MIPS/IR/IRJit.cpp
+@@ -46,0 +47,4 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
++
+@@ -187,0 +192,14 @@ void IRJit::RunLoopUntil(u64 globalticks) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++			// Dingoo SDK calls are installed as per-PC hooks. The standalone
++			// interpreter checks hooks before every instruction; the IR block
++			// dispatcher must do the same at block boundaries or SDK HLE calls
++			// such as malloc, LCD submit, input and file I/O can be skipped.
++			u32 hookPC = mips->pc;
++			u32 afterHookPC = ppssppShimRunCodeHook(hookPC);
++			if (coreState != 0) {
++				break;
++			}
++			if (afterHookPC != hookPC || mips->pc != hookPC) {
++				continue;
++			}
++#endif
+diff --git a/Core/MIPS/IR/IRNativeCommon.cpp b/Core/MIPS/IR/IRNativeCommon.cpp
+index 3197d8c..1190b32 100644
+--- a/Core/MIPS/IR/IRNativeCommon.cpp
++++ b/Core/MIPS/IR/IRNativeCommon.cpp
+@@ -216,0 +217 @@ void IRNativeBackend::CompileIRInst(IRInst inst) {
++	case IROp::MulLow:
+diff --git a/Core/MIPS/IR/IRPassSimplify.cpp b/Core/MIPS/IR/IRPassSimplify.cpp
+index 30b96a2..657b3cf 100644
+--- a/Core/MIPS/IR/IRPassSimplify.cpp
++++ b/Core/MIPS/IR/IRPassSimplify.cpp
+@@ -25,0 +26 @@ u32 Evaluate(u32 a, u32 b, IROp op) {
++	case IROp::MulLow: return a * b;
+@@ -190,0 +192 @@ bool ThreeOpToTwoOp(const IRWriter &in, IRWriter &out, const IROptions &opts) {
++		case IROp::MulLow:
+@@ -492,0 +495 @@ bool PropagateConstants(const IRWriter &in, IRWriter &out, const IROptions &opts
++		case IROp::MulLow:
+@@ -509,0 +513,3 @@ bool PropagateConstants(const IRWriter &in, IRWriter &out, const IROptions &opts
++				} else if (inst.op == IROp::MulLow) {
++					out.Write(IROp::SetConst, IRTEMP_0, out.AddConstant(imm2));
++					out.Write(IROp::MulLow, inst.dest, inst.src1, IRTEMP_0);
+@@ -519,0 +526,3 @@ bool PropagateConstants(const IRWriter &in, IRWriter &out, const IROptions &opts
++				} else if (inst.op == IROp::MulLow) {
++					out.Write(IROp::SetConst, IRTEMP_0, out.AddConstant(imm1));
++					out.Write(IROp::MulLow, inst.dest, IRTEMP_0, inst.src2);
+@@ -1527,0 +1537 @@ bool ReorderLoadStore(const IRWriter &in, IRWriter &out, const IROptions &opts)
++		case IROp::MulLow:
+diff --git a/Core/MIPS/MIPSTables.cpp b/Core/MIPS/MIPSTables.cpp
+index 4e3e820..e594fce 100644
+--- a/Core/MIPS/MIPSTables.cpp
++++ b/Core/MIPS/MIPSTables.cpp
+@@ -155 +155 @@ static const MIPSInstruction tableImmediate[64] = // xxxxxx ..... ..... ........
+-	INVALID,
++	INSTR("pref", JITFUNC(Comp_DoNothing), Dis_ITypeMem, Int_Sync, IN_MEM|IN_IMM16|IN_RS_ADDR),
+@@ -252,2 +252,7 @@ static const MIPSInstruction tableSpecial2[64] = // 011100 ..... ..... ..... ...
+-	INSTR("halt", JITFUNC(Comp_Generic), Dis_Generic, 0, 0),
+-	INVALID, INVALID, INVALID, INVALID, INVALID, INVALID, INVALID,
++	INSTR("madd", JITFUNC(Comp_MulDivType), Dis_MulDivType, Int_MulDivType, IN_RS|IN_RT|IN_HI|IN_LO|OUT_HI|OUT_LO),
++	INSTR("maddu", JITFUNC(Comp_MulDivType), Dis_MulDivType, Int_MulDivType, IN_RS|IN_RT|IN_HI|IN_LO|OUT_HI|OUT_LO),
++	INSTR("mul", JITFUNC(Comp_RType3), Dis_RType3, Int_RType3, IN_RS|IN_RT|OUT_RD),
++	INVALID,
++	INSTR("msub", JITFUNC(Comp_MulDivType), Dis_MulDivType, Int_MulDivType, IN_RS|IN_RT|IN_HI|IN_LO|OUT_HI|OUT_LO),
++	INSTR("msubu", JITFUNC(Comp_MulDivType), Dis_MulDivType, Int_MulDivType, IN_RS|IN_RT|IN_HI|IN_LO|OUT_HI|OUT_LO),
++	INVALID, INVALID,
+@@ -259 +264,3 @@ static const MIPSInstruction tableSpecial2[64] = // 011100 ..... ..... ..... ...
+-	INVALID, INVALID, INVALID, INVALID,
++	INSTR("clz", JITFUNC(Comp_RType2), Dis_RType2, Int_RType2, OUT_RD|IN_RS),
++	INSTR("clo", JITFUNC(Comp_RType2), Dis_RType2, Int_RType2, OUT_RD|IN_RS),
++	INVALID, INVALID,
+diff --git a/Core/MIPS/x86/X64IRAsm.cpp b/Core/MIPS/x86/X64IRAsm.cpp
+index 5cf4136..e13112d 100644
+--- a/Core/MIPS/x86/X64IRAsm.cpp
++++ b/Core/MIPS/x86/X64IRAsm.cpp
+@@ -28,0 +29,3 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
+@@ -227,0 +231,30 @@ void X64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++			if (ppssppShimCodeHookPageMap()) {
++#if PPSSPP_ARCH(AMD64)
++				MOV(32, R(R8), R(SCRATCH1));
++				SHR(32, R(R8), Imm8(12));
++				MOV(64, R(R10), ImmPtr(ppssppShimCodeHookPageMap()));
++				MOVZX(32, 8, R8, MComplex(R10, R8, SCALE_1, 0));
++				TEST(32, R(R8), R(R8));
++#else
++				MOV(32, R(ECX), R(SCRATCH1));
++				SHR(32, R(ECX), Imm8(12));
++				MOV(PTRBITS, R(EDX), ImmPtr(ppssppShimCodeHookPageMap()));
++				MOVZX(32, 8, ECX, MComplex(EDX, ECX, SCALE_1, 0));
++				TEST(32, R(ECX), R(ECX));
++#endif
++				FixupBranch skipCodeHook = J_CC(CC_Z);
++				SaveStaticRegisters();
++				ABI_CallFunctionR(reinterpret_cast<void *>(&ppssppShimRunCodeHook), SCRATCH1);
++				MovToPC(SCRATCH1);
++				LoadStaticRegisters();
++				MovFromPC(SCRATCH1);
++				SetJumpTarget(skipCodeHook);
++			} else {
++				SaveStaticRegisters();
++				ABI_CallFunctionR(reinterpret_cast<void *>(&ppssppShimRunCodeHook), SCRATCH1);
++				MovToPC(SCRATCH1);
++				LoadStaticRegisters();
++				MovFromPC(SCRATCH1);
++			}
++#endif
+@@ -231,0 +265,33 @@ void X64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++			if (ppssppShimFastPageBases()) {
++#if PPSSPP_ARCH(AMD64)
++				MOV(32, R(R8), R(SCRATCH1));
++				SHR(32, R(R8), Imm8(12));
++				MOV(64, R(R10), ImmPtr(ppssppShimFastPageBases()));
++				MOV(64, R(R10), MComplex(R10, R8, SCALE_8, 0));
++				TEST(64, R(R10), R(R10));
++				FixupBranch fallbackRead = J_CC(CC_Z);
++				MOV(32, R(SCRATCH1), MComplex(R10, SCRATCH1, SCALE_1, 0));
++#else
++				MOV(32, R(ECX), R(SCRATCH1));
++				SHR(32, R(ECX), Imm8(12));
++				MOV(PTRBITS, R(EDX), ImmPtr(ppssppShimFastPageBases()));
++				MOV(PTRBITS, R(EDX), MComplex(EDX, ECX, SCALE_4, 0));
++				TEST(PTRBITS, R(EDX), R(EDX));
++				FixupBranch fallbackRead = J_CC(CC_Z);
++				MOV(32, R(SCRATCH1), MComplex(EDX, SCRATCH1, SCALE_1, 0));
++#endif
++				FixupBranch doneRead = J();
++				SetJumpTarget(fallbackRead);
++				SaveStaticRegisters();
++				ABI_CallFunctionR(reinterpret_cast<void *>(&ppssppShimRead32), SCRATCH1);
++				LoadStaticRegisters();
++				MOV(32, R(SCRATCH1), R(EAX));
++				SetJumpTarget(doneRead);
++			} else {
++				SaveStaticRegisters();
++				ABI_CallFunctionR(reinterpret_cast<void *>(&ppssppShimRead32), SCRATCH1);
++				LoadStaticRegisters();
++				MOV(32, R(SCRATCH1), R(EAX));
++			}
++#else
+@@ -236,0 +303 @@ void X64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
++#endif
+diff --git a/Core/MIPS/x86/X64IRCompALU.cpp b/Core/MIPS/x86/X64IRCompALU.cpp
+index 66fe205..eedb099 100644
+--- a/Core/MIPS/x86/X64IRCompALU.cpp
++++ b/Core/MIPS/x86/X64IRCompALU.cpp
+@@ -592,0 +593,12 @@ void X64JitBackend::CompIR_Logic(IRInst inst) {
++	case IROp::MulLow:
++		regs_.Map(inst);
++		if (inst.dest == inst.src1) {
++			IMUL(32, regs_.RX(inst.dest), regs_.R(inst.src2));
++		} else if (inst.dest == inst.src2) {
++			IMUL(32, regs_.RX(inst.dest), regs_.R(inst.src1));
++		} else {
++			MOV(32, regs_.R(inst.dest), regs_.R(inst.src1));
++			IMUL(32, regs_.RX(inst.dest), regs_.R(inst.src2));
++		}
++		break;
++
+diff --git a/Core/MIPS/x86/X64IRCompBranch.cpp b/Core/MIPS/x86/X64IRCompBranch.cpp
+index a3e4631..36cb4a8 100644
+--- a/Core/MIPS/x86/X64IRCompBranch.cpp
++++ b/Core/MIPS/x86/X64IRCompBranch.cpp
+@@ -51 +50,0 @@ void X64JitBackend::CompIR_Exit(IRInst inst) {
+-		FlushAll();
+@@ -52,0 +52,3 @@ void X64JitBackend::CompIR_Exit(IRInst inst) {
++		FlushAll();
++		MovToPC(SCRATCH1);
++		SaveStaticRegisters();
+diff --git a/Core/MIPS/x86/X64IRCompLoadStore.cpp b/Core/MIPS/x86/X64IRCompLoadStore.cpp
+index 9b3eea1..51e2e86 100644
+--- a/Core/MIPS/x86/X64IRCompLoadStore.cpp
++++ b/Core/MIPS/x86/X64IRCompLoadStore.cpp
+@@ -23,0 +24,3 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
+@@ -30,0 +34,3 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#define CONDITIONAL_DISABLE { CompIR_Generic(inst); return; }
++#else
+@@ -31,0 +38 @@
++#endif
+@@ -119,0 +127,54 @@ void X64JitBackend::CompIR_FLoad(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	FlushAll();
++	MOV(32, R(SCRATCH1), MDisp(CTXREG, -128 + inst.src1 * 4));
++	if (inst.constant != 0) {
++		ADD(32, R(SCRATCH1), Imm32(inst.constant));
++	}
++
++	if (ppssppShimFastPageBases()) {
++		FixupBranch fallbackCrossPage;
++#if PPSSPP_ARCH(AMD64)
++		MOV(32, R(R8), R(SCRATCH1));
++		AND(32, R(R8), Imm32(0xFFF));
++		CMP(32, R(R8), Imm32(0xFFC));
++		fallbackCrossPage = J_CC(CC_A);
++
++		MOV(32, R(R8), R(SCRATCH1));
++		SHR(32, R(R8), Imm8(12));
++		MOV(64, R(R10), ImmPtr(ppssppShimFastPageBases()));
++		MOV(64, R(R10), MComplex(R10, R8, SCALE_8, 0));
++		TEST(64, R(R10), R(R10));
++		FixupBranch fallbackUnmapped = J_CC(CC_Z);
++		MOV(32, R(SCRATCH1), MComplex(R10, SCRATCH1, SCALE_1, 0));
++#else
++		MOV(32, R(ECX), R(SCRATCH1));
++		AND(32, R(ECX), Imm32(0xFFF));
++		CMP(32, R(ECX), Imm32(0xFFC));
++		fallbackCrossPage = J_CC(CC_A);
++
++		MOV(32, R(ECX), R(SCRATCH1));
++		SHR(32, R(ECX), Imm8(12));
++		MOV(PTRBITS, R(EDX), ImmPtr(ppssppShimFastPageBases()));
++		MOV(PTRBITS, R(EDX), MComplex(EDX, ECX, SCALE_4, 0));
++		TEST(PTRBITS, R(EDX), R(EDX));
++		FixupBranch fallbackUnmapped = J_CC(CC_Z);
++		MOV(32, R(SCRATCH1), MComplex(EDX, SCRATCH1, SCALE_1, 0));
++#endif
++
++		FixupBranch doneFastLoad = J();
++		SetJumpTarget(fallbackCrossPage);
++		SetJumpTarget(fallbackUnmapped);
++		SaveStaticRegisters();
++		ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead32), SCRATCH1);
++		LoadStaticRegisters();
++		SetJumpTarget(doneFastLoad);
++	} else {
++		SaveStaticRegisters();
++		ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead32), SCRATCH1);
++		LoadStaticRegisters();
++	}
++
++	regs_.MapFPR(inst.dest, MIPSMap::NOINIT);
++	MOVD_xmm(regs_.FX(inst.dest), R(SCRATCH1));
++	return;
++#endif
+@@ -136,0 +198,52 @@ void X64JitBackend::CompIR_FStore(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	FlushAll();
++	MOV(32, R(SCRATCH1), MDisp(CTXREG, -128 + inst.src1 * 4));
++	if (inst.constant != 0) {
++		ADD(32, R(SCRATCH1), Imm32(inst.constant));
++	}
++	MOV(32, R(EDX), MDisp(CTXREG, -128 + (inst.src3 + 32) * 4));
++
++	if (ppssppShimFastPageBases()) {
++		FixupBranch fallbackCrossPage;
++#if PPSSPP_ARCH(AMD64)
++		MOV(32, R(R8), R(SCRATCH1));
++		AND(32, R(R8), Imm32(0xFFF));
++		CMP(32, R(R8), Imm32(0xFFC));
++		fallbackCrossPage = J_CC(CC_A);
++
++		MOV(32, R(R8), R(SCRATCH1));
++		SHR(32, R(R8), Imm8(12));
++		MOV(64, R(R10), ImmPtr(ppssppShimFastPageBases()));
++		MOV(64, R(R10), MComplex(R10, R8, SCALE_8, 0));
++		TEST(64, R(R10), R(R10));
++		FixupBranch fallbackUnmapped = J_CC(CC_Z);
++		MOV(32, MComplex(R10, SCRATCH1, SCALE_1, 0), R(EDX));
++#else
++		MOV(32, R(ECX), R(SCRATCH1));
++		AND(32, R(ECX), Imm32(0xFFF));
++		CMP(32, R(ECX), Imm32(0xFFC));
++		fallbackCrossPage = J_CC(CC_A);
++
++		MOV(32, R(ECX), R(SCRATCH1));
++		SHR(32, R(ECX), Imm8(12));
++		MOV(PTRBITS, R(EAX), ImmPtr(ppssppShimFastPageBases()));
++		MOV(PTRBITS, R(EAX), MComplex(EAX, ECX, SCALE_4, 0));
++		TEST(PTRBITS, R(EAX), R(EAX));
++		FixupBranch fallbackUnmapped = J_CC(CC_Z);
++		MOV(32, MComplex(EAX, SCRATCH1, SCALE_1, 0), R(EDX));
++#endif
++
++		FixupBranch doneFastStore = J();
++		SetJumpTarget(fallbackCrossPage);
++		SetJumpTarget(fallbackUnmapped);
++		SaveStaticRegisters();
++		ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite32), SCRATCH1, EDX);
++		LoadStaticRegisters();
++		SetJumpTarget(doneFastStore);
++	} else {
++		SaveStaticRegisters();
++		ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite32), SCRATCH1, EDX);
++		LoadStaticRegisters();
++	}
++	return;
++#endif
+@@ -153,0 +267,180 @@ void X64JitBackend::CompIR_Load(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	switch (inst.op) {
++	case IROp::Load8:
++	case IROp::Load8Ext:
++	case IROp::Load16:
++	case IROp::Load16Ext:
++	case IROp::Load32:
++	case IROp::Load32Linked:
++		break;
++	default:
++		CompIR_Generic(inst);
++		return;
++	}
++
++	FlushAll();
++	MOV(32, R(SCRATCH1), MDisp(CTXREG, -128 + inst.src1 * 4));
++	if (inst.constant != 0) {
++		ADD(32, R(SCRATCH1), Imm32(inst.constant));
++	}
++
++#if PPSSPP_ARCH(AMD64)
++	if (ppssppShimFastPageBases()) {
++		const int accessSize =
++			(inst.op == IROp::Load8 || inst.op == IROp::Load8Ext) ? 1 :
++			(inst.op == IROp::Load16 || inst.op == IROp::Load16Ext) ? 2 : 4;
++
++		FixupBranch fallbackCrossPage;
++		if (accessSize > 1) {
++			MOV(32, R(R8), R(SCRATCH1));
++			AND(32, R(R8), Imm32(0xFFF));
++			CMP(32, R(R8), Imm32(0x1000 - accessSize));
++			fallbackCrossPage = J_CC(CC_A);
++		}
++
++		MOV(32, R(R8), R(SCRATCH1));
++		SHR(32, R(R8), Imm8(12));
++		MOV(64, R(R10), ImmPtr(ppssppShimFastPageBases()));
++		MOV(64, R(R10), MComplex(R10, R8, SCALE_8, 0));
++		TEST(64, R(R10), R(R10));
++		FixupBranch fallbackUnmapped = J_CC(CC_Z);
++
++		switch (inst.op) {
++		case IROp::Load8:
++		case IROp::Load8Ext:
++			MOVZX(32, 8, SCRATCH1, MComplex(R10, SCRATCH1, SCALE_1, 0));
++			break;
++		case IROp::Load16:
++		case IROp::Load16Ext:
++			MOVZX(32, 16, SCRATCH1, MComplex(R10, SCRATCH1, SCALE_1, 0));
++			break;
++		case IROp::Load32:
++		case IROp::Load32Linked:
++			MOV(32, R(SCRATCH1), MComplex(R10, SCRATCH1, SCALE_1, 0));
++			break;
++		default:
++			break;
++		}
++
++		FixupBranch doneFastLoad = J();
++		if (accessSize > 1) {
++			SetJumpTarget(fallbackCrossPage);
++		}
++		SetJumpTarget(fallbackUnmapped);
++		SaveStaticRegisters();
++		switch (inst.op) {
++		case IROp::Load8:
++		case IROp::Load8Ext:
++			ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead8), SCRATCH1);
++			break;
++		case IROp::Load16:
++		case IROp::Load16Ext:
++			ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead16), SCRATCH1);
++			break;
++		case IROp::Load32:
++		case IROp::Load32Linked:
++			ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead32), SCRATCH1);
++			break;
++		default:
++			break;
++		}
++		LoadStaticRegisters();
++		SetJumpTarget(doneFastLoad);
++	} else
++#elif PPSSPP_ARCH(X86)
++	if (ppssppShimFastPageBases()) {
++		const int accessSize =
++			(inst.op == IROp::Load8 || inst.op == IROp::Load8Ext) ? 1 :
++			(inst.op == IROp::Load16 || inst.op == IROp::Load16Ext) ? 2 : 4;
++
++		FixupBranch fallbackCrossPage;
++		if (accessSize > 1) {
++			MOV(32, R(ECX), R(SCRATCH1));
++			AND(32, R(ECX), Imm32(0xFFF));
++			CMP(32, R(ECX), Imm32(0x1000 - accessSize));
++			fallbackCrossPage = J_CC(CC_A);
++		}
++
++		MOV(32, R(ECX), R(SCRATCH1));
++		SHR(32, R(ECX), Imm8(12));
++		MOV(PTRBITS, R(EDX), ImmPtr(ppssppShimFastPageBases()));
++		MOV(PTRBITS, R(EDX), MComplex(EDX, ECX, SCALE_4, 0));
++		TEST(PTRBITS, R(EDX), R(EDX));
++		FixupBranch fallbackUnmapped = J_CC(CC_Z);
++
++		switch (inst.op) {
++		case IROp::Load8:
++		case IROp::Load8Ext:
++			MOVZX(32, 8, SCRATCH1, MComplex(EDX, SCRATCH1, SCALE_1, 0));
++			break;
++		case IROp::Load16:
++		case IROp::Load16Ext:
++			MOVZX(32, 16, SCRATCH1, MComplex(EDX, SCRATCH1, SCALE_1, 0));
++			break;
++		case IROp::Load32:
++		case IROp::Load32Linked:
++			MOV(32, R(SCRATCH1), MComplex(EDX, SCRATCH1, SCALE_1, 0));
++			break;
++		default:
++			break;
++		}
++
++		FixupBranch doneFastLoad = J();
++		if (accessSize > 1) {
++			SetJumpTarget(fallbackCrossPage);
++		}
++		SetJumpTarget(fallbackUnmapped);
++		SaveStaticRegisters();
++		switch (inst.op) {
++		case IROp::Load8:
++		case IROp::Load8Ext:
++			ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead8), SCRATCH1);
++			break;
++		case IROp::Load16:
++		case IROp::Load16Ext:
++			ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead16), SCRATCH1);
++			break;
++		case IROp::Load32:
++		case IROp::Load32Linked:
++			ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead32), SCRATCH1);
++			break;
++		default:
++			break;
++		}
++		LoadStaticRegisters();
++		SetJumpTarget(doneFastLoad);
++	} else
++#endif
++	{
++	SaveStaticRegisters();
++	switch (inst.op) {
++	case IROp::Load8:
++	case IROp::Load8Ext:
++		ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead8), SCRATCH1);
++		break;
++	case IROp::Load16:
++	case IROp::Load16Ext:
++		ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead16), SCRATCH1);
++		break;
++	case IROp::Load32:
++	case IROp::Load32Linked:
++		ABI_CallFunctionR(reinterpret_cast<const void *>(&ppssppShimRead32), SCRATCH1);
++		break;
++	default:
++		break;
++	}
++	LoadStaticRegisters();
++	}
++	if (inst.op == IROp::Load8Ext) {
++		MOVSX(32, 8, SCRATCH1, R(SCRATCH1));
++	} else if (inst.op == IROp::Load16Ext) {
++		MOVSX(32, 16, SCRATCH1, R(SCRATCH1));
++	}
++	if (inst.dest != MIPS_REG_ZERO) {
++		MOV(32, MDisp(CTXREG, -128 + inst.dest * 4), R(SCRATCH1));
++	}
++	if (inst.op == IROp::Load32Linked) {
++		MOV(32, MDisp(CTXREG, -128 + IRREG_LLBIT * 4), Imm32(1));
++	}
++	return;
++#endif
+@@ -212,0 +506,156 @@ void X64JitBackend::CompIR_Store(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	switch (inst.op) {
++	case IROp::Store8:
++	case IROp::Store16:
++	case IROp::Store32:
++		break;
++	default:
++		CompIR_Generic(inst);
++		return;
++	}
++
++	FlushAll();
++	MOV(32, R(SCRATCH1), MDisp(CTXREG, -128 + inst.src1 * 4));
++	if (inst.constant != 0) {
++		ADD(32, R(SCRATCH1), Imm32(inst.constant));
++	}
++	MOV(32, R(EDX), MDisp(CTXREG, -128 + inst.src3 * 4));
++
++#if PPSSPP_ARCH(AMD64)
++	if (ppssppShimFastPageBases()) {
++		const int accessSize =
++			inst.op == IROp::Store8 ? 1 :
++			inst.op == IROp::Store16 ? 2 : 4;
++
++		FixupBranch fallbackCrossPage;
++		if (accessSize > 1) {
++			MOV(32, R(R8), R(SCRATCH1));
++			AND(32, R(R8), Imm32(0xFFF));
++			CMP(32, R(R8), Imm32(0x1000 - accessSize));
++			fallbackCrossPage = J_CC(CC_A);
++		}
++
++		MOV(32, R(R8), R(SCRATCH1));
++		SHR(32, R(R8), Imm8(12));
++		MOV(64, R(R10), ImmPtr(ppssppShimFastPageBases()));
++		MOV(64, R(R10), MComplex(R10, R8, SCALE_8, 0));
++		TEST(64, R(R10), R(R10));
++		FixupBranch fallbackUnmapped = J_CC(CC_Z);
++
++		switch (inst.op) {
++		case IROp::Store8:
++			MOV(8, MComplex(R10, SCRATCH1, SCALE_1, 0), R(EDX));
++			break;
++		case IROp::Store16:
++			MOV(16, MComplex(R10, SCRATCH1, SCALE_1, 0), R(EDX));
++			break;
++		case IROp::Store32:
++			MOV(32, MComplex(R10, SCRATCH1, SCALE_1, 0), R(EDX));
++			break;
++		default:
++			break;
++		}
++
++		FixupBranch doneFastStore = J();
++		if (accessSize > 1) {
++			SetJumpTarget(fallbackCrossPage);
++		}
++		SetJumpTarget(fallbackUnmapped);
++		SaveStaticRegisters();
++		switch (inst.op) {
++		case IROp::Store8:
++			ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite8), SCRATCH1, EDX);
++			break;
++		case IROp::Store16:
++			ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite16), SCRATCH1, EDX);
++			break;
++		case IROp::Store32:
++			ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite32), SCRATCH1, EDX);
++			break;
++		default:
++			break;
++		}
++		LoadStaticRegisters();
++		SetJumpTarget(doneFastStore);
++		return;
++	} else
++#elif PPSSPP_ARCH(X86)
++	if (ppssppShimFastPageBases()) {
++		const int accessSize =
++			inst.op == IROp::Store8 ? 1 :
++			inst.op == IROp::Store16 ? 2 : 4;
++
++		FixupBranch fallbackCrossPage;
++		if (accessSize > 1) {
++			MOV(32, R(ECX), R(SCRATCH1));
++			AND(32, R(ECX), Imm32(0xFFF));
++			CMP(32, R(ECX), Imm32(0x1000 - accessSize));
++			fallbackCrossPage = J_CC(CC_A);
++		}
++
++		MOV(32, R(ECX), R(SCRATCH1));
++		SHR(32, R(ECX), Imm8(12));
++		MOV(PTRBITS, R(EDX), ImmPtr(ppssppShimFastPageBases()));
++		MOV(PTRBITS, R(EDX), MComplex(EDX, ECX, SCALE_4, 0));
++		TEST(PTRBITS, R(EDX), R(EDX));
++		FixupBranch fallbackUnmapped = J_CC(CC_Z);
++		MOV(32, R(ECX), MDisp(CTXREG, -128 + inst.src3 * 4));
++
++		switch (inst.op) {
++		case IROp::Store8:
++			MOV(8, MComplex(EDX, SCRATCH1, SCALE_1, 0), R(ECX));
++			break;
++		case IROp::Store16:
++			MOV(16, MComplex(EDX, SCRATCH1, SCALE_1, 0), R(ECX));
++			break;
++		case IROp::Store32:
++			MOV(32, MComplex(EDX, SCRATCH1, SCALE_1, 0), R(ECX));
++			break;
++		default:
++			break;
++		}
++
++		FixupBranch doneFastStore = J();
++		if (accessSize > 1) {
++			SetJumpTarget(fallbackCrossPage);
++		}
++		SetJumpTarget(fallbackUnmapped);
++		MOV(32, R(EDX), MDisp(CTXREG, -128 + inst.src3 * 4));
++		SaveStaticRegisters();
++		switch (inst.op) {
++		case IROp::Store8:
++			ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite8), SCRATCH1, EDX);
++			break;
++		case IROp::Store16:
++			ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite16), SCRATCH1, EDX);
++			break;
++		case IROp::Store32:
++			ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite32), SCRATCH1, EDX);
++			break;
++		default:
++			break;
++		}
++		LoadStaticRegisters();
++		SetJumpTarget(doneFastStore);
++		return;
++	} else
++#endif
++	{
++	SaveStaticRegisters();
++	switch (inst.op) {
++	case IROp::Store8:
++		ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite8), SCRATCH1, EDX);
++		break;
++	case IROp::Store16:
++		ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite16), SCRATCH1, EDX);
++		break;
++	case IROp::Store32:
++		ABI_CallFunctionRR(reinterpret_cast<const void *>(&ppssppShimWrite32), SCRATCH1, EDX);
++		break;
++	default:
++		break;
++	}
++	LoadStaticRegisters();
++	}
++	return;
++#endif
+diff --git a/Core/MIPS/x86/X64IRCompSystem.cpp b/Core/MIPS/x86/X64IRCompSystem.cpp
+index b137ee1..acde182 100644
+--- a/Core/MIPS/x86/X64IRCompSystem.cpp
++++ b/Core/MIPS/x86/X64IRCompSystem.cpp
+@@ -383,0 +384,38 @@ void X64JitBackend::CompIR_ValidateAddress(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	regs_.Map(inst);
++	LEA(32, SCRATCH1, MDisp(regs_.RX(inst.src1), inst.constant));
++	MOV(32, MDisp(CTXREG, tempOffset), R(SCRATCH1));
++	FlushAll();
++	MOV(32, R(SCRATCH1), MDisp(CTXREG, tempOffset));
++	std::vector<FixupBranch> fallbackJumps;
++	if (alignment != 1) {
++		TEST(32, R(SCRATCH1), Imm32(alignment - 1));
++		fallbackJumps.push_back(J_CC(CC_NZ));
++	}
++#if PPSSPP_ARCH(AMD64)
++	MOV(32, R(R8), R(SCRATCH1));
++	SHR(32, R(R8), Imm8(12));
++	MOV(64, R(R10), ImmPtr(ppssppShimFastPageBases()));
++	MOV(64, R(R10), MComplex(R10, R8, SCALE_8, 0));
++	TEST(64, R(R10), R(R10));
++	fallbackJumps.push_back(J_CC(CC_Z));
++#else
++	MOV(32, R(ECX), R(SCRATCH1));
++	SHR(32, R(ECX), Imm8(12));
++	MOV(PTRBITS, R(EDX), ImmPtr(ppssppShimFastPageBases()));
++	MOV(PTRBITS, R(EDX), MComplex(EDX, ECX, SCALE_4, 0));
++	TEST(PTRBITS, R(EDX), R(EDX));
++	fallbackJumps.push_back(J_CC(CC_Z));
++#endif
++	FixupBranch done = J();
++	for (FixupBranch &fallback : fallbackJumps)
++		SetJumpTarget(fallback);
++	SaveStaticRegisters();
++	ABI_CallFunctionACC(reinterpret_cast<const void *>(&ppssppShimValidateAddress), MDisp(CTXREG, tempOffset), alignment, isWrite);
++	LoadStaticRegisters();
++	TEST(32, R(SCRATCH1), R(SCRATCH1));
++	J_CC(CC_NZ, dispatcherCheckCoreState_, true);
++	SetJumpTarget(done);
++	return;
++#endif
++
+diff --git a/Core/MIPS/x86/X64IRJit.cpp b/Core/MIPS/x86/X64IRJit.cpp
+index fbfcf9f..5b56b31 100644
+--- a/Core/MIPS/x86/X64IRJit.cpp
++++ b/Core/MIPS/x86/X64IRJit.cpp
+@@ -21,0 +22 @@
++#include <cstdlib>
+@@ -26,0 +28,3 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
+@@ -49,0 +54,14 @@ X64JitBackend::X64JitBackend(JitOptions &jitopt, IRBlockCache &blocks)
++
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	const char *trace = std::getenv("DINGOO_PIE_IRJIT_TRACE");
++	if (trace && trace[0] && trace[0] != '0') {
++		logBlocks_ = 8;
++	}
++	const char *logBlocks = std::getenv("DINGOO_PIE_IRJIT_LOG_BLOCKS");
++	if (logBlocks && logBlocks[0] && logBlocks[0] != '0') {
++		logBlocks_ = std::atoi(logBlocks);
++		if (logBlocks_ < 1) {
++			logBlocks_ = 1;
++		}
++	}
++#endif
+@@ -185,0 +204,2 @@ void X64JitBackend::WriteConstExit(uint32_t pc) {
++		MovToPC(SCRATCH1);
++		SaveStaticRegisters();
+@@ -258,0 +279,3 @@ void X64JitBackend::CompIR_Interpret(IRInst inst) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	ABI_CallFunctionC((const void *)&ppssppShimInterpretFallback, inst.constant);
++#else
+@@ -259,0 +283 @@ void X64JitBackend::CompIR_Interpret(IRInst inst) {
++#endif
+diff --git a/Core/MemMap.h b/Core/MemMap.h
+index 6e9fa3b..7f7a2d4 100644
+--- a/Core/MemMap.h
++++ b/Core/MemMap.h
+@@ -32,0 +33,4 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
++
+@@ -145,0 +150,3 @@ inline u8* GetPointerWriteUnchecked(const u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	return ppssppShimGetPointer(address, 1);
++#else
+@@ -150,0 +158 @@ inline u8* GetPointerWriteUnchecked(const u32 address) {
++#endif
+@@ -153,0 +162,3 @@ inline const u8* GetPointerUnchecked(const u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	return ppssppShimGetPointer(address, 1);
++#else
+@@ -158,0 +170 @@ inline const u8* GetPointerUnchecked(const u32 address) {
++#endif
+@@ -161,0 +174,3 @@ inline u32 ReadUnchecked_U32(const u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	return ppssppShimRead32(address);
++#else
+@@ -166,0 +182 @@ inline u32 ReadUnchecked_U32(const u32 address) {
++#endif
+@@ -169,0 +186,6 @@ inline float ReadUnchecked_Float(const u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	u32 value = ppssppShimRead32(address);
++	float f;
++	memcpy(&f, &value, sizeof(f));
++	return f;
++#else
+@@ -174,0 +197 @@ inline float ReadUnchecked_Float(const u32 address) {
++#endif
+@@ -177,0 +201,3 @@ inline u16 ReadUnchecked_U16(const u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	return (u16)ppssppShimRead16(address);
++#else
+@@ -182,0 +209 @@ inline u16 ReadUnchecked_U16(const u32 address) {
++#endif
+@@ -185,0 +213,3 @@ inline u8 ReadUnchecked_U8(const u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	return (u8)ppssppShimRead8(address);
++#else
+@@ -190,0 +221 @@ inline u8 ReadUnchecked_U8(const u32 address) {
++#endif
+@@ -193,0 +225,3 @@ inline void WriteUnchecked_U32(u32 data, u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	ppssppShimWrite32(address, data);
++#else
+@@ -198,0 +233 @@ inline void WriteUnchecked_U32(u32 data, u32 address) {
++#endif
+@@ -201,0 +237,5 @@ inline void WriteUnchecked_Float(float data, u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	u32 value;
++	memcpy(&value, &data, sizeof(value));
++	ppssppShimWrite32(address, value);
++#else
+@@ -206,0 +247 @@ inline void WriteUnchecked_Float(float data, u32 address) {
++#endif
+@@ -209,0 +251,3 @@ inline void WriteUnchecked_U16(u16 data, u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	ppssppShimWrite16(address, data);
++#else
+@@ -214,0 +259 @@ inline void WriteUnchecked_U16(u16 data, u32 address) {
++#endif
+@@ -217,0 +263,3 @@ inline void WriteUnchecked_U8(u8 data, u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	ppssppShimWrite8(address, data);
++#else
+@@ -222,0 +271 @@ inline void WriteUnchecked_U8(u8 data, u32 address) {
++#endif
+@@ -284,0 +334,3 @@ inline void MemcpyUnchecked(void *to_data, const u32 from_address, const u32 len
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	ppssppShimReadBlock(from_address, to_data, len);
++#else
+@@ -285,0 +338 @@ inline void MemcpyUnchecked(void *to_data, const u32 from_address, const u32 len
++#endif
+@@ -288,0 +342,3 @@ inline void MemcpyUnchecked(const u32 to_address, const void *from_data, const u
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	ppssppShimWriteBlock(to_address, from_data, len);
++#else
+@@ -289,0 +346 @@ inline void MemcpyUnchecked(const u32 to_address, const void *from_data, const u
++#endif
+@@ -292,0 +350,14 @@ inline void MemcpyUnchecked(const u32 to_address, const u32 from_address, const
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	u32 remaining = len;
++	u32 readAddress = from_address;
++	u32 writeAddress = to_address;
++	u8 buffer[256];
++	while (remaining) {
++		u32 chunk = remaining > sizeof(buffer) ? (u32)sizeof(buffer) : remaining;
++		ppssppShimReadBlock(readAddress, buffer, chunk);
++		ppssppShimWriteBlock(writeAddress, buffer, chunk);
++		readAddress += chunk;
++		writeAddress += chunk;
++		remaining -= chunk;
++	}
++#else
+@@ -293,0 +365 @@ inline void MemcpyUnchecked(const u32 to_address, const u32 from_address, const
++#endif
+@@ -296,0 +369,3 @@ inline bool IsValidAddress(const u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	return ppssppShimIsValidRange(address, 1) != 0;
++#else
+@@ -307,0 +383 @@ inline bool IsValidAddress(const u32 address) {
++#endif
+@@ -310,0 +387,3 @@ inline bool IsValid4AlignedAddress(const u32 address) {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	return ppssppShimIsValid4AlignedAddress(address) != 0;
++#else
+@@ -321,0 +401 @@ inline bool IsValid4AlignedAddress(const u32 address) {
++#endif
+@@ -324,0 +405,3 @@ inline u32 MaxSizeAtAddress(const u32 address){
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++	return ppssppShimMaxSizeAtAddress(address);
++#else
+@@ -339,0 +423 @@ inline u32 MaxSizeAtAddress(const u32 address){
++#endif
+diff --git a/Core/MIPS/ARM/ArmAsm.cpp b/Core/MIPS/ARM/ArmAsm.cpp
+index 6773e01..50bf1d0 100644
+--- a/Core/MIPS/ARM/ArmAsm.cpp
++++ b/Core/MIPS/ARM/ArmAsm.cpp
+@@ -29,0 +30,3 @@
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++#include "ppsspp_irjit_backend.h"
++#endif
+@@ -202,0 +206,4 @@ void ArmJit::GenerateFixedCode() {
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++			QuickCallFunction(R1, (void *)&ppssppShimRunCodeHook);
++			STR(R0, CTXREG, offsetof(MIPSState, pc));
++#endif
+@@ -206 +206,5 @@ void ArmJit::GenerateFixedCode() {
+-			LDR(R0, MEMBASEREG, R0);
++#ifdef DINGOO_PIE_DINGOO_MEMORY
++			QuickCallFunction(R1, (void *)&Memory::Read_U32);
++#else
++			LDR(R0, MEMBASEREG, R0);
++#endif

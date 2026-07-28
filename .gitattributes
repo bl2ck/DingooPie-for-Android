@@ -1,0 +1,4 @@
+* text=auto eol=crlf
+*.png binary
+*.jar binary
+*.pdf binary

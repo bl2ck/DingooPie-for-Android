@@ -1,0 +1,11 @@
+/.gradle/
+/app/build/
+/app/.cxx/
+/.tools/
+/third_party/
+/release/
+/test-results/
+*.apk
+*.aab
+*.log
+local.properties
