@@ -246,10 +246,12 @@ def calculate_metrics(audio, events):
     waits = []
     write_times = []
     write_bytes = []
+    input_events = []
     last_elapsed_ms = 0
     first_elapsed_ms = None
     zero_queue_writes = 0
     write_events = 0
+    device_buffer_bytes = 0
     for event in events:
         name = event.get("event", "")
         event_counts[name] = event_counts.get(name, 0) + 1
@@ -257,6 +259,10 @@ def calculate_metrics(audio, events):
         last_elapsed_ms = max(last_elapsed_ms, elapsed)
         if name == "wait":
             waits.append(int(event.get("wait_ms") or 0))
+        if name == "open":
+            device_buffer_bytes = int(event.get("bytes") or 0)
+        if name == "input":
+            input_events.append((elapsed, int(event.get("queued_bytes") or 0)))
         if name in ("queue", "pending"):
             write_times.append(elapsed)
             write_bytes.append(int(event.get("bytes") or 0))
@@ -278,6 +284,20 @@ def calculate_metrics(audio, events):
     bytes_per_second = sample_rate * audio["channels"] * audio["sample_width"]
     typical_bytes = sorted(write_bytes)[len(write_bytes) // 2] if write_bytes else 0
     typical_buffer_ms = typical_bytes * 1000.0 / bytes_per_second if bytes_per_second else 0.0
+    device_buffer_ms = (device_buffer_bytes * 1000.0 / bytes_per_second
+                        if bytes_per_second else 0.0)
+    input_response_ms = []
+    for input_elapsed, queued_bytes in input_events:
+        next_write = next((elapsed for elapsed in write_times if elapsed >= input_elapsed), None)
+        if next_write is not None and bytes_per_second:
+            queued_ms = queued_bytes * 1000.0 / bytes_per_second
+            input_response_ms.append(next_write - input_elapsed + queued_ms + device_buffer_ms)
+    sorted_input_response_ms = sorted(input_response_ms)
+    input_response_p50 = (sorted_input_response_ms[len(sorted_input_response_ms) // 2]
+                          if sorted_input_response_ms else 0.0)
+    input_response_p90 = (sorted_input_response_ms[
+        min(len(sorted_input_response_ms) - 1, int(len(sorted_input_response_ms) * 0.90))]
+        if sorted_input_response_ms else 0.0)
     warnings = []
     failures = []
     if event_counts.get("drop", 0):
@@ -327,6 +347,11 @@ def calculate_metrics(audio, events):
         "write_gap_p99_ms": gap_p99,
         "write_gap_max_ms": max(gaps, default=0),
         "typical_buffer_duration_ms": round(typical_buffer_ms, 3),
+        "device_buffer_duration_ms": round(device_buffer_ms, 3),
+        "input_response_count": len(input_response_ms),
+        "estimated_input_response_p50_ms": round(input_response_p50, 3),
+        "estimated_input_response_p90_ms": round(input_response_p90, 3),
+        "estimated_input_response_max_ms": round(max(input_response_ms, default=0.0), 3),
         "zero_queue_write_ratio": round(zero_queue_writes / write_events, 4)
                                   if write_events else 0.0,
         "event_counts": event_counts,

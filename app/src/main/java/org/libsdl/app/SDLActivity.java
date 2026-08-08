@@ -699,6 +699,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                 mSurface.handlePause();
             }
             mCurrentNativeState = mNextNativeState;
+            if (mSingleton != null) {
+                mSingleton.onNativeStateChanged(mCurrentNativeState);
+            }
             return;
         }
 
@@ -721,8 +724,14 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                 mSurface.handleResume();
 
                 mCurrentNativeState = mNextNativeState;
+                if (mSingleton != null) {
+                    mSingleton.onNativeStateChanged(mCurrentNativeState);
+                }
             }
         }
+    }
+
+    protected void onNativeStateChanged(NativeState state) {
     }
 
     // Messages from the SDLMain thread

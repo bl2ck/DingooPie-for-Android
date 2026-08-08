@@ -1,8 +1,8 @@
-# Android testing
+# Testing DingooPie Android
 
 Use the smallest relevant regression first, then run the APK and text-format checks before release.
 
-## APK validation
+## APK Validation
 
 Build a debug APK and verify the manifest plus all four native ABIs:
 
@@ -17,9 +17,11 @@ powershell -ExecutionPolicy Bypass -File scripts/test_android.ps1 `
     -ApkPath app/build/outputs/apk/release/DingooPie.apk
 ```
 
-## APP and CC runtime regression
+## APP And CC Runtime Regression
 
-`test_android_cc.ps1` runs the native CC graphics, math, timing, and ARM interpreter tests, launches a CC sample, captures logs and screenshots, and can launch an APP sample to verify shared settings and runtime isolation.
+`test_android_cc.ps1` runs the native CC graphics, math, timing, and ARM
+interpreter tests, launches a CC sample, captures logs and screenshots, and can
+launch an APP sample to verify shared settings and runtime isolation.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test_android_cc.ps1 `
@@ -28,14 +30,16 @@ powershell -ExecutionPolicy Bypass -File scripts/test_android_cc.ps1 `
     -VerifySharedSettings
 ```
 
-For MuMu, the script automatically prefers the MuMu ADB when using serial `127.0.0.1:7555`. Pass `-AdbPath` for another emulator-specific ADB. Do not mix two ADB server implementations against the same running emulator.
+For MuMu, the script automatically prefers the MuMu ADB when using serial
+`127.0.0.1:7555`. Pass `-AdbPath` for another emulator-specific ADB. Do not mix
+two ADB server implementations against the same running emulator.
 
 With `-VerifySharedSettings`, the test checks the visible Settings order and
 applies the same video, audio, input, execution-mode, clock, speed, delay,
 cheat, and language values to both formats. Auto and Compatibility must still
 select format-specific runtime implementations.
 
-## Audio regression
+## Audio Regression
 
 Capture and analyze actual output for one APP and one CC sample:
 
@@ -48,9 +52,15 @@ powershell -ExecutionPolicy Bypass -File scripts/test_android_audio_validation.p
 
 Use samples that begin audio without waiting for an unanswered in-game prompt.
 The report fails on empty audio, dropped buffers, SDL queue errors, or invalid
-capture timing.
+capture timing. It also reports the parsed device buffer duration; APP and CC
+use the same stable 48 kHz host output so equal buffer settings have equal
+playback latency regardless of the guest sample rate. When `-InputSequence` is
+used, the report estimates input response from the native button timestamp,
+the next PCM submission, queued audio, and the parsed device buffer duration.
+The host queue targets 100 ms so APP writers cannot accumulate the former
+quarter-second backlog before a button-triggered sound.
 
-## Cheat regression
+## Cheat Regression
 
 Run the native cheat parser and Android cheat-manager automation:
 
@@ -59,9 +69,11 @@ powershell -ExecutionPolicy Bypass -File scripts/test_android_cheats.ps1 `
     -Serial 127.0.0.1:7555
 ```
 
-Cheat selection is format-aware: APP prefers `Game.app.cht`, CC prefers `Game.cc.cht`, and `Game.cht` is used only when the format-specific file is absent.
+Cheat selection is format-aware: APP prefers `Game.app.cht`, CC prefers
+`Game.cc.cht`, and `Game.cht` is used only when the format-specific file is
+absent.
 
-## Input and IME regression
+## Input And IME Regression
 
 Validate Android system-keyboard policy:
 
@@ -70,19 +82,105 @@ powershell -ExecutionPolicy Bypass -File scripts/test_android_ime.ps1 `
     -Serial 127.0.0.1:7555
 ```
 
-Debug builds support timed virtual-control sequences through `DINGOO_PIE_AUTOTEST_VIRTUAL_CLICK_SEQUENCE`. Input tracing is enabled with `DINGOO_PIE_INPUT_TRACE=1`. Use these only in isolated automation runs and clear package wrap properties afterward.
+Debug builds support timed virtual-control sequences through
+`DINGOO_PIE_AUTOTEST_VIRTUAL_CLICK_SEQUENCE`. Input tracing is enabled with
+`DINGOO_PIE_INPUT_TRACE=1`. Use these only in isolated automation runs and clear
+package wrap properties afterward.
 
-## Save regression
+## Save Regression
 
-Debug builds expose `dingoopie.save_automation`. The automation verifies APP/CC private-directory isolation, nested paths, overwrite and append modes, Java and native `FILE*` readback, and path traversal rejection. A passing run writes the following result to logcat and removes its temporary files:
+Debug builds expose `dingoopie.save_automation`. The automation verifies APP/CC
+private-directory isolation, nested paths, overwrite and append modes, Java and
+native `FILE*` readback, path traversal rejection, DGSS payload corruption
+handling, and 100 consecutive save-state compression/decompression cycles. A
+passing run writes the following results and removes its temporary files:
 
 ```text
 SAVE_AUTOMATION result=pass ... native_io=true ...
+save-state-regression: result=pass iterations=100 ... corruption_rejected=1 invalid_region_rejected=1
 ```
 
-Games opened from a writable Storage Access Framework folder save beside the game. Single-file imports, direct paths without writable access, and expired folder grants fall back to application-private `app-saves` or `cc-saves` directories.
+Games opened from a writable Storage Access Framework folder save beside the
+game. Single-file imports, direct paths without writable access, and expired
+folder grants fall back to application-private `app-saves` or `cc-saves`
+directories. Both formats use the game content SHA-256 as the private save
+subdirectory name.
 
-## Guest failure logs
+APP and CC instant states use 15 slots under the active format-specific save
+directory. State files use `savestates/<game>.slotN.dps`, and previews use
+`savestates/<game>.slotN.thumb.bmp`. Deleting a slot removes both files and
+refreshes its empty state, preview, and timestamp. APP writes the PC-compatible
+DGSS payload, while CC writes its ARM32 runtime state with game, task, stream,
+resource, semaphore, and memory-layout validation.
+
+Run the all-sample save/load automation when sample games are available:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_save_state_all_samples.ps1 `
+    -SampleRoot "D:\Games\DingooSamples" `
+    -Serial 127.0.0.1:7555
+```
+
+Each sample must save, load, and return to the game screen without leaving the
+application in the menu or a stalled runtime state.
+
+Validate the instant save-state menu visually on the 960x540 Android test device:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_save_state_layout.ps1 `
+    -Serial 127.0.0.1:7555
+```
+
+The script launches an APP game, opens the pause and instant save-state menus,
+captures both screens, and verifies from rendered pixels that the standard menu
+row, mode tabs, slot cells, save/load action, delete action, and back action all
+have the same 46-pixel height. It also checks borderless tabs and slots, equal
+dynamically sized slot columns, six-pixel vertical and horizontal gaps, the
+timestamp block aligned with the final slot row, and the independent 4:3 preview
+whose top aligns with the first slot row.
+
+## Task Thread Lifecycle Regression
+
+Run the Android native stress test for APP subtask thread cleanup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_task_lifecycle.ps1 `
+    -Serial 127.0.0.1:7555
+```
+
+The test creates 4,000 short-lived detached tasks, verifies that all 4,000
+concurrent profiling increments are retained, waits for the active count to
+reach zero, and fails if the process virtual-memory increase exceeds 16 MiB. It
+also stresses synchronized diagnostic snapshots and the shared APP tick clock
+with 16 concurrent host threads.
+
+## Android Resource Regressions
+
+Run the host-side USB identifier and staged-upload comparisons:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_resource_regressions.ps1
+```
+
+The USB test verifies that the previous first-device value of zero is replaced
+by stable positive identifiers. The upload test reproduces direct-write target
+corruption after an incomplete request and verifies that staging preserves the
+existing file until the full request body has arrived.
+
+## File Manager Socket Queue Regression
+
+Run the host-side comparison for queued file-manager connections:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_socket_task.ps1
+```
+
+The test first reproduces the previous lambda-queue behavior, where
+`shutdownNow()` removes a queued task but leaves its socket open. It then checks
+that `CloseableSocketTask` closes a queued socket and transfers a running socket
+to its handler exactly once.
+
+## Guest Failure Logs
 
 Both runtimes must report a successfully written `DingooPie-crash-*.log` after
 an injected guest execution failure. A writable imported folder places the log
@@ -91,7 +189,7 @@ APP reports MIPS runtime context and CC reports ARM registers plus execution and
 import statistics. Startup file-open or package-parse rejection is not a guest
 execution failure and is validated through the native runtime log instead.
 
-## Menu structure
+## Menu Structure
 
 `native/core/frontend/menu_model.h` is the source of truth for visible menu row
 indices. When a menu changes, verify the same order in `menu_overlay.inl`, the
@@ -99,7 +197,13 @@ selection handler, `EmulatorSettings`, INI load/save tracing, and both UI
 languages. `-VerifySharedSettings` provides the runtime-side ordering and value
 application check.
 
-## Android compatibility regression
+Run the structural order regression directly after changing a visible setting:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_settings_order.ps1
+```
+
+## Android Compatibility Regression
 
 Run the API 35 AVD compatibility check:
 
@@ -107,9 +211,11 @@ Run the API 35 AVD compatibility check:
 powershell -ExecutionPolicy Bypass -File scripts/test_android_compatibility.ps1
 ```
 
-Multiple AVDs require `-RunMatrix`. Use `-WipeData` only for an intentional clean-device test. The script blocks emulator startup after recent Windows WHEA hardware errors unless `-IgnoreHostHardwareErrors` is explicitly supplied.
+Multiple AVDs require `-RunMatrix`. Use `-WipeData` only for an intentional
+clean-device test. The script blocks emulator startup after recent Windows WHEA
+hardware errors unless `-IgnoreHostHardwareErrors` is explicitly supplied.
 
-## Text format
+## Text Format
 
 Repository text files must be UTF-8 without BOM, use CRLF line endings, and end with a final CRLF:
 

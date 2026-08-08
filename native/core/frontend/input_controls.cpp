@@ -53,13 +53,11 @@ static void unlockInput(void)
 
 static bool inputTraceEnabled(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_INPUT_TRACE");
-        enabled = (value && value[0] && value[0] != '0') ? 1 : 0;
-    }
-    return enabled != 0;
+        return value && value[0] && value[0] != '0';
+    }();
+    return enabled;
 }
 
 struct KeyboardBinding
@@ -140,19 +138,73 @@ static bool parseKeyboardControlName(const std::string& name, uint32_t* outContr
         return false;
     }
     std::string normalized = normalizeMappingName(name);
-    if (normalized == "a" || normalized == "buttona") { *outControlBit = CONTROL_BUTTON_A; return true; }
-    if (normalized == "b" || normalized == "buttonb") { *outControlBit = CONTROL_BUTTON_B; return true; }
-    if (normalized == "x" || normalized == "buttonx") { *outControlBit = CONTROL_BUTTON_X; return true; }
-    if (normalized == "y" || normalized == "buttony") { *outControlBit = CONTROL_BUTTON_Y; return true; }
-    if (normalized == "start") { *outControlBit = CONTROL_BUTTON_START; return true; }
-    if (normalized == "select") { *outControlBit = CONTROL_BUTTON_SELECT; return true; }
-    if (normalized == "l" || normalized == "leftshoulder" || normalized == "triggerleft") { *outControlBit = CONTROL_TRIGGER_LEFT; return true; }
-    if (normalized == "r" || normalized == "rightshoulder" || normalized == "triggerright") { *outControlBit = CONTROL_TRIGGER_RIGHT; return true; }
-    if (normalized == "up" || normalized == "dpadup") { *outControlBit = CONTROL_DPAD_UP; return true; }
-    if (normalized == "down" || normalized == "dpaddown") { *outControlBit = CONTROL_DPAD_DOWN; return true; }
-    if (normalized == "left" || normalized == "dpadleft") { *outControlBit = CONTROL_DPAD_LEFT; return true; }
-    if (normalized == "right" || normalized == "dpadright") { *outControlBit = CONTROL_DPAD_RIGHT; return true; }
-    if (normalized == "power") { *outControlBit = CONTROL_POWER; return true; }
+    if (normalized == "a" || normalized == "buttona")
+    {
+        *outControlBit = CONTROL_BUTTON_A;
+        return true;
+    }
+    if (normalized == "b" || normalized == "buttonb")
+    {
+        *outControlBit = CONTROL_BUTTON_B;
+        return true;
+    }
+    if (normalized == "x" || normalized == "buttonx")
+    {
+        *outControlBit = CONTROL_BUTTON_X;
+        return true;
+    }
+    if (normalized == "y" || normalized == "buttony")
+    {
+        *outControlBit = CONTROL_BUTTON_Y;
+        return true;
+    }
+    if (normalized == "start")
+    {
+        *outControlBit = CONTROL_BUTTON_START;
+        return true;
+    }
+    if (normalized == "select")
+    {
+        *outControlBit = CONTROL_BUTTON_SELECT;
+        return true;
+    }
+    if (normalized == "l" || normalized == "leftshoulder" ||
+        normalized == "triggerleft")
+    {
+        *outControlBit = CONTROL_TRIGGER_LEFT;
+        return true;
+    }
+    if (normalized == "r" || normalized == "rightshoulder" ||
+        normalized == "triggerright")
+    {
+        *outControlBit = CONTROL_TRIGGER_RIGHT;
+        return true;
+    }
+    if (normalized == "up" || normalized == "dpadup")
+    {
+        *outControlBit = CONTROL_DPAD_UP;
+        return true;
+    }
+    if (normalized == "down" || normalized == "dpaddown")
+    {
+        *outControlBit = CONTROL_DPAD_DOWN;
+        return true;
+    }
+    if (normalized == "left" || normalized == "dpadleft")
+    {
+        *outControlBit = CONTROL_DPAD_LEFT;
+        return true;
+    }
+    if (normalized == "right" || normalized == "dpadright")
+    {
+        *outControlBit = CONTROL_DPAD_RIGHT;
+        return true;
+    }
+    if (normalized == "power")
+    {
+        *outControlBit = CONTROL_POWER;
+        return true;
+    }
     return false;
 }
 

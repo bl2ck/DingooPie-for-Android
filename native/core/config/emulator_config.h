@@ -6,7 +6,7 @@
 
 #define OS_TICKS_PER_SEC 100
 
-// JZ4740 peripheral base addresses used by Dingoo SDK guests.
+// JZ4732 peripheral base addresses used by Dingoo SDK guests.
 #define	CPM_BASE	0xB0000000
 #define	INTC_BASE	0xB0001000
 #define	TCU_BASE	0xB0002000

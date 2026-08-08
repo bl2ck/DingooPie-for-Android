@@ -1,4 +1,8 @@
 #include "platform_services.h"
+#include "frontend/sdl_frontend.h"
+#include "guest/guest_filesystem.h"
+#include "app/sdk_hle.h"
+#include "app/save_state.h"
 #include "jni_local_ref.h"
 
 #include <SDL_system.h>
@@ -9,6 +13,13 @@
 #include <unistd.h>
 
 static const char* kAndroidContentGamePrefix = "android-content://";
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dingoopie_android_DingooPieActivity_nativeSetAppBackgrounded(
+    JNIEnv*, jclass, jboolean backgrounded)
+{
+    frontendNotifyAndroidBackground(backgrounded == JNI_TRUE);
+}
 
 static bool isAndroidContentGamePath(const std::string& path)
 {
@@ -197,7 +208,8 @@ void platformAndroidRequestApplicationExit(void)
     }
 }
 
-std::string platformAndroidGetSaveDirectory(const std::string& gamePath)
+std::string platformAndroidGetSaveDirectory(const std::string& gamePath,
+    const std::string& gameIdentity)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -209,9 +221,12 @@ std::string platformAndroidGetSaveDirectory(const std::string& gamePath)
     std::string result;
     jclass activityClass = env->GetObjectClass(activity);
     jmethodID method = activityClass ? env->GetMethodID(activityClass,
-        "getGameSaveDirectory", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;
-    jstring identity = method ? env->NewStringUTF(gamePath.c_str()) : NULL;
-    jstring directory = identity ? (jstring)env->CallObjectMethod(activity, method, identity) : NULL;
+        "getGameSaveDirectory",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;") : NULL;
+    jstring path = method ? env->NewStringUTF(gamePath.c_str()) : NULL;
+    jstring identity = path ? env->NewStringUTF(gameIdentity.c_str()) : NULL;
+    jstring directory = identity ? (jstring)env->CallObjectMethod(
+        activity, method, path, identity) : NULL;
     if (!env->ExceptionCheck() && directory)
     {
         const char* chars = env->GetStringUTFChars(directory, NULL);
@@ -228,6 +243,7 @@ std::string platformAndroidGetSaveDirectory(const std::string& gamePath)
     }
     if (directory) env->DeleteLocalRef(directory);
     if (identity) env->DeleteLocalRef(identity);
+    if (path) env->DeleteLocalRef(path);
     if (activityClass) env->DeleteLocalRef(activityClass);
     return result;
 }
@@ -272,6 +288,67 @@ std::string platformAndroidGetCcSaveDirectory(const std::string& gamePath,
     return result;
 }
 
+std::string platformAndroidGetLogDirectory(void)
+{
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
+    if (!env || !activity)
+    {
+        return std::string();
+    }
+
+    std::string result;
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID method = activityClass ? env->GetMethodID(activityClass,
+        "getPrivateLogDirectory", "()Ljava/lang/String;") : NULL;
+    jstring directory = method ? (jstring)env->CallObjectMethod(activity, method) : NULL;
+    if (!env->ExceptionCheck() && directory)
+    {
+        const char* chars = env->GetStringUTFChars(directory, NULL);
+        if (chars)
+        {
+            result.assign(chars);
+            env->ReleaseStringUTFChars(directory, chars);
+        }
+    }
+    if (env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+        result.clear();
+    }
+    if (directory) env->DeleteLocalRef(directory);
+    if (activityClass) env->DeleteLocalRef(activityClass);
+    return result;
+}
+
+bool platformAndroidIsPrivateSaveDirectory(const std::string& directoryUri)
+{
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
+    if (!env || !activity || directoryUri.empty())
+    {
+        return false;
+    }
+
+    bool result = false;
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID method = activityClass ? env->GetMethodID(activityClass,
+        "isPrivateGameSaveDirectory", "(Ljava/lang/String;)Z") : NULL;
+    jstring directory = method ? env->NewStringUTF(directoryUri.c_str()) : NULL;
+    if (directory)
+    {
+        result = env->CallBooleanMethod(activity, method, directory) == JNI_TRUE;
+    }
+    if (env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+        result = false;
+    }
+    if (directory) env->DeleteLocalRef(directory);
+    if (activityClass) env->DeleteLocalRef(activityClass);
+    return result;
+}
+
 FILE* platformAndroidOpenSaveFile(const std::string& directoryUri,
     const std::string& fileName, const char* mode)
 {
@@ -282,19 +359,45 @@ FILE* platformAndroidOpenSaveFile(const std::string& directoryUri,
         return NULL;
     }
 
+    char normalizedMode[16] = {};
+    const char* effectiveMode = mode && mode[0] ? mode : "rb";
+    size_t modeLength = 0;
+    bool modeChanged = false;
+    for (const char* current = effectiveMode; *current; ++current)
+    {
+        if (*current == 's')
+        {
+            modeChanged = true;
+            continue;
+        }
+        if (modeLength + 1 >= sizeof(normalizedMode))
+        {
+            return NULL;
+        }
+        normalizedMode[modeLength++] = *current;
+    }
+    normalizedMode[modeLength] = 0;
+    if (modeChanged)
+    {
+        if (modeLength == 0)
+        {
+            return NULL;
+        }
+        effectiveMode = normalizedMode;
+    }
+
     FILE* file = NULL;
     jclass activityClass = env->GetObjectClass(activity);
     jmethodID method = activityClass ? env->GetMethodID(activityClass,
         "openGameSaveFileDescriptor", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I") : NULL;
     jstring directoryText = method ? env->NewStringUTF(directoryUri.c_str()) : NULL;
     jstring fileNameText = directoryText ? env->NewStringUTF(fileName.c_str()) : NULL;
-    jstring modeText = fileNameText ? env->NewStringUTF(mode ? mode : "rb") : NULL;
+    jstring modeText = fileNameText ? env->NewStringUTF(effectiveMode) : NULL;
     jint descriptor = (directoryText && fileNameText && modeText) ?
         env->CallIntMethod(activity, method, directoryText, fileNameText, modeText) : -1;
     if (!env->ExceptionCheck() && descriptor >= 0)
     {
-        const char* hostMode = mode && mode[0] ? mode : "rb";
-        file = fdopen((int)descriptor, hostMode);
+        file = fdopen((int)descriptor, effectiveMode);
         if (!file)
         {
             close((int)descriptor);
@@ -309,6 +412,64 @@ FILE* platformAndroidOpenSaveFile(const std::string& directoryUri,
     if (directoryText) env->DeleteLocalRef(directoryText);
     if (activityClass) env->DeleteLocalRef(activityClass);
     return file;
+}
+
+bool platformAndroidDeleteSaveFile(const std::string& directoryUri,
+    const std::string& fileName)
+{
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
+    if (!env || !activity || directoryUri.empty() || fileName.empty())
+    {
+        return false;
+    }
+
+    bool deleted = false;
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID method = activityClass ? env->GetMethodID(activityClass,
+        "deleteGameSaveFile", "(Ljava/lang/String;Ljava/lang/String;)Z") : NULL;
+    jstring directoryText = method ? env->NewStringUTF(directoryUri.c_str()) : NULL;
+    jstring fileNameText = directoryText ? env->NewStringUTF(fileName.c_str()) : NULL;
+    if (directoryText && fileNameText)
+    {
+        deleted = env->CallBooleanMethod(activity, method, directoryText, fileNameText) == JNI_TRUE;
+    }
+    if (env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+        deleted = false;
+    }
+    if (fileNameText) env->DeleteLocalRef(fileNameText);
+    if (directoryText) env->DeleteLocalRef(directoryText);
+    if (activityClass) env->DeleteLocalRef(activityClass);
+    return deleted;
+}
+
+uint64_t platformAndroidGetSaveFileModifiedTime(const std::string& directoryUri,
+    const std::string& fileName)
+{
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
+    if (!env || !activity || directoryUri.empty() || fileName.empty())
+    {
+        return 0;
+    }
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID method = activityClass ? env->GetMethodID(activityClass,
+        "getGameSaveFileModifiedTime", "(Ljava/lang/String;Ljava/lang/String;)J") : NULL;
+    jstring directoryText = method ? env->NewStringUTF(directoryUri.c_str()) : NULL;
+    jstring fileNameText = directoryText ? env->NewStringUTF(fileName.c_str()) : NULL;
+    jlong modifiedTime = directoryText && fileNameText ?
+        env->CallLongMethod(activity, method, directoryText, fileNameText) : 0;
+    if (env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+        modifiedTime = 0;
+    }
+    if (fileNameText) env->DeleteLocalRef(fileNameText);
+    if (directoryText) env->DeleteLocalRef(directoryText);
+    if (activityClass) env->DeleteLocalRef(activityClass);
+    return modifiedTime > 0 ? (uint64_t)modifiedTime : 0;
 }
 
 static bool writeSaveAutomationFile(const std::string& directory,
@@ -339,6 +500,121 @@ static bool readSaveAutomationFile(const std::string& directory,
     return ok;
 }
 
+static bool saveAutomationFileMissing(const std::string& directory, const char* name)
+{
+    FILE* file = platformAndroidOpenSaveFile(directory, name, "rb");
+    if (!file)
+    {
+        return true;
+    }
+    fclose(file);
+    return false;
+}
+
+static bool writeGuestSaveAutomationFile(const char* name,
+    const char* mode, const uint8_t* data, size_t size)
+{
+    uint32_t stream = fsys_fopen(name, mode);
+    if (!stream)
+    {
+        return false;
+    }
+    bool ok = fsys_fwrite((void*)data, 1, (uint32_t)size, stream) == size;
+    return fsys_fclose(stream) == 0 && ok;
+}
+
+static bool readGuestSaveAutomationFile(const char* name,
+    const uint8_t* expected, size_t size)
+{
+    uint32_t stream = fsys_fopen(name, "rb");
+    if (!stream)
+    {
+        return false;
+    }
+    uint8_t actual[32] = {};
+    bool ok = size <= sizeof(actual) &&
+        vm_fread(actual, 1, (uint32_t)size, stream) == size &&
+        vm_fread(actual + size, 1, 1, stream) == 0 &&
+        memcmp(actual, expected, size) == 0;
+    fsys_fclose(stream);
+    return ok;
+}
+
+static bool runGuestSaveTransactionAutomation(const std::string& directory)
+{
+    fsys_reset_guest_package(NULL);
+    fsys_set_save_directory(directory.c_str());
+    const uint8_t initial[] = { 31, 32, 33, 34 };
+    const uint8_t appended[] = { 35, 36 };
+    const uint8_t combined[] = { 31, 32, 33, 34, 35, 36 };
+    const uint8_t replacement[] = { 41, 42 };
+    bool normal = writeGuestSaveAutomationFile(
+        "transaction/sample.sav", "wb", initial, sizeof(initial)) &&
+        writeGuestSaveAutomationFile(
+            "transaction/sample.sav", "ab", appended, sizeof(appended)) &&
+        readGuestSaveAutomationFile(
+            "transaction/sample.sav", combined, sizeof(combined)) &&
+        writeGuestSaveAutomationFile(
+            "transaction/sample.sav", "wb", replacement, sizeof(replacement)) &&
+        readGuestSaveAutomationFile(
+            "transaction/sample.sav", replacement, sizeof(replacement));
+
+    const uint8_t damaged[] = { 99 };
+    const char interrupted = '1';
+    bool recoverySetup = writeSaveAutomationFile(directory,
+        "transaction/recovery.sav", "wb", damaged, sizeof(damaged)) &&
+        writeSaveAutomationFile(directory,
+            "transaction/recovery.sav.dingoopie.transaction-v1.backup",
+            "wb", initial, sizeof(initial)) &&
+        writeSaveAutomationFile(directory,
+            "transaction/recovery.sav.dingoopie.transaction-v1.pending", "wb",
+            (const uint8_t*)&interrupted, 1);
+    bool recovered = recoverySetup && readGuestSaveAutomationFile(
+        "transaction/recovery.sav", initial, sizeof(initial));
+    bool sidecarsRemoved = saveAutomationFileMissing(directory,
+        "transaction/recovery.sav.dingoopie.transaction-v1.pending") &&
+        saveAutomationFileMissing(directory,
+            "transaction/recovery.sav.dingoopie.transaction-v1.backup");
+
+    uint32_t streams[127] = {};
+    bool capacity = true;
+    for (size_t index = 0; index < sizeof(streams) / sizeof(streams[0]); ++index)
+    {
+        streams[index] = fsys_fopen("transaction/sample.sav", "rb");
+        if (!streams[index])
+        {
+            capacity = false;
+            break;
+        }
+    }
+    bool exhaustedSafely = fsys_fopen("transaction/sample.sav", "rb") == 0;
+    for (size_t index = 0; index < sizeof(streams) / sizeof(streams[0]); ++index)
+    {
+        if (streams[index])
+        {
+            fsys_fclose(streams[index]);
+        }
+    }
+    uint32_t reopened = fsys_fopen("transaction/sample.sav", "rb");
+    bool reusable = reopened != 0;
+    if (reopened)
+    {
+        fsys_fclose(reopened);
+    }
+    fsys_reset_guest_package(NULL);
+    fsys_set_save_directory("");
+    printf("save-automation: transaction normal=%u recovered=%u sidecars_removed=%u "
+        "capacity=%u exhausted_safely=%u reusable=%u\n",
+        normal ? 1u : 0u,
+        recovered ? 1u : 0u,
+        sidecarsRemoved ? 1u : 0u,
+        capacity ? 1u : 0u,
+        exhaustedSafely ? 1u : 0u,
+        reusable ? 1u : 0u);
+    return normal && recovered && sidecarsRemoved && capacity &&
+        exhaustedSafely && reusable;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_dingoopie_android_DingooPieActivity_nativeRunSaveAutomation(
     JNIEnv* env, jclass, jstring appDirectoryText, jstring ccDirectoryText)
@@ -360,24 +636,34 @@ Java_com_dingoopie_android_DingooPieActivity_nativeRunSaveAutomation(
     env->ReleaseStringUTFChars(ccDirectoryText, ccChars);
     env->ReleaseStringUTFChars(appDirectoryText, appChars);
 
+    bool directoryClassification =
+        platformAndroidIsPrivateSaveDirectory(appDirectory) &&
+        platformAndroidIsPrivateSaveDirectory(ccDirectory) &&
+        !platformAndroidIsPrivateSaveDirectory(
+            "content://automation/tree/authorized-directory");
     const uint8_t initial[] = { 11, 12, 13, 14 };
     const uint8_t appended[] = { 15, 16 };
     const uint8_t combined[] = { 11, 12, 13, 14, 15, 16 };
     const uint8_t replacement[] = { 21, 22 };
-    bool ok = writeSaveAutomationFile(appDirectory,
-        "native/slot1.sav", "wb", initial, sizeof(initial));
+    bool ok = directoryClassification && writeSaveAutomationFile(appDirectory,
+        "native/sample.bin", "wbs", initial, sizeof(initial));
     ok = writeSaveAutomationFile(appDirectory,
-        "native/slot1.sav", "ab", appended, sizeof(appended)) && ok;
+        "native/sample.bin", "ab", appended, sizeof(appended)) && ok;
     ok = readSaveAutomationFile(appDirectory,
-        "native/slot1.sav", combined, sizeof(combined)) && ok;
+        "native/sample.bin", combined, sizeof(combined)) && ok;
     ok = writeSaveAutomationFile(appDirectory,
-        "native/slot1.sav", "wb", replacement, sizeof(replacement)) && ok;
+        "native/sample.bin", "wb", replacement, sizeof(replacement)) && ok;
     ok = readSaveAutomationFile(appDirectory,
-        "native/slot1.sav", replacement, sizeof(replacement)) && ok;
+        "native/sample.bin", replacement, sizeof(replacement)) && ok;
     ok = writeSaveAutomationFile(ccDirectory,
-        "native/slot1.dat", "wb", initial, sizeof(initial)) && ok;
+        "native/sample.dat", "wb", initial, sizeof(initial)) && ok;
     ok = readSaveAutomationFile(ccDirectory,
-        "native/slot1.dat", initial, sizeof(initial)) && ok;
+        "native/sample.dat", initial, sizeof(initial)) && ok;
+    ok = runGuestSaveTransactionAutomation(appDirectory) && ok;
+    ok = bridge_run_semaphore_regression() && ok;
+    ok = saveStateRunRegressionTests() && ok;
+    printf("save-automation: directory_classification=%u\n",
+        directoryClassification ? 1u : 0u);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 

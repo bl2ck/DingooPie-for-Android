@@ -1,10 +1,11 @@
 #include "cc/cc_arm_runtime.h"
+#include "cc/cc_save_state.h"
+#include "cc/cc_package_layout.h"
 
 #include "guest/guest_package.h"
 #include "game/game_paths.h"
 #include "cc/arm32_interpreter.h"
 #include "cc/cc_graphics_compat.h"
-#include "cc/cc_math_compat.h"
 #include "cc/cc_runtime_timing.h"
 #include "cc/cc_input_mapping.h"
 #include "config/cheat_runtime.h"
@@ -30,15 +31,22 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <mutex>
 
-static const uint32_t kRamStart = 0x10000000u;
-static const uint32_t kRamSize = 0x04000000u;
+static const uint32_t kCcRetailRamStart = 0x10000000u;
+static const uint32_t kCcRetailRamSize = 0x04000000u;
+static const uint32_t kCcRetailHeapStart = 0x21000000u;
+static const uint32_t kCcRetailHeapSize = 0x02000000u;
+static const uint32_t kCcHomebrewHeapStart = 0x09000000u;
+static const uint32_t kCcHomebrewHeapSize = 0x02000000u;
+static const uint32_t kCcHomebrewSystemRamStart = 0x10000000u;
+static const uint32_t kCcHomebrewSystemRamSize = 0x03800000u;
+// The CC1800 SDK linker script defines one 16 MiB application window.
+static const uint32_t kCcHomebrewRamStart = kCcHomebrewProgramOrigin;
+static const uint32_t kCcHomebrewRamSize = 0x01000000u;
 static const uint32_t kStackStart = 0x1ff00000u;
 static const uint32_t kStackSize = 0x00100000u;
-static const uint32_t kHeapStart = 0x21000000u;
-static const uint32_t kLegacyHeapStart = 0x09000000u;
-static const uint32_t kHeapSize = 0x02000000u;
-static const uint32_t kLegacyLowMemorySize = 0x00001000u;
+static const uint32_t kLegacyLowMemorySize = 0x00010000u;
 static const uint32_t kLoaderHandle = kStackStart + 0x100u;
 static const uint32_t kAppPathWideString = kStackStart + 0x200u;
 static const uint32_t kLocaleString = kStackStart + 0x600u;
@@ -58,6 +66,14 @@ static const uint32_t kCcFramebufferSize =
 static const uint32_t kCcVideoMemorySize = 0x00800000u;
 static const uint32_t kLegacyMmioStart = 0x04000000u;
 static const uint32_t kLegacyMmioSize = 0x00100000u;
+static const uint32_t kLegacyAudioMmioStart = 0x08a00000u;
+static const uint32_t kLegacyAudioMmioSize = 0x00010000u;
+static const uint32_t kDvcAudioHandle = 1u;
+static const uint32_t kDvcAudioDefaultSampleRate = 44100u;
+static const uint32_t kDvcAudioMaxVolume = 30u;
+static const uint32_t kDvcAudioSetSampleRate = 0x0du;
+static const uint32_t kDvcAudioStartPlayback = 0x0bu;
+static const char kDvcAudioDeviceName[] = "ROOT\\DVC\\IIS\\IIS0";
 static const uint32_t kLegacySystemMmioStart = 0x09300000u;
 static const uint32_t kLegacySystemMmioSize = 0x00010000u;
 static const uint32_t kLegacyFramebufferAddress = 0x11800000u;
@@ -66,6 +82,7 @@ static const uint32_t kLegacyGraphicsStride = 0x09302020u;
 static const uint32_t kLegacyGraphicsStatus = 0x09303054u;
 static const uint32_t kLegacyGraphicsReady = 1u << 2;
 static const uint64_t kSliceInstructions = 50000u;
+static const uint64_t kNonAudioSliceInstructions = 5000u;
 static const double kAutoRuntimeSpeedScale = 0.65;
 static const uint64_t kReferenceCpuClockHz = 336000000u;
 static const uint64_t kReferenceInterpreterIps = 15000000u;
@@ -76,6 +93,10 @@ static std::atomic<double> s_runtimeSpeedScale(kAutoRuntimeSpeedScale);
 static std::atomic<double> s_hostDelayScale(1.0);
 static std::atomic<uint64_t> s_targetInstructionsPerSecond(0);
 static std::atomic<bool> s_compatibilityExecutionMode(false);
+static std::mutex s_runtimeMutex;
+struct CcArmRuntime;
+static CcArmRuntime* s_activeRuntime = NULL;
+static std::string sha256Hex(const uint8_t* data, uint32_t size);
 
 struct CcArmRuntime
 {
@@ -121,11 +142,13 @@ struct CcArmRuntime
 
     GuestPackage* package;
     std::vector<uint8_t> ram;
+    std::vector<uint8_t> systemMemory;
     std::vector<uint8_t> stack;
     std::vector<uint8_t> heapMemory;
     std::vector<uint8_t> legacyLowMemory;
     std::vector<uint8_t> framebuffer;
     std::vector<uint8_t> legacyMmio;
+    std::vector<uint8_t> legacyAudioMmio;
     std::vector<uint8_t> legacySystemMmio;
     std::vector<Arm32InstructionCacheEntry> instructionCache;
     std::vector<HeapBlock> heap;
@@ -136,10 +159,14 @@ struct CcArmRuntime
     std::vector<std::string> dynamicImports;
     std::vector<std::string> unknownImportNames;
     std::vector<uint32_t> openStreams;
+    uint32_t ramStart;
     uint32_t heapStart;
     uint32_t heapCursor;
     uint32_t currentTaskIndex;
     uint32_t currentDelayTicks;
+    uint32_t dvcAudioHandle;
+    uint32_t dvcAudioSampleRate;
+    uint32_t dvcAudioVolume;
     uint32_t framebufferAddress;
     uint32_t framebufferBits;
     uint32_t framebufferWriteHighWater[kCcFramebufferCount];
@@ -150,6 +177,7 @@ struct CcArmRuntime
     bool faultFetch;
     bool yielded;
     bool cc1800Compatibility;
+    bool dvcAudioStarted;
     Arm32Bus bus;
     CcArmRuntimeStats* stats;
     std::chrono::steady_clock::time_point startTime;
@@ -157,7 +185,330 @@ struct CcArmRuntime
     uint64_t profileLastInstructions;
 };
 
+static uint64_t currentGuestMicros(const CcArmRuntime* runtime);
+
 static void presentFramebuffer(CcArmRuntime* runtime, uint32_t requestedAddress);
+
+static void setCcStateError(std::string* error, const char* text)
+{
+    if (error) *error = text;
+}
+
+static GuestResourceEntry* findCcResourceByName(CcArmRuntime* runtime,
+    const std::string& name)
+{
+    return runtime && runtime->package ? guestPackageFindResource(
+        runtime->package, name.c_str()) : NULL;
+}
+
+uint32_t ccArmRuntimeActiveTaskCount(void)
+{
+    std::lock_guard<std::mutex> lock(s_runtimeMutex);
+    return s_activeRuntime ? (uint32_t)s_activeRuntime->tasks.size() : 0;
+}
+
+bool ccArmRuntimeCaptureState(CcRuntimeState* out, std::string* error)
+{
+    if (!out)
+    {
+        setCcStateError(error, "runtime state output is invalid");
+        return false;
+    }
+    if (!pauseGateWaitForPausedWaiters(2000, 1))
+    {
+        setCcStateError(error, "runtime did not pause in time");
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(s_runtimeMutex);
+    CcArmRuntime* runtime = s_activeRuntime;
+    if (!runtime || !runtime->package)
+    {
+        setCcStateError(error, "runtime state is not available");
+        return false;
+    }
+    for (size_t i = 0; i < runtime->openStreams.size(); ++i)
+    {
+        if (fsys_stream_is_external_file(runtime->openStreams[i]))
+        {
+            setCcStateError(error, "CC state has unsupported external file stream");
+            return false;
+        }
+    }
+    *out = CcRuntimeState();
+    out->gameSha256 = sha256Hex(runtime->package->file_data, runtime->package->file_size);
+    out->ram = runtime->ram;
+    out->systemMemory = runtime->systemMemory;
+    out->stack = runtime->stack;
+    out->heapMemory = runtime->heapMemory;
+    out->legacyLowMemory = runtime->legacyLowMemory;
+    out->framebuffer = runtime->framebuffer;
+    out->legacyMmio = runtime->legacyMmio;
+    out->legacyAudioMmio = runtime->legacyAudioMmio;
+    out->legacySystemMmio = runtime->legacySystemMmio;
+    for (size_t i = 0; i < runtime->heap.size(); ++i)
+    {
+        out->heap.push_back({ runtime->heap[i].address,
+            runtime->heap[i].size, runtime->heap[i].free });
+    }
+    for (size_t i = 0; i < runtime->tasks.size(); ++i)
+    {
+        const CcArmRuntime::Task& task = runtime->tasks[i];
+        CcSaveTask savedTask = {};
+        savedTask.state = task.state;
+        savedTask.entry = task.entry;
+        savedTask.argument = task.argument;
+        savedTask.stack = task.stack;
+        savedTask.priority = task.priority;
+        savedTask.delayTicks = task.delayTicks;
+        savedTask.started = task.started;
+        savedTask.finished = task.finished;
+        savedTask.audioProducer = task.audioProducer;
+        out->tasks.push_back(savedTask);
+    }
+    for (size_t i = 0; i < runtime->resources.size(); ++i)
+    {
+        const CcArmRuntime::ResourceHandle& resource = runtime->resources[i];
+        if (!resource.entry)
+        {
+            continue;
+        }
+        out->resources.push_back({ resource.address,
+            resource.entry->name ? resource.entry->name : "",
+            resource.position, resource.dataAddress });
+    }
+    for (size_t i = 0; i < runtime->openStreams.size(); ++i)
+    {
+        uint32_t stream = runtime->openStreams[i];
+        out->streams.push_back({ stream, fsys_stream_request_name(stream),
+            fsys_stream_position(stream) });
+    }
+    for (size_t i = 0; i < runtime->files.size(); ++i)
+    {
+        out->files.push_back({ runtime->files[i].address, runtime->files[i].stream });
+    }
+    for (size_t i = 0; i < runtime->semaphores.size(); ++i)
+    {
+        out->semaphores.push_back({ runtime->semaphores[i].address,
+            runtime->semaphores[i].count });
+    }
+    out->dynamicImports = runtime->dynamicImports;
+    out->unknownImportNames = runtime->unknownImportNames;
+    out->elapsedGuestMicros = currentGuestMicros(runtime);
+    out->runtimeInstructions = runtime->stats->instructions;
+    out->heapStart = runtime->heapStart;
+    out->heapCursor = runtime->heapCursor;
+    out->dvcAudioHandle = runtime->dvcAudioHandle;
+    out->dvcAudioSampleRate = runtime->dvcAudioSampleRate;
+    out->dvcAudioVolume = runtime->dvcAudioVolume;
+    out->framebufferAddress = runtime->framebufferAddress;
+    out->framebufferBits = runtime->framebufferBits;
+    memcpy(out->framebufferWriteHighWater, runtime->framebufferWriteHighWater,
+        sizeof(out->framebufferWriteHighWater));
+    out->framebufferBitsExplicit = runtime->framebufferBitsExplicit;
+    out->cc1800Compatibility = runtime->cc1800Compatibility;
+    out->dvcAudioStarted = runtime->dvcAudioStarted;
+    return !out->tasks.empty();
+}
+
+bool ccArmRuntimeRestoreState(const CcRuntimeState& state, std::string* error)
+{
+    if (!state.runtimeInstructions || state.tasks.empty() || state.tasks.size() > 32)
+    {
+        setCcStateError(error, "saved runtime state is invalid");
+        return false;
+    }
+    if (!pauseGateWaitForPausedWaiters(2000, 1))
+    {
+        setCcStateError(error, "runtime did not pause in time");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(s_runtimeMutex);
+    CcArmRuntime* runtime = s_activeRuntime;
+    if (!runtime || !runtime->package ||
+        runtime->ram.size() != state.ram.size() ||
+        runtime->systemMemory.size() != state.systemMemory.size() ||
+        runtime->stack.size() != state.stack.size() ||
+        runtime->heapMemory.size() != state.heapMemory.size() ||
+        state.heapStart != runtime->heapStart ||
+        state.heapCursor < state.heapStart ||
+        (uint64_t)state.heapCursor >
+            (uint64_t)state.heapStart + state.heapMemory.size() ||
+        runtime->framebuffer.size() != state.framebuffer.size())
+    {
+        setCcStateError(error, "runtime memory layout does not match save state");
+        return false;
+    }
+    if (sha256Hex(runtime->package->file_data, runtime->package->file_size) !=
+        state.gameSha256)
+    {
+        setCcStateError(error, "save-state belongs to a different game");
+        return false;
+    }
+
+    std::vector<GuestResourceEntry*> restoredResourceEntries;
+    restoredResourceEntries.reserve(state.resources.size());
+    for (size_t i = 0; i < state.resources.size(); ++i)
+    {
+        GuestResourceEntry* entry = findCcResourceByName(runtime, state.resources[i].name);
+        if (!entry)
+        {
+            setCcStateError(error, "saved resource is not available");
+            return false;
+        }
+        restoredResourceEntries.push_back(entry);
+    }
+
+    std::vector<uint32_t> restoredStreams;
+    restoredStreams.reserve(state.streams.size());
+    auto closeRestoredStreams = [&restoredStreams]()
+    {
+        for (size_t i = 0; i < restoredStreams.size(); ++i)
+        {
+            fsys_fclose(restoredStreams[i]);
+        }
+    };
+    for (size_t i = 0; i < state.streams.size(); ++i)
+    {
+        uint32_t stream = fsys_fopen(state.streams[i].requestName.c_str(), "rb");
+        if (!stream || fsys_fseek(stream, state.streams[i].position, SEEK_SET) != 0)
+        {
+            if (stream) fsys_fclose(stream);
+            closeRestoredStreams();
+            setCcStateError(error, "saved file stream is not available");
+            return false;
+        }
+        restoredStreams.push_back(stream);
+    }
+
+    auto findRestoredStream = [&state, &restoredStreams](uint32_t savedStream)
+    {
+        for (size_t i = 0; i < state.streams.size(); ++i)
+        {
+            if (state.streams[i].stream == savedStream)
+            {
+                return restoredStreams[i];
+            }
+        }
+        return 0u;
+    };
+
+    std::vector<CcArmRuntime::Task> restoredTasks;
+    restoredTasks.reserve(state.tasks.size());
+    for (size_t i = 0; i < state.tasks.size(); ++i)
+    {
+        const CcSaveTask& savedTask = state.tasks[i];
+        CcArmRuntime::Task task = {};
+        task.state = savedTask.state;
+        task.entry = savedTask.entry;
+        task.argument = savedTask.argument;
+        task.stack = savedTask.stack;
+        task.priority = savedTask.priority;
+        task.delayTicks = savedTask.delayTicks;
+        task.started = savedTask.started;
+        task.finished = savedTask.finished;
+        task.audioProducer = savedTask.audioProducer;
+        restoredTasks.push_back(task);
+    }
+
+    std::vector<CcArmRuntime::ResourceHandle> restoredResources;
+    restoredResources.reserve(state.resources.size());
+    for (size_t i = 0; i < state.resources.size(); ++i)
+    {
+        restoredResources.push_back({ state.resources[i].address,
+            restoredResourceEntries[i], state.resources[i].position,
+            state.resources[i].dataAddress });
+    }
+
+    std::vector<CcArmRuntime::FileHandle> restoredFiles;
+    restoredFiles.reserve(state.files.size());
+    for (size_t i = 0; i < state.files.size(); ++i)
+    {
+        uint32_t stream = findRestoredStream(state.files[i].stream);
+        if (!stream)
+        {
+            closeRestoredStreams();
+            setCcStateError(error, "saved file handle stream is not available");
+            return false;
+        }
+        restoredFiles.push_back({ state.files[i].address, stream });
+    }
+
+    for (size_t i = 0; i < runtime->openStreams.size(); ++i)
+    {
+        fsys_fclose(runtime->openStreams[i]);
+    }
+    runtime->ram = state.ram;
+    runtime->systemMemory = state.systemMemory;
+    runtime->stack = state.stack;
+    runtime->heapMemory = state.heapMemory;
+    runtime->legacyLowMemory = state.legacyLowMemory;
+    runtime->framebuffer = state.framebuffer;
+    runtime->legacyMmio = state.legacyMmio;
+    runtime->legacyAudioMmio = state.legacyAudioMmio;
+    runtime->legacySystemMmio = state.legacySystemMmio;
+    runtime->heap.clear();
+    for (size_t i = 0; i < state.heap.size(); ++i)
+    {
+        runtime->heap.push_back({ state.heap[i].address,
+            state.heap[i].size, state.heap[i].free });
+    }
+    runtime->tasks.swap(restoredTasks);
+    runtime->resources.swap(restoredResources);
+    runtime->files.swap(restoredFiles);
+    runtime->openStreams.swap(restoredStreams);
+    runtime->semaphores.clear();
+    for (size_t i = 0; i < state.semaphores.size(); ++i)
+    {
+        runtime->semaphores.push_back({ state.semaphores[i].address,
+            state.semaphores[i].count });
+    }
+    runtime->dynamicImports = state.dynamicImports;
+    runtime->unknownImportNames = state.unknownImportNames;
+    runtime->currentTaskIndex = UINT32_MAX;
+
+    runtime->heapStart = state.heapStart;
+    runtime->heapCursor = state.heapCursor;
+    runtime->dvcAudioHandle = state.dvcAudioHandle;
+    runtime->dvcAudioSampleRate = state.dvcAudioSampleRate;
+    runtime->dvcAudioVolume = state.dvcAudioVolume;
+    runtime->framebufferAddress = state.framebufferAddress;
+    runtime->framebufferBits = state.framebufferBits;
+    memcpy(runtime->framebufferWriteHighWater, state.framebufferWriteHighWater,
+        sizeof(runtime->framebufferWriteHighWater));
+    runtime->framebufferBitsExplicit = state.framebufferBitsExplicit;
+    runtime->cc1800Compatibility = state.cc1800Compatibility;
+    runtime->dvcAudioStarted = state.dvcAudioStarted;
+    runtime->stats->instructions = state.runtimeInstructions;
+    runtime->startTime = std::chrono::steady_clock::now() -
+        std::chrono::microseconds((uint64_t)(state.elapsedGuestMicros /
+            (s_runtimeSpeedScale.load() > 0 ? s_runtimeSpeedScale.load() : 1.0)));
+    runtime->instructionCache.assign(
+        runtime->instructionCache.size(), Arm32InstructionCacheEntry());
+    runtime->bus.userData = runtime;
+    runtime->bus.directSystemRam = runtime->systemMemory.data();
+    runtime->bus.directSystemRamBase = kCcHomebrewSystemRamStart;
+    runtime->bus.directSystemRamSize =
+        (uint32_t)runtime->systemMemory.size();
+    runtime->bus.directRam = runtime->ram.data();
+    runtime->bus.directRamBase = runtime->ramStart;
+    runtime->bus.directRamSize = (uint32_t)runtime->ram.size();
+    runtime->bus.directStack = runtime->stack.data();
+    runtime->bus.directStackBase = kStackStart;
+    runtime->bus.directStackSize = (uint32_t)runtime->stack.size();
+    runtime->bus.directHeap = runtime->heapMemory.data();
+    runtime->bus.directHeapBase = runtime->heapStart;
+    runtime->bus.directHeapSize = runtime->legacySystemMmio.empty() ?
+        (uint32_t)runtime->heapMemory.size() :
+        kLegacySystemMmioStart - runtime->heapStart;
+    runtime->bus.instructionCache = runtime->instructionCache.data();
+    runtime->bus.instructionCacheCount =
+        (uint32_t)runtime->instructionCache.size();
+    printf("cc-arm: save-state restored tasks=%u streams=%u resources=%u\n",
+        (uint32_t)runtime->tasks.size(), (uint32_t)runtime->openStreams.size(),
+        (uint32_t)runtime->resources.size());
+    return true;
+}
 
 static uint8_t* resolveMemorySpan(CcArmRuntime* runtime, uint32_t address,
     uint32_t* available)
@@ -168,10 +519,18 @@ static uint8_t* resolveMemorySpan(CcArmRuntime* runtime, uint32_t address,
             (uint32_t)runtime->legacyLowMemory.size() - address;
         return runtime->legacyLowMemory.data() + address;
     }
-    uint32_t offset = address - kRamStart;
-    if (address >= kRamStart && offset < kRamSize)
+    uint32_t offset = address - kCcHomebrewSystemRamStart;
+    if (address >= kCcHomebrewSystemRamStart &&
+        offset < runtime->systemMemory.size())
     {
-        if (available) *available = kRamSize - offset;
+        if (available) *available =
+            (uint32_t)runtime->systemMemory.size() - offset;
+        return runtime->systemMemory.data() + offset;
+    }
+    offset = address - runtime->ramStart;
+    if (address >= runtime->ramStart && offset < runtime->ram.size())
+    {
+        if (available) *available = (uint32_t)runtime->ram.size() - offset;
         return runtime->ram.data() + offset;
     }
     offset = address - kStackStart;
@@ -188,10 +547,20 @@ static uint8_t* resolveMemorySpan(CcArmRuntime* runtime, uint32_t address,
             (uint32_t)runtime->legacySystemMmio.size() - offset;
         return runtime->legacySystemMmio.data() + offset;
     }
-    offset = address - runtime->heapStart;
-    if (address >= runtime->heapStart && offset < kHeapSize)
+    offset = address - kLegacyAudioMmioStart;
+    if (address >= kLegacyAudioMmioStart &&
+        offset < runtime->legacyAudioMmio.size())
     {
-        if (available) *available = kHeapSize - offset;
+        if (available) *available =
+            (uint32_t)runtime->legacyAudioMmio.size() - offset;
+        return runtime->legacyAudioMmio.data() + offset;
+    }
+    offset = address - runtime->heapStart;
+    if (address >= runtime->heapStart &&
+        offset < runtime->heapMemory.size())
+    {
+        if (available) *available =
+            (uint32_t)runtime->heapMemory.size() - offset;
         return runtime->heapMemory.data() + offset;
     }
     offset = address - kFramebufferAddress;
@@ -352,7 +721,7 @@ static void presentFramebuffer(CcArmRuntime* runtime, uint32_t requestedAddress)
     }
     if (!runtime->framebufferBitsExplicit && frameAddress >= kFramebufferAddress &&
         frameAddress - kFramebufferAddress < kCcFramebufferSize &&
-        runtime->package->origin >= 0x13000000u &&
+        ccPackageUsesHomebrewLayout(runtime->package->origin) &&
         runtime->framebufferWriteHighWater[
             (frameAddress - kFramebufferAddress) / kCcFramebufferStride] >
             kFramebuffer16Size)
@@ -492,11 +861,11 @@ static int compareGuestStringsIgnoreCase(CcArmRuntime* runtime,
 
 static uint32_t mapInputForRuntime(const CcArmRuntime* runtime, uint32_t input)
 {
-    if (ccUses1800InputMapping(runtime->package->origin))
+    if (ccUsesRetailInputMapping(runtime->package->origin))
     {
-        return mapInputToCc1800(input);
+        return mapInputToRetailLayout(input);
     }
-    return mapInputToCc1600(input);
+    return mapInputToHomebrewLayout(input);
 }
 
 static uint32_t findExport(const GuestPackage* package, const char* name)
@@ -551,7 +920,8 @@ static uint32_t allocateMemory(CcArmRuntime* runtime, uint32_t size)
     {
         runtime->heapCursor = kLegacySystemMmioStart + kLegacySystemMmioSize;
     }
-    if (runtime->heapCursor > runtime->heapStart + kHeapSize - aligned) return 0;
+    if ((uint64_t)runtime->heapCursor + aligned >
+        (uint64_t)runtime->heapStart + runtime->heapMemory.size()) return 0;
     uint32_t address = runtime->heapCursor;
     runtime->heapCursor += aligned;
     runtime->heap.push_back({ address, aligned, false });
@@ -630,7 +1000,7 @@ static uint32_t openFile(CcArmRuntime* runtime, const char* name, const char* mo
     uint32_t stream = fsys_fopen(name, mode);
     if (!stream) return 0;
     runtime->openStreams.push_back(stream);
-    if (runtime->package->origin < 0x13000000u) return stream;
+    if (ccPackageUsesRetailLayout(runtime->package->origin)) return stream;
 
     uint32_t address = allocateMemory(runtime, 16u);
     const uint32_t magic = 0x46535953u;
@@ -669,6 +1039,19 @@ static CcArmRuntime::Semaphore* findSemaphore(CcArmRuntime* runtime,
         if (runtime->semaphores[i].address == address) return &runtime->semaphores[i];
     }
     return NULL;
+}
+
+static size_t findActiveTaskIndex(const CcArmRuntime* runtime,
+    uint32_t priority)
+{
+    for (size_t i = 0; i < runtime->tasks.size(); ++i)
+    {
+        if (!runtime->tasks[i].finished && runtime->tasks[i].priority == priority)
+        {
+            return i;
+        }
+    }
+    return runtime->tasks.size();
 }
 
 static uint32_t createDynamicImport(CcArmRuntime* runtime, const char* name)
@@ -1348,6 +1731,16 @@ static uint32_t runSoft3dOpaqueScanlines(CcArmRuntime* runtime,
     return rendererAddress;
 }
 
+static void saveArmCalleeSaved(const Arm32State* state, uint32_t* saved)
+{
+    memcpy(saved, state->r + 4u, 8u * sizeof(uint32_t));
+}
+
+static void restoreArmCalleeSaved(Arm32State* state, const uint32_t* saved)
+{
+    memcpy(state->r + 4u, saved, 8u * sizeof(uint32_t));
+}
+
 static uint32_t runSoft3dFill32(CcArmRuntime* runtime, const Arm32State* state)
 {
     int32_t count = (int32_t)state->r[3];
@@ -1569,65 +1962,6 @@ static uint32_t runCc1800TransitionBlend(CcArmRuntime* runtime,
 static const char kTransitionBlendImport[] = {
     99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 116, 114, 97,
     110, 115, 105, 116, 105, 111, 110, 95, 98, 108, 101, 110, 100, 0
-};
-
-static uint64_t readCc1800U64(CcArmRuntime* runtime, uint32_t address,
-    bool* ok)
-{
-    uint32_t high = 0;
-    uint32_t low = 0;
-    *ok = readGuestU32(runtime, address, &high) &&
-        readGuestU32(runtime, address + 4u, &low);
-    return ((uint64_t)high << 32) | low;
-}
-
-static bool writeCc1800U64(CcArmRuntime* runtime, uint32_t address,
-    uint64_t value)
-{
-    return writeGuestU32(runtime, address, (uint32_t)(value >> 32)) &&
-        writeGuestU32(runtime, address + 4u, (uint32_t)value);
-}
-
-static uint32_t runCc1800SignedDivide64(CcArmRuntime* runtime,
-    const Arm32State* state)
-{
-    bool numeratorOk = false;
-    bool denominatorOk = false;
-    uint64_t numerator = readCc1800U64(runtime, state->r[0], &numeratorOk);
-    uint64_t denominator = readCc1800U64(runtime, state->r[1], &denominatorOk);
-    if (!numeratorOk || !denominatorOk) return state->r[0];
-
-    bool numeratorNegative = (numerator >> 63) != 0;
-    bool denominatorNegative = (denominator >> 63) != 0;
-    uint64_t absoluteNumerator = numeratorNegative ? (~numerator + 1u) : numerator;
-    uint64_t absoluteDenominator = denominatorNegative ? (~denominator + 1u) : denominator;
-    if (!writeCc1800U64(runtime, state->r[0], absoluteNumerator) ||
-        !writeCc1800U64(runtime, state->r[1], absoluteDenominator) ||
-        !writeCc1800U64(runtime, state->r[2], 0u))
-    {
-        return state->r[0];
-    }
-    if (!absoluteDenominator) return state->r[0];
-    if (!writeCc1800U64(runtime, state->r[3], absoluteNumerator) ||
-        !absoluteNumerator)
-    {
-        return state->r[0];
-    }
-
-    uint64_t quotient = 0;
-    uint64_t remainder = 0;
-    ccDivideUnsigned64LikeCc1800(absoluteNumerator, absoluteDenominator,
-        &quotient, &remainder);
-    if (absoluteNumerator >> 63) remainder = ~remainder + 1u;
-    if (numeratorNegative != denominatorNegative) quotient = ~quotient + 1u;
-    writeCc1800U64(runtime, state->r[2], quotient);
-    writeCc1800U64(runtime, state->r[3], remainder);
-    return state->r[0];
-}
-
-static const char kSignedDivide64Import[] = {
-    99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 115, 105, 103,
-    110, 101, 100, 95, 100, 105, 118, 105, 100, 101, 54, 52, 0
 };
 
 static const char kSoft3dLitScanlineImport[] = {
@@ -2142,6 +2476,126 @@ static void finishCurrentTask(Arm32State* state)
     state->r[15] = kExitAddress;
 }
 
+static bool handleLegacyAudioImport(CcArmRuntime* runtime, Arm32State* state,
+    const char* name, bool* completed)
+{
+    *completed = true;
+    if (!strcmp(name, "DVCOpenDevice"))
+    {
+        char deviceName[128] = {};
+        if (!readGuestString(runtime, state->r[0], deviceName, sizeof(deviceName)) ||
+            strcmp(deviceName, kDvcAudioDeviceName))
+        {
+            state->r[0] = 0;
+            return true;
+        }
+        runtime->dvcAudioHandle = kDvcAudioHandle;
+        runtime->dvcAudioSampleRate = kDvcAudioDefaultSampleRate;
+        runtime->dvcAudioVolume = kDvcAudioMaxVolume;
+        runtime->dvcAudioStarted = false;
+        markCurrentTaskAsAudioProducer(runtime);
+        state->r[0] = runtime->dvcAudioHandle;
+        return true;
+    }
+    if (!strcmp(name, "DVCControlDevice"))
+    {
+        if (state->r[0] != runtime->dvcAudioHandle || !runtime->dvcAudioHandle)
+        {
+            state->r[0] = UINT32_MAX;
+            return true;
+        }
+        uint32_t* argument = (uint32_t*)resolveMemory(runtime, state->r[3],
+            sizeof(uint32_t));
+        if (state->r[2] == kDvcAudioSetSampleRate && argument && *argument)
+        {
+            runtime->dvcAudioSampleRate = *argument;
+        }
+        else if (state->r[2] == kDvcAudioStartPlayback && argument && *argument &&
+            !runtime->dvcAudioStarted)
+        {
+            waveout_args* args = (waveout_args*)malloc(sizeof(*args));
+            if (!args)
+            {
+                state->r[0] = UINT32_MAX;
+                return true;
+            }
+            args->sample_rate = runtime->dvcAudioSampleRate;
+            args->format = AFMT_S16_LE;
+            args->channel = 2;
+            args->volume = 255;
+            runtime->dvcAudioStarted = waveout_open(args) != 0;
+        }
+        state->r[0] = runtime->dvcAudioStarted ||
+            state->r[2] != kDvcAudioStartPlayback ? 0u : UINT32_MAX;
+        return true;
+    }
+    if (!strcmp(name, "DVCWriteDevice"))
+    {
+        markCurrentTaskAsAudioProducer(runtime);
+        if (state->r[2] != runtime->dvcAudioHandle || !runtime->dvcAudioStarted)
+        {
+            state->r[0] = UINT32_MAX;
+            return true;
+        }
+        const bool skipsAudioOutput = waveout_skips_audio_output();
+        if (!skipsAudioOutput && !waveout_can_write_nonblocking())
+        {
+            state->r[15] -= 4u;
+            scheduleCurrentTaskDelay(runtime, 1u);
+            *completed = false;
+            return true;
+        }
+        char* data = (char*)resolveMemory(runtime, state->r[0], state->r[1]);
+        char* copy = data && state->r[1] ? (char*)malloc(state->r[1]) : NULL;
+        if (copy) memcpy(copy, data, state->r[1]);
+        if (!copy)
+        {
+            state->r[0] = UINT32_MAX;
+            return true;
+        }
+        uint32_t written = skipsAudioOutput ?
+            waveout_write(runtime->dvcAudioHandle, copy, (int)state->r[1]) :
+            waveout_try_write(runtime->dvcAudioHandle, copy, (int)state->r[1]);
+        state->r[0] = written ? state->r[1] : UINT32_MAX;
+        return true;
+    }
+    if (!strcmp(name, "DVCCloseDevice"))
+    {
+        if (runtime->dvcAudioStarted) waveout_close(runtime->dvcAudioHandle);
+        runtime->dvcAudioHandle = 0;
+        runtime->dvcAudioStarted = false;
+        state->r[0] = 0;
+        return true;
+    }
+    if (!strcmp(name, "SYSSetVolume"))
+    {
+        runtime->dvcAudioVolume = std::min<uint32_t>(state->r[0],
+            kDvcAudioMaxVolume);
+        waveout_set_volume((runtime->dvcAudioVolume * 255u +
+            kDvcAudioMaxVolume / 2u) / kDvcAudioMaxVolume);
+        state->r[0] = 0;
+        return true;
+    }
+    if (!strcmp(name, "SYSGetVolume") || !strcmp(name, "get_game_vol"))
+    {
+        state->r[0] = runtime->dvcAudioVolume ? runtime->dvcAudioVolume :
+            kDvcAudioMaxVolume;
+        return true;
+    }
+    if (!strcmp(name, "HP_Mute_sw"))
+    {
+        state->r[0] = waveout_mute(state->r[0]);
+        return true;
+    }
+    if (!strcmp(name, "wavaopen") || !strcmp(name, "waveioc") ||
+        !strcmp(name, "waveclose"))
+    {
+        state->r[0] = 0;
+        return true;
+    }
+    return false;
+}
+
 static void requestCcGuestExit(CcArmRuntime* runtime, Arm32State* state, const char* reason)
 {
     printf("cc-arm: guest exit requested by %s task=%u lr=0x%08x\n",
@@ -2178,7 +2632,7 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     if (immediate < runtime->package->import_count && runtime->package->import_data[immediate])
     {
         name = runtime->package->import_data[immediate]->name;
-        if (runtime->package->origin >= 0x13000000u &&
+        if (ccPackageUsesHomebrewLayout(runtime->package->origin) &&
             runtime->package->import_data[immediate]->offset == svcAddress)
         {
             state->r[15] = state->r[14] & ~1u;
@@ -2197,17 +2651,16 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     runtime->stats->importCalls++;
     snprintf(runtime->stats->lastImport, sizeof(runtime->stats->lastImport), "%s",
         name ? name : "(invalid)");
+    runtime->stats->lastImportPc = svcAddress;
+    runtime->stats->lastImportReturnAddress = state->r[14];
     if (!name)
     {
         recordUnknownImport(runtime, NULL);
         state->r[0] = 0;
         return true;
     }
-    pauseGateWaitForResume();
-
     if (!strcmp(name, "consoleEnable") || !strcmp(name, "consoleDisable") ||
-        !strcmp(name, "PMSetMode") ||
-        !strcmp(name, "rmt_get_status"))
+        !strcmp(name, "PMSetMode"))
     {
         state->r[0] = 0;
         return true;
@@ -2330,8 +2783,11 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     }
     if (!strcmp(name, "cc_internal_normalize_vec3_fixed"))
     {
+        uint32_t saved[8];
+        saveArmCalleeSaved(state, saved);
         state->r[0] = runNormalizeVector3Fixed(runtime,
             state->r[0], state->r[1]);
+        restoreArmCalleeSaved(state, saved);
         return true;
     }
     if (!strcmp(name, "cc_internal_indexed_scaled"))
@@ -2351,20 +2807,29 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     }
     if (!strcmp(name, "cc_internal_soft3d_scanline_opaque"))
     {
+        uint32_t saved[8];
+        saveArmCalleeSaved(state, saved);
         state->r[0] = runSoft3dOpaqueScanlines(runtime, state->r[0], state->r[1],
             false, false);
+        restoreArmCalleeSaved(state, saved);
         return true;
     }
     if (!strcmp(name, kSoft3dLitScanlineImport))
     {
+        uint32_t saved[8];
+        saveArmCalleeSaved(state, saved);
         state->r[0] = runSoft3dOpaqueScanlines(runtime, state->r[0], state->r[1],
             true, false);
+        restoreArmCalleeSaved(state, saved);
         return true;
     }
     if (!strcmp(name, kSoft3dTransparentScanlineImport))
     {
+        uint32_t saved[8];
+        saveArmCalleeSaved(state, saved);
         state->r[0] = runSoft3dOpaqueScanlines(runtime, state->r[0], state->r[1],
             false, true);
+        restoreArmCalleeSaved(state, saved);
         return true;
     }
     if (!strcmp(name, "cc_internal_soft3d_fill32"))
@@ -2382,11 +2847,7 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
         state->r[0] = runCc1800TransitionBlend(runtime, state);
         return true;
     }
-    if (!strcmp(name, kSignedDivide64Import))
-    {
-        state->r[0] = runCc1800SignedDivide64(runtime, state);
-        return true;
-    }
+
     if (!strcmp(name, kTextureSpanBlockImport))
     {
         state->r[0] = runCc1800TextureSpanBlock(runtime, state);
@@ -2430,15 +2891,7 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     if (!strcmp(name, "OSTaskDel"))
     {
         const uint32_t priority = state->r[0] & 0xffu;
-        size_t targetTaskIndex = runtime->tasks.size();
-        for (size_t i = 0; i < runtime->tasks.size(); ++i)
-        {
-            if (!runtime->tasks[i].finished && runtime->tasks[i].priority == priority)
-            {
-                targetTaskIndex = i;
-                break;
-            }
-        }
+        size_t targetTaskIndex = findActiveTaskIndex(runtime, priority);
         if (targetTaskIndex == runtime->tasks.size())
         {
             state->r[0] = 41u;
@@ -2464,7 +2917,9 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     }
     if (!strcmp(name, "OSTaskQuery"))
     {
-        state->r[0] = 0;
+        const uint32_t priority = state->r[0] & 0xffu;
+        state->r[0] = findActiveTaskIndex(runtime, priority) <
+            runtime->tasks.size() ? 0u : 41u;
         return true;
     }
     if (!strcmp(name, "OSTimeDlyHMSM"))
@@ -2657,7 +3112,8 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
         return true;
     }
 
-    if (!strcmp(name, "kbd_get_status") || !strcmp(name, "_kbd_get_status"))
+    if (!strcmp(name, "kbd_get_status") || !strcmp(name, "_kbd_get_status") ||
+        !strcmp(name, "rmt_get_status"))
     {
         GuestKeyStatus status = {};
         _kbd_get_status(&status);
@@ -2801,6 +3257,12 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     if (!strcmp(name, "waveout_set_volume")) { state->r[0] = waveout_set_volume(state->r[0]); return true; }
     if (!strcmp(name, "waveout_mute")) { state->r[0] = waveout_mute(state->r[0]); return true; }
 
+    bool legacyAudioCompleted = true;
+    if (handleLegacyAudioImport(runtime, state, name, &legacyAudioCompleted))
+    {
+        return legacyAudioCompleted;
+    }
+
     if (!strcmp(name, "printf"))
     {
         state->r[0] = 0;
@@ -2812,8 +3274,10 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     return true;
 }
 
-static Arm32RunResult runState(CcArmRuntime* runtime, Arm32State* state)
+static Arm32RunResult runState(CcArmRuntime* runtime, Arm32State* state,
+    uint64_t sliceInstructions = kSliceInstructions)
 {
+    pauseGateWaitForResume();
     runtime->yielded = false;
     runtime->currentDelayTicks = 0;
     runtime->faultAddress = 0;
@@ -2822,7 +3286,7 @@ static Arm32RunResult runState(CcArmRuntime* runtime, Arm32State* state)
     runtime->faultFetch = false;
     uint64_t before = state->instructions;
     Arm32RunResult result = arm32Run(state, &runtime->bus, kExitAddress,
-        state->instructions + kSliceInstructions);
+        state->instructions + sliceInstructions);
     runtime->stats->instructions += state->instructions - before;
     uint64_t targetIps = s_targetInstructionsPerSecond.load();
     if (targetIps)
@@ -3162,25 +3626,11 @@ static uint32_t patchArmFunctionsBySignature(CcArmRuntime* runtime,
 static void patchPortableCc1800GraphicsRoutines(CcArmRuntime* runtime)
 {
     if (runtime->cc1800Compatibility) return;
-    static const uint32_t soft3dLitScanline[] = {
-        0xe92d4ff0u, 0xe2800a01u, 0xe590ca6cu, 0xe5913000u,
-        0xe51f201cu, 0xe59cb04cu, 0xe1530002u, 0x08bd8ff0u,
-    };
-    static const uint32_t signedDivide64[] = {
-        0xe92d4ff0u, 0xe3a0a000u, 0xe24dd020u, 0xe1a07000u,
-        0xe58da018u, 0xe58da01cu, 0xe5900000u, 0xe1a06002u,
-    };
     static const uint32_t normalizeVector3Fixed[] = {
         0xe92d4070u, 0xe1a06000u, 0xe5910000u, 0xe1a05001u,
         0xe1a01fc0u, 0xe5952004u, 0xe0200001u, 0xe0401001u,
     };
     uint32_t patched = 0;
-    patched += patchArmFunctionsBySignature(runtime, soft3dLitScanline,
-        sizeof(soft3dLitScanline) / sizeof(soft3dLitScanline[0]), 1u,
-        kSoft3dLitScanlineImport);
-    patched += patchArmFunctionsBySignature(runtime, signedDivide64,
-        sizeof(signedDivide64) / sizeof(signedDivide64[0]), 0u,
-        kSignedDivide64Import);
     patched += patchArmFunctionsBySignature(runtime, normalizeVector3Fixed,
         sizeof(normalizeVector3Fixed) / sizeof(normalizeVector3Fixed[0]), 0u,
         "cc_internal_normalize_vec3_fixed");
@@ -3211,11 +3661,7 @@ static uint32_t patchCc1800IndexedGraphicsRoutines(CcArmRuntime* runtime)
         { 0x10156308u, 0xe92d03f0u, 0xe5902034u, "cc_internal_indexed_transparent" },
         { 0x10157820u, 0xe92d0ff8u, 0xe5901034u, "cc_internal_indexed_alpha" },
         { 0x1015a724u, 0xe52d4004u, 0xe5904220u, "cc_internal_soft3d_fill32" },
-        { 0x101610b0u, 0xe92d4ff0u, 0xe2800a01u, "cc_internal_soft3d_scanline_opaque" },
         { 0x101819dcu, 0xe92d47f0u, 0xe1a06000u, kTransitionBlendImport },
-        { 0x1014caf4u, 0xe92d4ff0u, 0xe3a0a000u, kSignedDivide64Import },
-        { 0x10161788u, 0xe92d4ff0u, 0xe2800a01u, kSoft3dLitScanlineImport },
-        { 0x10161ea8u, 0xe92d4ff0u, 0xe2800a01u, kSoft3dTransparentScanlineImport },
     };
     uint32_t end = runtime->package->origin + runtime->package->prog_size;
     uint32_t patched = 0;
@@ -3309,24 +3755,42 @@ static uint32_t patchCc1800IndexedGraphicsRoutines(CcArmRuntime* runtime)
 
 static bool initializeRuntime(CcArmRuntime* runtime, const char* path)
 {
-    runtime->ram.resize(kRamSize);
+    bool homebrewLayout = ccPackageUsesHomebrewLayout(runtime->package->origin);
+    runtime->ramStart = homebrewLayout ? kCcHomebrewRamStart : kCcRetailRamStart;
+    if (homebrewLayout)
+    {
+        uint64_t heapStart = ((uint64_t)runtime->package->origin +
+            runtime->package->prog_size + 0xfffu) & ~0xfffull;
+        if (heapStart > (uint64_t)kCcHomebrewRamStart + kCcHomebrewRamSize)
+        {
+            return false;
+        }
+        runtime->heapStart = kCcHomebrewHeapStart;
+        runtime->systemMemory.resize(kCcHomebrewSystemRamSize);
+        runtime->ram.resize(kCcHomebrewRamSize);
+        runtime->heapMemory.resize(kCcHomebrewHeapSize);
+    }
+    else
+    {
+        runtime->heapStart = kCcRetailHeapStart;
+        runtime->ram.resize(kCcRetailRamSize);
+        runtime->heapMemory.resize(kCcRetailHeapSize);
+    }
     runtime->stack.resize(kStackSize);
-    runtime->heapMemory.resize(kHeapSize);
     runtime->framebuffer.resize(kCcVideoMemorySize);
     runtime->legacyMmio.resize(kLegacyMmioSize);
     runtime->framebufferAddress = kFramebufferAddress;
     runtime->framebufferBits = 16u;
-    memcpy(runtime->ram.data() + runtime->package->origin - kRamStart,
+    memcpy(runtime->ram.data() + runtime->package->origin - runtime->ramStart,
         runtime->package->bin_data, runtime->package->prog_size);
-    runtime->heapStart = runtime->package->origin >= 0x13000000u ?
-        kLegacyHeapStart : kHeapStart;
-    if (runtime->package->origin >= 0x13000000u)
+    if (homebrewLayout)
     {
         runtime->legacyLowMemory.resize(kLegacyLowMemorySize);
+        runtime->legacyAudioMmio.resize(kLegacyAudioMmioSize);
         runtime->legacySystemMmio.resize(kLegacySystemMmioSize);
     }
     runtime->heapCursor = runtime->heapStart;
-    if (runtime->package->origin >= 0x13000000u)
+    if (homebrewLayout)
     {
         uint32_t statusOffset = kLegacyGraphicsStatus - kLegacySystemMmioStart;
         memcpy(runtime->legacySystemMmio.data() + statusOffset,
@@ -3334,16 +3798,21 @@ static bool initializeRuntime(CcArmRuntime* runtime, const char* path)
     }
     runtime->tasks.reserve(32);
     runtime->bus = { runtime, busFetch, busRead, busWrite, handleSvc };
+    runtime->bus.directSystemRam = runtime->systemMemory.data();
+    runtime->bus.directSystemRamBase = kCcHomebrewSystemRamStart;
+    runtime->bus.directSystemRamSize =
+        (uint32_t)runtime->systemMemory.size();
     runtime->bus.directRam = runtime->ram.data();
-    runtime->bus.directRamBase = kRamStart;
-    runtime->bus.directRamSize = kRamSize;
+    runtime->bus.directRamBase = runtime->ramStart;
+    runtime->bus.directRamSize = (uint32_t)runtime->ram.size();
     runtime->bus.directStack = runtime->stack.data();
     runtime->bus.directStackBase = kStackStart;
     runtime->bus.directStackSize = kStackSize;
     runtime->bus.directHeap = runtime->heapMemory.data();
     runtime->bus.directHeapBase = runtime->heapStart;
     runtime->bus.directHeapSize = runtime->legacySystemMmio.empty() ?
-        kHeapSize : kLegacySystemMmioStart - runtime->heapStart;
+        (uint32_t)runtime->heapMemory.size() :
+        kLegacySystemMmioStart - runtime->heapStart;
     runtime->bus.directProgramBase = runtime->package->origin;
     runtime->bus.directProgramSize = runtime->package->prog_size;
     runtime->bus.directThunkBase = kDynamicThunkStart;
@@ -3372,7 +3841,7 @@ static bool initializeRuntime(CcArmRuntime* runtime, const char* path)
     {
         if (!runtime->package->import_data[i]) continue;
         uint32_t stub[2] = { 0xef000000u | i, 0xe12fff1eu };
-        size_t stubSize = runtime->package->origin >= 0x13000000u ?
+        size_t stubSize = homebrewLayout ?
             sizeof(stub[0]) : sizeof(stub);
         if (!busWrite(runtime, runtime->package->import_data[i]->offset,
                 stub, stubSize)) return false;
@@ -3446,8 +3915,15 @@ bool ccArmRuntimeRunFile(const char* path,
     runtime.stats = stats;
     runtime.package = guestPackageCreate(file, (uint32_t)fileSize);
     fclose(file);
-    if (!runtime.package || runtime.package->origin < kRamStart ||
-        (uint64_t)runtime.package->origin + runtime.package->prog_size > kRamStart + kRamSize ||
+    bool retailLayout = runtime.package &&
+        ccPackageUsesRetailLayout(runtime.package->origin);
+    bool homebrewLayout = runtime.package &&
+        ccPackageUsesHomebrewLayout(runtime.package->origin);
+    uint32_t ramStart = homebrewLayout ? kCcHomebrewRamStart : kCcRetailRamStart;
+    uint32_t ramSize = homebrewLayout ? kCcHomebrewRamSize : kCcRetailRamSize;
+    if ((!retailLayout && !homebrewLayout) ||
+        (uint64_t)runtime.package->origin + runtime.package->prog_size >
+            (uint64_t)ramStart + ramSize ||
         !initializeRuntime(&runtime, path))
     {
         snprintf(stats->error, sizeof(stats->error), "unsupported ARM CCDL image");
@@ -3456,7 +3932,11 @@ bool ccArmRuntimeRunFile(const char* path,
         s_running.store(false); return false;
     }
     runtime.startTime = std::chrono::steady_clock::now();
-    fsys_set_guest_package(runtime.package);
+    {
+        std::lock_guard<std::mutex> lock(s_runtimeMutex);
+        s_activeRuntime = &runtime;
+    }
+    fsys_reset_guest_package(runtime.package);
     std::string gameSha256 = sha256Hex(runtime.package->file_data,
         runtime.package->file_size);
     fsys_set_game_identity(gameSha256.c_str());
@@ -3510,6 +3990,7 @@ bool ccArmRuntimeRunFile(const char* path,
         }
         while (!s_stopRequested.load() && stats->error[0] == '\0')
         {
+            pauseGateWaitForResume();
             bool anyActive = false;
             bool ranTask = false;
             size_t count = std::min<size_t>(runtime.tasks.size(), 32);
@@ -3518,7 +3999,7 @@ bool ccArmRuntimeRunFile(const char* path,
                 const bool audioPass = pass == 0;
                 for (size_t i = 0; i < count && !s_stopRequested.load(); ++i)
                 {
-                    CcArmRuntime::Task task = runtime.tasks[i];
+                    CcArmRuntime::Task& task = runtime.tasks[i];
                     if (task.finished || task.audioProducer != audioPass) continue;
                     anyActive = true;
                     if (task.delayTicks)
@@ -3527,7 +4008,6 @@ bool ccArmRuntimeRunFile(const char* path,
                             task.audioProducer);
                         if ((int32_t)(now - task.delayTicks) < 0)
                         {
-                            runtime.tasks[i] = task;
                             continue;
                         }
                         task.delayTicks = 0;
@@ -3540,7 +4020,9 @@ bool ccArmRuntimeRunFile(const char* path,
                     }
                     ranTask = true;
                     runtime.currentTaskIndex = (uint32_t)i;
-                    result = runState(&runtime, &task.state);
+                    result = runState(&runtime, &task.state,
+                        task.audioProducer ? kSliceInstructions :
+                        kNonAudioSliceInstructions);
                     runtime.currentTaskIndex = UINT32_MAX;
                     crashState = task.state;
                     task.audioProducer = task.audioProducer ||
@@ -3555,6 +4037,16 @@ bool ccArmRuntimeRunFile(const char* path,
                     }
                     else if (result != ARM32_RUN_LIMIT)
                     {
+                        stats->faultAddress = runtime.faultAddress;
+                        stats->faultSize = runtime.faultSize;
+                        stats->faultWrite = runtime.faultWrite;
+                        stats->faultFetch = runtime.faultFetch;
+                        stats->unsupportedPc = task.state.unsupportedPc;
+                        stats->failedTaskIndex = (uint32_t)i;
+                        stats->failedTaskEntry = task.entry;
+                        stats->failedTaskStack = task.stack;
+                        stats->failedTaskPriority = task.priority;
+                        stats->failedTaskDelayTicks = task.delayTicks;
                         snprintf(stats->error, sizeof(stats->error),
                             "task failed result=%u pc=0x%08x insn=0x%08x sp=0x%08x lr=0x%08x "
                             "r4=0x%08x r5=0x%08x fault=%c%c0x%08x/%u import=%s",
@@ -3564,7 +4056,6 @@ bool ccArmRuntimeRunFile(const char* path,
                             runtime.faultAddress, runtime.faultSize, stats->lastImport);
                         break;
                     }
-                    runtime.tasks[i] = task;
                 }
                 if (stats->error[0] != '\0') break;
             }
@@ -3592,6 +4083,18 @@ bool ccArmRuntimeRunFile(const char* path,
         crashContext.registers = crashState.r;
         crashContext.cpsr = crashState.cpsr;
         crashContext.unsupportedInstruction = crashState.unsupportedInstruction;
+        crashContext.unsupportedPc = stats->unsupportedPc;
+        crashContext.faultAddress = stats->faultAddress;
+        crashContext.faultSize = stats->faultSize;
+        crashContext.faultWrite = stats->faultWrite;
+        crashContext.faultFetch = stats->faultFetch;
+        crashContext.lastImportPc = stats->lastImportPc;
+        crashContext.lastImportReturnAddress = stats->lastImportReturnAddress;
+        crashContext.failedTaskIndex = stats->failedTaskIndex;
+        crashContext.failedTaskEntry = stats->failedTaskEntry;
+        crashContext.failedTaskStack = stats->failedTaskStack;
+        crashContext.failedTaskPriority = stats->failedTaskPriority;
+        crashContext.failedTaskDelayTicks = stats->failedTaskDelayTicks;
         crashContext.instructions = stats->instructions;
         crashContext.importCalls = stats->importCalls;
         crashContext.unknownImports = stats->unknownImports;
@@ -3614,11 +4117,15 @@ bool ccArmRuntimeRunFile(const char* path,
         fsys_fclose(runtime.openStreams[i]);
     }
     cheatRuntimeUnbindMemory(&runtime);
+    fsys_reset_guest_package(NULL);
     fsys_set_save_directory("");
     fsys_set_game_identity("");
     fsys_set_game_name("");
-    fsys_set_guest_package(NULL);
     guestPackageDestroy(runtime.package);
+    {
+        std::lock_guard<std::mutex> lock(s_runtimeMutex);
+        s_activeRuntime = NULL;
+    }
     framebufferSetTransientPartialProtectionEnabled(false);
     s_running.store(false);
     printf("cc-arm: stopped ok=%u instructions=%llu imports=%u unknown=%u frames=%u tasks=%u last=%s error=%s\n",

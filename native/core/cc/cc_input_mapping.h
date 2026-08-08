@@ -1,6 +1,8 @@
 #ifndef DINGOO_PIE_CC_CC_INPUT_MAPPING_H
 #define DINGOO_PIE_CC_CC_INPUT_MAPPING_H
 
+#include "cc/cc_package_layout.h"
+
 #include <stdint.h>
 
 static const uint32_t CC_INPUT_SOURCE_POWER = 0x00000080u;
@@ -17,12 +19,12 @@ static const uint32_t CC_INPUT_SOURCE_LEFT = 0x10000000u;
 static const uint32_t CC_INPUT_SOURCE_R = 0x20000000u;
 static const uint32_t CC_INPUT_SOURCE_A = 0x80000000u;
 
-static inline bool ccUses1800InputMapping(uint32_t packageOrigin)
+static inline bool ccUsesRetailInputMapping(uint32_t packageOrigin)
 {
-    return packageOrigin < 0x13000000u;
+    return ccPackageUsesRetailLayout(packageOrigin);
 }
 
-static inline uint32_t mapInputToCc1800(uint32_t input)
+static inline uint32_t mapInputToRetailLayout(uint32_t input)
 {
     uint32_t mapped = input & (CC_INPUT_SOURCE_POWER |
         CC_INPUT_SOURCE_RIGHT | CC_INPUT_SOURCE_UP | CC_INPUT_SOURCE_DOWN |
@@ -37,7 +39,7 @@ static inline uint32_t mapInputToCc1800(uint32_t input)
     return mapped;
 }
 
-static inline uint32_t mapInputToCc1600(uint32_t input)
+static inline uint32_t mapInputToHomebrewLayout(uint32_t input)
 {
     uint32_t mapped = input &
         (CC_INPUT_SOURCE_UP | CC_INPUT_SOURCE_DOWN | CC_INPUT_SOURCE_LEFT |

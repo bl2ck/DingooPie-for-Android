@@ -64,7 +64,7 @@ public class HIDDeviceManager {
     private Context mContext;
     private HashMap<Integer, HIDDevice> mDevicesById = new HashMap<Integer, HIDDevice>();
     private HashMap<BluetoothDevice, HIDDeviceBLESteamController> mBluetoothDevices = new HashMap<BluetoothDevice, HIDDeviceBLESteamController>();
-    private int mNextDeviceId = 0;
+    private HIDDeviceIdAllocator mDeviceIdAllocator;
     private SharedPreferences mSharedPreferences = null;
     private boolean mIsChromebook = false;
     private UsbManager mUsbManager;
@@ -139,28 +139,22 @@ public class HIDDeviceManager {
         mSharedPreferences = mContext.getSharedPreferences("hidapi", Context.MODE_PRIVATE);
         mIsChromebook = mContext.getPackageManager().hasSystemFeature("org.chromium.arc.device_management");
 
-//        if (shouldClear) {
-//            SharedPreferences.Editor spedit = mSharedPreferences.edit();
-//            spedit.clear();
-//            spedit.commit();
-//        }
-//        else
-        {
-            mNextDeviceId = mSharedPreferences.getInt("next_device_id", 0);
-        }
+        mDeviceIdAllocator = new HIDDeviceIdAllocator(
+                mSharedPreferences.getInt("next_device_id", 1));
     }
 
     public Context getContext() {
         return mContext;
     }
 
-    public int getDeviceIDForIdentifier(String identifier) {
+    @SuppressLint("ApplySharedPref")
+    public synchronized int getDeviceIDForIdentifier(String identifier) {
         SharedPreferences.Editor spedit = mSharedPreferences.edit();
 
-        int result = mSharedPreferences.getInt(identifier, 0);
-        if (result == 0) {
-            result = mNextDeviceId++;
-            spedit.putInt("next_device_id", mNextDeviceId);
+        int persistedDeviceId = mSharedPreferences.getInt(identifier, -1);
+        int result = mDeviceIdAllocator.resolve(persistedDeviceId);
+        if (persistedDeviceId <= 0) {
+            spedit.putInt("next_device_id", mDeviceIdAllocator.getNextDeviceId());
         }
 
         spedit.putInt(identifier, result);

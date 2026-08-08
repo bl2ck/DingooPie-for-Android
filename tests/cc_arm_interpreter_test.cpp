@@ -1,5 +1,6 @@
 #include "guest/guest_package.h"
 #include "cc/arm32_interpreter.h"
+#include "cc/cc_package_layout.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,8 +17,12 @@
 #define ARM_TEST_USE_INSTRUCTION_CACHE 1
 #endif
 
-static const uint32_t kRamStart = 0x10000000u;
-static const uint32_t kRamSize = 0x04000000u;
+static const uint32_t kRamStart = kCcHomebrewProgramOrigin;
+static const uint32_t kRamSize = 0x01000000u;
+static const uint32_t kCcRetailRamStart = 0x10000000u;
+static const uint32_t kCcRetailRamSize = 0x04000000u;
+static const uint32_t kCcHomebrewSystemRamStart = 0x10000000u;
+static const uint32_t kCcHomebrewSystemRamSize = 0x03800000u;
 static const uint32_t kStackStart = 0x1ff00000u;
 static const uint32_t kStackSize = 0x00100000u;
 static const uint32_t kExitAddress = 0x1ffffffcu;
@@ -25,6 +30,7 @@ static const uint32_t kExitAddress = 0x1ffffffcu;
 struct TestMemory
 {
     std::vector<uint8_t> ram;
+    std::vector<uint8_t> systemMemory;
     std::vector<uint8_t> stack;
 };
 
@@ -32,6 +38,8 @@ struct TestContext
 {
     TestMemory memory;
     GuestPackage* package;
+    uint32_t ramStart;
+    uint32_t ramSize;
     uint32_t heapCursor;
     std::vector<std::string> dynamicImports;
     uint32_t importCalls;
@@ -45,8 +53,18 @@ struct TestContext
 
 static uint8_t* resolve(TestContext* context, uint32_t address, size_t size)
 {
-    uint32_t offset = address - kRamStart;
-    if (address >= kRamStart && offset < kRamSize && size <= kRamSize - offset)
+    uint32_t systemOffset = address - kCcHomebrewSystemRamStart;
+    if (!context->memory.systemMemory.empty() &&
+        address >= kCcHomebrewSystemRamStart &&
+        systemOffset < context->memory.systemMemory.size() &&
+        size <= context->memory.systemMemory.size() - systemOffset)
+    {
+        return context->memory.systemMemory.data() + systemOffset;
+    }
+    uint32_t ramStart = context->ramStart ? context->ramStart : kRamStart;
+    uint32_t ramSize = context->ramSize ? context->ramSize : kRamSize;
+    uint32_t offset = address - ramStart;
+    if (address >= ramStart && offset < ramSize && size <= ramSize - offset)
     {
         return context->memory.ram.data() + offset;
     }
@@ -153,7 +171,9 @@ static uint32_t findImport(const GuestPackage* package, const char* name)
 static uint32_t allocateGuest(TestContext* context, uint32_t size)
 {
     uint32_t aligned = (size + 15u) & ~15u;
-    if (!aligned || context->heapCursor > kRamStart + kRamSize - aligned)
+    uint32_t ramStart = context->ramStart ? context->ramStart : kRamStart;
+    uint32_t ramSize = context->ramSize ? context->ramSize : kRamSize;
+    if (!aligned || context->heapCursor > ramStart + ramSize - aligned)
     {
         return 0;
     }
@@ -383,6 +403,9 @@ static bool testDoublewordTransfer()
 
     Arm32Bus bus = {};
     bus.userData = &context;
+    bus.directSystemRam = context.memory.systemMemory.data();
+    bus.directSystemRamBase = kCcHomebrewSystemRamStart;
+    bus.directSystemRamSize = (uint32_t)context.memory.systemMemory.size();
     bus.fetch = readMemory;
     bus.read = readMemory;
     bus.write = writeMemory;
@@ -509,10 +532,18 @@ int main(int argc, char** argv)
 
     TestContext context = {};
     context.package = package;
+    context.ramStart = ccPackageUsesHomebrewLayout(package->origin) ?
+        kRamStart : kCcRetailRamStart;
+    context.ramSize = ccPackageUsesHomebrewLayout(package->origin) ?
+        kRamSize : kCcRetailRamSize;
     context.heapCursor = (package->origin + package->prog_size + 15u) & ~15u;
-    context.memory.ram.resize(kRamSize);
+    if (ccPackageUsesHomebrewLayout(package->origin))
+    {
+        context.memory.systemMemory.resize(kCcHomebrewSystemRamSize);
+    }
+    context.memory.ram.resize(context.ramSize);
     context.memory.stack.resize(kStackSize);
-    memcpy(context.memory.ram.data() + package->origin - kRamStart,
+    memcpy(context.memory.ram.data() + package->origin - context.ramStart,
         package->bin_data, package->prog_size);
 
     Arm32Bus bus = {};

@@ -6,16 +6,12 @@
 #include <string>
 #include <vector>
 
-enum
-{
-    EMULATOR_RECENT_GAME_LIMIT = 10
-};
-
 static const int EMULATOR_VIDEO_PERCENT_VALUES[] = { 50, 75, 90, 100, 110, 125, 150 };
 static const int EMULATOR_AUDIO_VOLUME_VALUES[] = { 0, 25, 50, 75, 100, 125, 150 };
 static const int EMULATOR_AUDIO_BUFFER_VALUES[] = { 512, 1024, 2048, 4096, 8192 };
+static const int EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES[] = { 75, 100, 125, 150 };
 static const char* const EMULATOR_CPU_CLOCK_VALUES[] = {
-    "", "200000000", "336000000", "370000000", "400000000", "430000000"
+    "", "200000000", "336000000", "360000000", "400000000", "430000000"
 };
 static const char* const EMULATOR_SCALE_VALUES[] = {
     "", "1.0", "0.95", "0.90", "0.85", "0.80", "0.75", "0.70", "0.65",
@@ -57,6 +53,20 @@ enum AudioEffectMode
     AUDIO_EFFECT_MODE_COUNT
 };
 
+enum DigitalNoiseReductionLevel
+{
+    DIGITAL_NOISE_REDUCTION_HIGH = 0,
+    DIGITAL_NOISE_REDUCTION_MEDIUM,
+    DIGITAL_NOISE_REDUCTION_LOW,
+    DIGITAL_NOISE_REDUCTION_LEVEL_COUNT
+};
+
+static_assert(DIGITAL_NOISE_REDUCTION_MEDIUM ==
+        DIGITAL_NOISE_REDUCTION_HIGH + 1 &&
+    DIGITAL_NOISE_REDUCTION_LOW == DIGITAL_NOISE_REDUCTION_MEDIUM + 1 &&
+    DIGITAL_NOISE_REDUCTION_LEVEL_COUNT == DIGITAL_NOISE_REDUCTION_LOW + 1,
+    "Digital noise reduction enum order must match the visible menu");
+
 enum UiLanguage
 {
     UI_LANGUAGE_CHINESE = 0,
@@ -80,6 +90,21 @@ enum ScreenOrientationMode
     SCREEN_ORIENTATION_MODE_COUNT
 };
 
+enum ScreenFillMode
+{
+    SCREEN_FILL_ASPECT = 0,
+    SCREEN_FILL_BLURRED_EXTENSION,
+    SCREEN_FILL_STRETCH,
+    SCREEN_FILL_COUNT
+};
+
+enum VirtualDpadType
+{
+    VIRTUAL_DPAD_JOYSTICK = 0,
+    VIRTUAL_DPAD_SEGMENTED_RING,
+    VIRTUAL_DPAD_TYPE_COUNT
+};
+
 struct EmulatorCheatSelection
 {
     std::string cheatFileName;
@@ -88,11 +113,6 @@ struct EmulatorCheatSelection
 
 struct EmulatorSettings
 {
-    // lastGamePath is the startup target; recentGamePaths backs the visible
-    // Recent Games menu in newest-first order.
-    std::string lastGamePath;
-    std::vector<std::string> recentGamePaths;
-
     // Video fields follow the Android Options > Video menu order.
     AntiAliasingMode antiAliasing;
     ColorEffectMode colorEffect;
@@ -102,17 +122,21 @@ struct EmulatorSettings
     int saturationPercent;
     MinimizedBehavior minimizedBehavior;
     ScreenOrientationMode screenOrientationMode;
+    ScreenFillMode screenFill;
     bool showFps;
 
     // Audio fields follow the Android Options > Audio menu order.
     int audioVolumePercent;
     int audioBufferSamples;
     AudioEffectMode audioEffect;
+    DigitalNoiseReductionLevel digitalNoiseReduction;
     bool audioDisabled;
 
     // Input fields follow the Android Options > Input menu order.
     bool systemImeDisabled;
     bool showVirtualControls;
+    int virtualControlScalePercent;
+    VirtualDpadType virtualDpadType;
     std::string controllerMapping;
     std::string keyboardMapping;
 
@@ -136,9 +160,6 @@ EmulatorSettings emulatorDefaultSettings(void);
 std::string emulatorSettingsPath(void);
 EmulatorSettings emulatorLoadSettings(void);
 bool emulatorSaveSettings(const EmulatorSettings& settings);
-bool emulatorRememberRecentGame(EmulatorSettings* settings, const std::string& gamePath);
-bool emulatorRemoveRecentGame(EmulatorSettings* settings, const std::string& gamePath);
-bool emulatorClearRecentGames(EmulatorSettings* settings);
 std::vector<std::string> emulatorCheatFeatureKeysForGame(
     const EmulatorSettings& settings,
     const std::string& gamePath);
@@ -153,8 +174,11 @@ void emulatorApplySharedRuntimeSettings(const EmulatorSettings& settings);
 const char* emulatorAntiAliasingName(AntiAliasingMode mode);
 const char* emulatorColorEffectName(ColorEffectMode mode);
 const char* emulatorAudioEffectName(AudioEffectMode mode);
+const char* emulatorDigitalNoiseReductionName(DigitalNoiseReductionLevel level);
 const char* emulatorUiLanguageName(UiLanguage language);
 const char* emulatorMinimizedBehaviorName(MinimizedBehavior behavior);
 const char* emulatorScreenOrientationName(ScreenOrientationMode mode);
+const char* emulatorScreenFillName(ScreenFillMode fill);
+const char* emulatorVirtualDpadTypeName(VirtualDpadType type);
 
 #endif

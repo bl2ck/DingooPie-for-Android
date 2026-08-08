@@ -14,6 +14,7 @@ void frontendNotifyGameStarted(const char* gamePath);
 bool frontendConsumeGameLaunchRequest(std::string* outPath);
 void frontendRequestQuit(void);
 void frontendRequestGameExit(void);
+bool frontendGameExitRequested(void);
 bool frontendQuitRequested(void);
 void frontendShutdown(void);
 bool frontendGameRunning(void);
@@ -22,6 +23,7 @@ bool frontendGamePaused(void);
 bool frontendUserGamePaused(void);
 void frontendSetGamePaused(bool paused);
 void frontendClearPauseRequests(void);
+void frontendNotifyAndroidBackground(bool backgrounded);
 void frontendApplyVideoSettings(const EmulatorSettings& settings);
 void frontendApplyAudioSettings(const EmulatorSettings& settings);
 void frontendApplyInputSettings(const EmulatorSettings& settings);
@@ -29,8 +31,6 @@ void frontendBeginControllerMapping(uint32_t controlBit);
 std::string frontendControllerSourceForControl(uint32_t controlBit);
 bool frontendRunCheatManagerAutomation(void);
 bool frontendRunCheatManagerFileSwitchAutomation(void);
-bool frontendSaveScreenshot(const char* path);
-bool frontendSaveScreenshotThumbnail(const char* path, int maxWidth, int maxHeight);
 
 void updateFb(void);
 

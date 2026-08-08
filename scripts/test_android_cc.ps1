@@ -154,7 +154,7 @@ function Start-AutomationGameAndReadNativeLog {
     Start-Sleep -Seconds $WaitSeconds
     return (Invoke-Adb -Arguments @(
         'shell', 'run-as', 'com.dingoopie.android',
-        'cat', 'files/dingoopie-native.log')) -join "`r`n"
+        'cat', 'logs/dingoopie-native.log')) -join "`r`n"
 }
 
 function Assert-NativeLogContains {
@@ -325,7 +325,7 @@ if ($logText -match 'FATAL EXCEPTION|Fatal signal|ANR in com\.dingoopie\.android
 }
 $nativeLogText = (Invoke-Adb -Arguments @(
     'shell', 'run-as', 'com.dingoopie.android',
-    'cat', 'files/dingoopie-native.log')) -join "`r`n"
+    'cat', 'logs/dingoopie-native.log')) -join "`r`n"
 [System.IO.File]::WriteAllText(
     $nativeLogPath, $nativeLogText, [System.Text.UTF8Encoding]::new($false))
 if ($nativeLogText -notmatch 'cc-arm: timing runtime_scale=') {
@@ -337,7 +337,11 @@ $ocrText = Get-WindowsOcrText -ImagePath $screenshot
 $normalizedOcr = [regex]::Replace($ocrText, '[^\p{L}\p{N}]', '')
 $startGamePrefix = [string][char]0x5f00 + [char]0x59cb + [char]0x6e38
 $startGameOcrFallback = [string][char]0x5f00 + [char]0x7684 + [char]0x6e38
-if (!$normalizedOcr.Contains($startGamePrefix) -and
+if (!$normalizedOcr) {
+    throw 'Windows OCR did not recognize any CC game content.'
+}
+if (($VerifyDoudizhuDeal -or $VerifyDoudizhuExit) -and
+    !$normalizedOcr.Contains($startGamePrefix) -and
     !$normalizedOcr.Contains($startGameOcrFallback)) {
     throw "Windows OCR did not recognize the repaired start-game label. OCR: $ocrText"
 }
@@ -360,7 +364,7 @@ if ($VerifyDoudizhuExit) {
         Start-Sleep -Milliseconds 500
         $exitNativeLogText = (Invoke-Adb -Arguments @(
             'shell', 'run-as', 'com.dingoopie.android',
-            'cat', 'files/dingoopie-native.log')) -join "`r`n"
+            'cat', 'logs/dingoopie-native.log')) -join "`r`n"
         if ($exitNativeLogText -match 'game-runtime: CC runtime thread joined') {
             break
         }
@@ -458,7 +462,7 @@ if ($AppGamePath) {
     }
     $appNativeLogText = (Invoke-Adb -Arguments @(
         'shell', 'run-as', 'com.dingoopie.android',
-        'cat', 'files/dingoopie-native.log')) -join "`r`n"
+        'cat', 'logs/dingoopie-native.log')) -join "`r`n"
     [System.IO.File]::WriteAllText(
         $appNativeLogPath, $appNativeLogText, [System.Text.UTF8Encoding]::new($false))
     if ($appNativeLogText -match 'execution backend: ARM32 interpreter' -or
@@ -495,7 +499,7 @@ controller_mapping=A=B
 keyboard_mapping=space=A
 [runtime]
 backend=compatibility
-cpu_hz=200000000
+cpu_hz=360000000
 speed_scale=0.80
 ostimedly_scale=0.75
 cheats_enabled=1
@@ -512,7 +516,7 @@ profile=1
         [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText(
         $cheatPath,
-        "on|CC Shared Settings|u16|0x21000000|0x5AA5`r`n",
+        "on|CC Shared Settings|u16|0x13FFFFFE|0x5AA5`r`n",
         [System.Text.UTF8Encoding]::new($false))
 
     Invoke-Adb -Arguments @(
@@ -545,14 +549,17 @@ profile=1
             $sharedCcLog,
             [System.Text.UTF8Encoding]::new($false))
         Assert-NativeLogContains -RuntimeName 'CC' -LogText $sharedCcLog -Expected @(
-            'cc-arm: settings requested_backend=compatibility effective_backend=arm32_interpreter execution_mode=base cpu_clock=200000000 target_ips=8928571 runtime_scale=0.800 delay_scale=0.750',
+            'cc-arm: settings requested_backend=compatibility effective_backend=arm32_interpreter execution_mode=base cpu_clock=360000000 target_ips=16071428 runtime_scale=0.800 delay_scale=0.750',
             'cc-arm: compatibility mode uses base ARM32 execution paths',
-            'frontend: video settings anti_aliasing=low effect=sepia brightness=125 contrast=90 gamma=110 saturation=150 minimized_behavior=throttle screen_orientation=landscape portrait=0 show_fps=1',
-            'frontend: audio settings volume=75 buffer_samples=4096 effect=bass_boost audio_disabled=1',
-            'frontend: input settings system_ime_disabled=0 virtual_controls=1 controller_mapping=A=B keyboard_mapping=space=A',
+            'frontend: video settings anti_aliasing=low effect=sepia brightness=125 contrast=90 gamma=110 saturation=150 minimized_behavior=throttle screen_orientation=landscape screen_fill=aspect portrait=0 show_fps=1',
+            'frontend: audio settings volume=75 buffer_samples=4096 effect=bass_boost digital_noise_reduction=high audio_disabled=1',
+            'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_dpad_type=joystick controller_mapping=A=B keyboard_mapping=space=A',
             'cheat: loaded 1 code(s), parse_errors=0, enabled=1, sha_mismatch=0, source=dingoopie-cc-automation.cc.cht',
             'cc-arm: game settings cheats_enabled=1 cheats_available=1 cheat_entries=1 cheat_startup_applied=1'
         )
+        if ($sharedCcLog -match 'crash-log:wrote|cc-runtime: execution failed|task failed result=') {
+            throw "CC shared-settings automation crashed. See shared-settings-cc-native.log"
+        }
 
         if ($AppGamePath) {
             $sharedAppLog = Start-AutomationGameAndReadNativeLog -DeviceGamePath $deviceAppPath
@@ -562,9 +569,9 @@ profile=1
                 [System.Text.UTF8Encoding]::new($false))
             Assert-NativeLogContains -RuntimeName 'APP' -LogText $sharedAppLog -Expected @(
                 'execution backend effective: compatibility',
-                'frontend: video settings anti_aliasing=low effect=sepia brightness=125 contrast=90 gamma=110 saturation=150 minimized_behavior=throttle screen_orientation=landscape portrait=0 show_fps=1',
-                'frontend: audio settings volume=75 buffer_samples=4096 effect=bass_boost audio_disabled=1',
-                'frontend: input settings system_ime_disabled=0 virtual_controls=1 controller_mapping=A=B keyboard_mapping=space=A',
+                'frontend: video settings anti_aliasing=low effect=sepia brightness=125 contrast=90 gamma=110 saturation=150 minimized_behavior=throttle screen_orientation=landscape screen_fill=aspect portrait=0 show_fps=1',
+                'frontend: audio settings volume=75 buffer_samples=4096 effect=bass_boost digital_noise_reduction=high audio_disabled=1',
+                'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_dpad_type=joystick controller_mapping=A=B keyboard_mapping=space=A',
                 'hle: runtime speed scale 0.800 env',
                 'hle: host delay scale 0.750 env'
             )
@@ -588,7 +595,10 @@ profile=1
             Assert-NativeLogContains -RuntimeName 'APP automatic backend' `
                 -LogText $autoAppLog -Expected @(
                     'app-runtime: execution backend: ppsspp_irjit',
-                    'execution backend effective: ppsspp_irjit'
+                    'execution backend effective: ppsspp_irjit',
+                    'settings-trace:loaded runtime.backend=auto runtime.cpu_hz=360000000',
+                    'profile:irjit ',
+                    'clock_hz=360000000'
                 )
         }
         Write-Host 'Shared CC/APP emulator settings and backend mode verification passed.'

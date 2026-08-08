@@ -7,50 +7,50 @@ uint32_t waveout_open(waveout_args* args)
 	printf("audio: waveout_open channel=%d format=%d sample_rate=%d volume=%d\n",
 		args->channel, args->format, args->sample_rate, args->volume);
 
-    uint32_t ret = MixerOpen(args);
+    uint32_t ret = mixerOpen(args);
     free(args);
 	return ret;
 }
 
 uint32_t waveout_write(uint32_t inst, char* buffer, int count)
 {
-    return MixerWriteBuff(buffer, count);
+    return mixerWriteBuffer(buffer, count);
 }
 
 uint32_t waveout_try_write(uint32_t inst, char* buffer, int count)
 {
-    return MixerTryWriteBuff(buffer, count);
+    return mixerTryWriteBuffer(buffer, count);
 }
 
 uint32_t waveout_can_write()
 {
-    return MixerPlaying();
+    return mixerIsPlaying();
 }
 
 uint32_t waveout_can_write_nonblocking()
 {
-    return MixerCanWriteNonBlocking();
+    return mixerCanWriteNonBlocking();
 }
 
 bool waveout_skips_audio_output()
 {
-    return MixerSkipsAudioOutput();
+    return mixerSkipsAudioOutput();
 }
 
 uint32_t waveout_set_volume(uint32_t vol)
 {
-    MixerSetVolume(vol);
+    mixerSetGuestVolume(vol);
     return 1;
 }
 
 uint32_t waveout_close(uint32_t inst)
 {
     (void)inst;
-    return MixerClose();
+    return mixerClose();
 }
 
 uint32_t waveout_mute(uint32_t muted)
 {
-    MixerSetMuted(muted != 0);
+    mixerSetMuted(muted != 0);
     return 1;
 }

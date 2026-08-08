@@ -1,68 +1,79 @@
-DingooPie Android
-=================
-
-中文
-----
-
+# DingooPie Android
+## 中文
 丁果派 DingooPie Android 是 Android 平台的 `.app` / `.cc` 游戏模拟器，用于运行
 丁果 A320、歌美 X760+ 和歌美 A330 掌机游戏。`.app` 与 `.cc` 格式文件归丁果科技所有；
 本项目和发布包不包含游戏样本，请使用自行合法取得的文件。
+其中，APP 游戏使用 Ingenic JZ4732 SoC 的 XBurst/MIPS 架构，CC 游戏使用 ChinaChip
+CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM32 运行时执行这两类游戏。
 
-版本：1.0
-Powered by BL2CK Software
-版权：Copyright (c) 2026 BL2CK
+- 文件说明：DingooPie Android Game Emulator
+- 产品名称：丁果派 DingooPie Android
+- Powered by：BL2CK Software
+- 版权：Copyright (c) 2026 BL2CK
 
-## 快速使用
-
+### 快速使用
 1. 安装 `DingooPie.apk` 并启动。
 2. 在游戏库中添加游戏目录，或导入单个 `.app` / `.cc` 文件。
 3. 授予 Android 文件访问权限，等待扫描完成后点击游戏启动。
 4. 游戏中按 Android 返回键打开暂停菜单，可恢复、重启、切换游戏或调整设置。
+从可写目录导入的游戏会优先把存档保存在游戏旁边。单文件导入、只读目录或
+目录授权失效时，模拟器会改用应用私有存档目录。移除游戏库条目不会删除原始游戏文件。
+### 局域网文件管理
 
-从可写目录导入的游戏会优先把存档和诊断日志保存在游戏旁边。单文件导入、只读目录或
-目录授权失效时，模拟器会改用应用私有的 `app-saves` 或 `cc-saves` 目录。移除游戏库
-条目不会删除原始游戏文件。
+点击游戏库左侧的文件夹按钮才会启动文件管理服务；正常启动模拟器不会自动开启。
+手机或模拟器与电脑连接同一网络后，在电脑浏览器中打开提示的 IPv4 地址即可访问。
+地址中包含 6 位小写字母与数字令牌，服务优先显示 `192.168.*` 地址。
 
-## 默认设置
+- 可访问模拟器私有目录和用户持续授权的目录。
+- 支持多文件累计选择、上传、下载、重命名和删除。
+- 点击文件夹名称进入目录；文件下载使用右侧下载按钮。
+- 为避免误删，非空文件夹不能删除。
+- 关闭地址提示窗口后服务继续在后台运行；选择“停止服务”才会关闭监听。
+
+### 默认设置
 
 | 项目 | 默认值 |
 | --- | --- |
 | 抗锯齿 | 关闭 |
 | 滤镜 | 正常 |
-| 亮度 / 对比度 / 伽马 / 饱和度 | 100% / 100% / 100% / 100% |
-| 最小化时 | 暂停 |
+| 亮度 | 100% |
+| 对比度 | 100% |
+| 伽马 | 100% |
+| 饱和度 | 100% |
+| 最小化时 | 自动暂停 |
 | 屏幕方向 | 横屏 |
-| FPS 显示 | 关闭 |
+| 画面填充 | 保持宽高比 |
+| 显示 FPS | 关闭 |
 | 主音量 | 100% |
 | 音频缓冲 | 2048 采样 |
 | 音频效果 | 关闭 |
+| 数字降噪 | 高 |
 | 禁用音频 | 关闭 |
 | 禁用系统输入法 | 开启 |
-| 虚拟按键 | 开启 |
-| CPU 后端 | 自动；APP 使用 PPSSPP IR JIT，CC 使用优化 ARM32 解释器 |
-| CPU 时钟 | 自动，基线 336 MHz |
-| 运行速度 | 自动，基线 65% |
-| 延迟比例 | 自动，基线 1.0 |
-| 金手指 | 关闭 |
-| 界面语言 | 中文 |
-| 性能日志 | 关闭 |
+| 显示虚拟按键 | 开启 |
+| 虚拟按键大小 | 100% |
+| 方向键类型 | 摇杆 |
+| 手柄按键映射 | 默认映射 |
+| CPU 执行模式 | 自动 |
+| CPU 时钟 | 自动 |
+| 游戏速度 | 自动 |
+| 系统延迟比例 | 自动 |
+| 金手指管理器 | 禁用金手指 |
+| 语言 | 中文 |
 
-兼容性配置可按游戏覆盖自动后端、时钟、运行速度或延迟比例，因此实际运行值可能与基线不同。
-
-## 菜单与配置
+### 菜单与配置
 
 - `游戏库`：添加游戏目录、导入单个游戏、启动游戏、移除条目和刷新扫描结果。
-- `暂停菜单`：恢复游戏、重启游戏、切换游戏、选项、设置和退出应用。
-- `选项 > 视频`：抗锯齿、滤镜、色彩参数、最小化行为、屏幕方向和 FPS 显示。
-- `选项 > 音频`：主音量、音频缓冲、音频效果和禁用音频。
-- `选项 > 输入`：系统输入法、虚拟按键和手柄按键映射。
-- `设置`：CPU 后端、CPU 时钟、运行速度、延迟比例、金手指管理器、语言和恢复默认设置。
+- `暂停菜单`：即时存档、切换游戏、重启游戏、选项、设置、退出应用和返回游戏。
+- `选项 > 视频`：抗锯齿、滤镜、亮度、对比度、伽马、饱和度、最小化时、屏幕方向、画面填充和显示 FPS。
+- `选项 > 音频`：主音量、音频缓冲、音频效果、数字降噪和禁用音频。
+- `选项 > 输入`：禁用系统输入法、显示虚拟按键、虚拟按键大小、方向键类型和手柄按键映射。
+- `设置`：CPU 执行模式、CPU 时钟、游戏速度、系统延迟比例、金手指管理器、语言和恢复默认设置。
 - `关于`：版本、支持格式和软件信息。
 
-设置会自动保存到应用私有目录中的 `DingooPie.ini`。视频、音频、输入、运行参数、
-金手指和语言设置由 APP 与 CC 运行时共享；自动与兼容模式仍会选择各格式对应的实现。
+设置会自动保存到应用私有目录中的 `DingooPie.ini`。
 
-## 按键
+### 按键映射
 
 触摸屏默认显示虚拟方向键、A/B/X/Y、START、SELECT 和肩键，并支持多点触控与组合按键。
 支持 SDL GameController 兼容手柄，可在 `选项 > 输入 > 手柄按键映射` 中设置按键。
@@ -83,7 +94,7 @@ Powered by BL2CK Software
 | Backspace / Home | POWER |
 | Android 返回键 | 打开暂停菜单 |
 
-## 金手指
+### 金手指
 
 金手指默认关闭，并按游戏格式优先加载同名文件：
 
@@ -96,15 +107,14 @@ Game.cc  -> Game.cc.cht
 勾选状态不会互相覆盖。进入 `设置 > 金手指管理器` 后可启用金手指、选择功能、全部启用、
 全部停用、应用或刷新。文件缺失或不适用于当前游戏时，模拟器会保持金手指不可用。
 
-## 调试与存档
+### 即时存档
 
-- APP 使用 MIPS 运行时；自动模式优先使用 PPSSPP IR JIT，兼容模式使用基础解释器。
-- CC 使用 ARM32 运行时；自动模式使用优化解释器路径，兼容模式使用基础路径。
-- 两种格式共享视频、音频、输入、设置、存档、金手指和崩溃日志服务，但运行时彼此隔离。
-- 客体执行失败会生成 `DingooPie-crash-*.log`；无法写入游戏目录时保存到对应格式的私有存档目录。
-- 原生运行日志用于诊断启动、文件访问、包解析和运行时问题。
+每个游戏提供 15 个即时存档档位。存档保存在对应游戏存档目录中的
+`savestates/<游戏名>.slotN.dps`，缩略图使用
+`savestates/<游戏名>.slotN.thumb.bmp`。如果当前游戏阶段与保存时不同，
+请先返回相同场景再读取。
 
-## 构建
+### 构建
 
 要求：Windows PowerShell 5.1 或 PowerShell 7、JDK 17、Android SDK Platform 35，
 以及 Android NDK `26.3.11579264`。
@@ -113,94 +123,106 @@ Game.cc  -> Game.cc.cht
 powershell -ExecutionPolicy Bypass -File scripts/bootstrap_android.ps1
 powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_android.ps1
+powershell -ExecutionPolicy Bypass -File scripts/test_settings_order.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_text_format.ps1
 ```
 
-发布构建需要配置签名环境变量；详细步骤见 `docs/BUILDING.md`。测试矩阵、模拟器兼容性、
-音频、金手指、输入法和存档自动化见 `docs/TESTING.md`。
+文档入口见 `docs/README.md`。发布构建与签名步骤见 `docs/BUILDING.md` 和
+`docs/RELEASE_SIGNING.md`；测试矩阵、模拟器兼容性、音频、金手指、输入法和
+存档自动化见 `docs/TESTING.md`。
 
-## 源码目录
+签名发布版可使用以下命令生成并复制到桌面：
 
-```text
-app/                    Android Gradle 应用、SDL Activity、资源和 Java 平台服务
-native/android/         Android JNI、文件描述符和平台适配层
-native/core/app/        APP 专用 MIPS 运行时与 PPSSPP IR JIT 集成
-native/core/cc/         CC 专用 ARM32 运行时与兼容辅助代码
-native/core/config/     设置、兼容性配置和金手指运行时
-native/core/frontend/   SDL 视频、音频、菜单和虚拟按键
-native/core/game/       格式检测、路径处理、历史记录和运行时分派
-native/core/guest/      两种客体共享的软件包、文件、音频和文本服务
-native/core/runtime/    执行后端、暂停、日志、调试和崩溃处理
-scripts/                依赖、构建、发布、验证和回归脚本
-tests/                  原生兼容性回归测试
-docs/                   架构、构建和测试维护文档
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1 `
+    -Configuration Release -OutputDirectory "$HOME\Desktop"
 ```
 
-架构边界和命名规则见 `docs/ARCHITECTURE.md`。仓库文本文件统一使用 UTF-8 无 BOM、
-CRLF 换行并以 CRLF 结尾。
+发布前必须确认 APK 签名验证、文本格式检查和相关回归测试全部通过。
 
-English
--------
+## English
 
 DingooPie Android is an Android emulator for Dingoo `.app` and `.cc` games made for
 the Dingoo A320, Gemei X760+, and Gemei A330 handhelds. The package formats belong
 to Dingoo Technology. No game images are included; use only files obtained legally.
+APP games use the XBurst/MIPS architecture of the Ingenic JZ4732 SoC, while CC
+games use the ARM11 architecture of the ChinaChip CC1800 SoC. They are executed
+by the dedicated APP MIPS and CC ARM32 runtimes, respectively.
 
-Version: 1.0
-Powered by BL2CK Software
-Copyright: Copyright (c) 2026 BL2CK
+- File description: DingooPie Android Game Emulator
+- Product name: DingooPie Android
+- Powered by: BL2CK Software
+- Copyright: Copyright (c) 2026 BL2CK
 
-## Quick Start
+### Quick Start
 
 1. Install and launch `DingooPie.apk`.
 2. Add a game folder or import one `.app` / `.cc` file from the game library.
 3. Grant Android file access and wait for the library scan to finish.
 4. Tap a game to start it. Press Android Back during play to open the pause menu.
 
-Games imported from a writable folder keep saves and diagnostic logs beside the game.
-Single-file imports, read-only locations, and expired grants use the format-isolated
-private `app-saves` or `cc-saves` directory. Removing an entry never deletes the game.
+Games imported from a writable folder keep saves beside the game. Single-file imports,
+read-only locations, and expired grants use application-private save storage. Removing
+an entry never deletes the game.
 
-## Default Settings
+### LAN File Management
+
+The file service starts only after the folder button on the left side of the game
+library is pressed; launching the emulator does not start it automatically. Connect
+the Android device or emulator and the computer to the same network, then open the
+displayed IPv4 address. Its URL includes a six-character lowercase letter and digit
+token. Addresses in the `192.168.*` range are listed first.
+
+- Access application-private files and directories with persisted user permission.
+- Select multiple files cumulatively, upload, download, rename, and delete entries.
+- Open folders by clicking their names; download files with the action button.
+- Non-empty folders cannot be deleted, which prevents accidental recursive removal.
+- Closing the address dialog keeps the service running; use `Stop Service` to stop it.
+
+### Default Settings
 
 | Option | Default |
 | --- | --- |
 | Anti-aliasing | Off |
-| Color effect | Normal |
-| Brightness / contrast / gamma / saturation | 100% / 100% / 100% / 100% |
-| When minimized | Pause |
+| Filter | Normal |
+| Brightness | 100% |
+| Contrast | 100% |
+| Gamma | 100% |
+| Saturation | 100% |
+| When minimized | Auto Pause |
 | Screen orientation | Landscape |
-| FPS display | Off |
+| Screen fill | Keep aspect ratio |
+| Show FPS | Off |
 | Master volume | 100% |
 | Audio buffer | 2048 samples |
 | Audio effect | Off |
+| Digital noise reduction | High |
 | Disable audio | Off |
 | Disable system IME | On |
-| Virtual controls | On |
-| CPU backend | Auto; PPSSPP IR JIT for APP, optimized ARM32 interpreter for CC |
-| CPU clock | Auto, 336 MHz baseline |
-| Runtime speed | Auto, 65% baseline |
-| Delay scale | Auto, 1.0 baseline |
-| Cheats | Off |
-| UI language | Chinese |
-| Performance logging | Off |
+| Show virtual controls | On |
+| Virtual control size | 100% |
+| D-pad type | Joystick |
+| Controller mapping | Default mapping |
+| CPU execution mode | Auto |
+| CPU clock | Auto |
+| Game speed | Auto |
+| System delay scale | Auto |
+| Cheat manager | Cheats disabled |
+| Language | Chinese |
 
-Per-game compatibility profiles may override automatic backend, clock, speed, or delay values.
-
-## Menus And Configuration
+### Menu And Configuration
 
 - `Game Library`: add folders, import a game, launch games, remove entries, and refresh scans.
-- `Pause Menu`: resume, restart, switch games, open options or settings, and exit.
-- `Options > Video`: anti-aliasing, color effect and controls, minimized behavior, orientation, and FPS.
-- `Options > Audio`: master volume, buffer size, audio effect, and audio disable.
-- `Options > Input`: system IME policy, virtual controls, and controller mapping.
-- `Settings`: execution mode, CPU clock, runtime speed, delay scale, cheat manager, language, and reset.
+- `Pause Menu`: instant saves, switch game, restart, options, settings, exit, and return to the game.
+- `Options > Video`: Anti-aliasing, Filter, Brightness, Contrast, Gamma, Saturation, When Minimized, Screen Orientation, Screen Fill, and Show FPS.
+- `Options > Audio`: master volume, buffer size, audio effect, digital noise reduction, and audio disable.
+- `Options > Input`: Disable System IME, Show Virtual Controls, Virtual Control Size, D-pad Type, and Controller Mapping.
+- `Settings`: CPU Execution Mode, CPU Clock, Game Speed, System Delay Scale, Cheat Manager, Language, and Restore Default Settings.
 - `About`: version, supported formats, and software information.
 
-Settings are saved automatically in the application-private `DingooPie.ini`. APP and CC
-share frontend and platform services while keeping their execution implementations isolated.
+Settings are saved automatically in the application-private `DingooPie.ini`.
 
-## Keys
+### Keyboard Mapping
 
 Virtual controls are enabled by default and support multi-touch holds and combinations.
 SDL GameController-compatible devices can be remapped under `Options > Input`.
@@ -215,20 +237,20 @@ SDL GameController-compatible devices can be remapped under `Options > Input`.
 | Backspace / Home | POWER |
 | Android Back | Open the pause menu |
 
-## Cheats
+### Cheats
 
 Cheats are disabled by default. `Game.app.cht` and `Game.cc.cht` are preferred;
 `Game.cht` is used only when the format-specific file is absent. Use
 `Settings > Cheat Manager` to select, apply, disable, or refresh cheat features.
 
-## Debugging And Saves
+### Instant Saves
 
-- APP Auto prefers PPSSPP IR JIT; Compatibility uses the base MIPS interpreter.
-- CC Auto uses the optimized ARM32 interpreter; Compatibility uses the base path.
-- Guest failures write `DingooPie-crash-*.log` beside the game or in private saves.
-- Native logs diagnose startup, file access, package parsing, and execution problems.
+Each game provides 15 instant save slots. State files use
+`savestates/<game>.slotN.dps`, and previews use
+`savestates/<game>.slotN.thumb.bmp` under the active game save directory. If the current
+game phase differs from the saved phase, return to the same scene before loading.
 
-## Build
+### Build
 
 Requires PowerShell, JDK 17, Android SDK Platform 35, and NDK `26.3.11579264`.
 
@@ -236,26 +258,18 @@ Requires PowerShell, JDK 17, Android SDK Platform 35, and NDK `26.3.11579264`.
 powershell -ExecutionPolicy Bypass -File scripts/bootstrap_android.ps1
 powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1
 powershell -ExecutionPolicy Bypass -File scripts/test_android.ps1
+powershell -ExecutionPolicy Bypass -File scripts/test_settings_order.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_text_format.ps1
 ```
 
-See `docs/BUILDING.md`, `docs/TESTING.md`, and `docs/ARCHITECTURE.md` for maintained details.
+Start with `docs/README.md`. See `docs/BUILDING.md`, `docs/TESTING.md`,
+`docs/ARCHITECTURE.md`, and `docs/RELEASE_SIGNING.md` for maintained details.
 
-## Source Layout
+Build a signed release and copy it to the desktop with:
 
-```text
-app/                    Android Gradle app, SDL activity, resources, and Java services
-native/android/         Android JNI and platform adapters
-native/core/app/        APP-only MIPS runtime and PPSSPP IR JIT integration
-native/core/cc/         CC-only ARM32 runtime and compatibility helpers
-native/core/config/     Settings, compatibility profiles, and cheat runtime
-native/core/frontend/   SDL video, audio, menus, and virtual controls
-native/core/game/       Format detection, paths, history, and runtime dispatch
-native/core/guest/      Package, filesystem, audio, and text services shared by guests
-native/core/runtime/    Execution backends, pause, logs, debugging, and crash handling
-scripts/                Dependency, build, release, validation, and regression scripts
-tests/                  Native compatibility regressions
-docs/                   Architecture, build, and test documentation
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1 `
+    -Configuration Release -OutputDirectory "$HOME\Desktop"
 ```
 
-Repository text files use UTF-8 without BOM, CRLF line endings, and a final CRLF.
+Before publishing, verify the APK signature, text format, and relevant regressions.

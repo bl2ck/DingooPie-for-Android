@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <vector>
 #include "guest/guest_package.h"
 #include "runtime/native_runtime.h"
@@ -18,5 +19,6 @@ void taskSchedulerRegisterRuntime(NativeRuntime* runtime);
 void taskSchedulerUnregisterRuntime(NativeRuntime* runtime);
 size_t taskSchedulerRuntimeCount(void);
 void taskSchedulerSnapshotRuntimes(std::vector<NativeRuntime*>* out);
+void taskSchedulerWaitForTasks(void);
 
 #endif

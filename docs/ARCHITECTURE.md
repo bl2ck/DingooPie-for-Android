@@ -1,26 +1,38 @@
-# Native game-format architecture
+# DingooPie Android Architecture
 
 The Android Gradle module remains named `app/` because that is the standard
 Android application-module convention. Its directory name is unrelated to the
 Dingoo `.app` game format.
 
-The current module split is intentional. Runtime code is organized by ownership
-rather than file size: Android lifecycle, Storage Access Framework permissions,
-and JNI callbacks remain in `DingooPieActivity`, while reusable save automation,
-game-format dispatch, guest services, and emulator behavior live in their own
-Java or native modules. Split the activity only when a new component has a clear
-lifecycle and test boundary; moving JNI-facing methods solely to shorten the file
-would add coupling without improving runtime isolation.
+Runtime code is organized by ownership. Android lifecycle, Storage Access
+Framework permissions, and JNI callbacks remain in `DingooPieActivity`; game
+dispatch, guest services, and emulator behavior live in native modules.
 
-## Layer boundaries
+## Layer Boundaries
 
 The native core is divided into shared orchestration and format-specific
 runtimes:
 
+APP packages use the XBurst/MIPS architecture of the Ingenic JZ4732 SoC. CC
+packages use the ARM11 architecture of the ChinaChip CC1800 SoC. Their
+format-specific runtimes provide the corresponding execution paths and
+platform-specific compatibility helpers for these guest environments.
+
+All CC packages target ChinaChip CC1800. The runtime selects between two
+software memory and input layouts by package origin; this distinction does not
+represent different hardware platforms:
+
+- The commercial release layout uses package origin `0x10100000`, runtime RAM
+  `0x10000000`-`0x14000000`, and a 32 MiB heap at `0x21000000`.
+- The homebrew-platform layout uses SDK-linked application origin `0x13800000`,
+  a 16 MiB application window at `0x13800000`-`0x14800000`, system work RAM at
+  `0x10000000`-`0x13800000`, and a 32 MiB OS heap at `0x09000000`.
 - `native/core/app/` contains the APP MIPS runtime, PPSSPP integration, APP
   memory model, instruction compatibility, SDK HLE, and APP task scheduling.
-- `native/core/cc/` contains the CC ARM32 runtime, interpreter, input mapping,
-  graphics compatibility, math compatibility, and timing helpers.
+- `native/core/cc/` contains the CC ARM32 runtime, package-layout constants,
+  interpreter, input mapping, graphics compatibility, math compatibility, and
+  timing helpers. `cc_package_layout.h` is the single source of truth for CC
+  package origins.
 - `native/core/frontend/` owns SDL presentation, audio output, virtual input,
   menus, framebuffer snapshots, and validation capture.
 - `native/core/guest/` owns format-neutral package, filesystem, audio, and text
@@ -29,8 +41,8 @@ runtimes:
   pause coordination, and runtime debugging.
 - `native/core/config/` owns settings, options, compatibility profiles, and the
   shared cheat engine/runtime.
-- `native/core/game/` owns format detection, game paths, history, and runtime
-  selection. `native/core/main.cpp` remains the application entry point, while
+- `native/core/game/` owns format detection, game paths, and runtime selection.
+  `native/core/main.cpp` remains the application entry point, while
   `platform_services.h` remains the platform boundary.
 
 Android save access is routed through `DingooPieActivity` and
@@ -42,13 +54,12 @@ from the activity lifecycle and menu implementation.
 
 - `game_runtime.*` selects a runtime by `GameFormat`. APP is the primary format
   and is intentionally listed and dispatched before CC.
-- `game_history.*` owns recent-game persistence used by both runtimes.
 - `game_paths.*` owns supported-extension detection, normalization, display
   names, and cheat-file naming for every game format.
 - `guest_package.*` parses the package container used by APP and CC images.
 - `guest_text_format.*`, `guest_filesystem.*`, audio, input, settings, cheats,
   and frontend code are shared services and therefore use format-neutral names.
-- `app_runtime.*` contains only the MIPS APP execution path.
+- `app_mips_runtime.*` contains only the MIPS APP execution path.
 - `cc_arm_runtime.*`, `cc_graphics_compat.h`, `cc_math_compat.h`, and
   `cc_runtime_timing.h` contain only the ARM CC execution path and its
   compatibility behavior.
@@ -57,7 +68,7 @@ Format-specific runtimes may depend on shared services. They must not include,
 call, or expose identifiers named after the other format. The shared
 `game_runtime` facade is the only layer that selects between APP and CC.
 
-## Compatibility rules
+## Compatibility Rules
 
 - The current INI schema uses only the documented values. Invalid or removed
   values fall back to current defaults instead of selecting legacy aliases.
@@ -67,6 +78,10 @@ call, or expose identifiers named after the other format. The shared
 - Shared audio owns the Android output device and converts each guest stream
   from its declared sample rate, format, and channel count. CC queue pressure
   yields only the current ARM task so audio pacing cannot stall the game loop.
+- Digital noise reduction is shared by APP and CC. High enables resampling
+  low-pass filtering, DC blocking, boundary smoothing, and soft limiting;
+  Medium omits the low-pass filter; Low keeps boundary smoothing and soft
+  limiting while omitting DC blocking.
 - Format runtimes report completion to `game_runtime`; they do not directly
   drive frontend transitions. Frontend-requested stops are not recorded as
   normal guest exits.
@@ -91,7 +106,7 @@ call, or expose identifiers named after the other format. The shared
 - Removing a game from the Android library must require confirmation and must
   never delete the source package from storage.
 
-## Naming and ordering
+## Naming And Ordering
 
 Use `game_*` for multi-format orchestration and paths, `guest_*` for services
 visible to either guest runtime, `app_*` for APP-only implementation, and

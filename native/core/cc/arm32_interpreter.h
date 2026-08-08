@@ -34,6 +34,9 @@ struct Arm32Bus
     Arm32ReadCallback read;
     Arm32WriteCallback write;
     Arm32SvcCallback svc;
+    uint8_t* directSystemRam;
+    uint32_t directSystemRamBase;
+    uint32_t directSystemRamSize;
     uint8_t* directRam;
     uint32_t directRamBase;
     uint32_t directRamSize;

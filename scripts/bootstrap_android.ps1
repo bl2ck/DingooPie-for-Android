@@ -7,8 +7,18 @@ $thirdPartyRoot = Join-Path $projectRoot 'third_party'
 $patchFile = Join-Path $projectRoot 'patches\ppsspp-irjit-dingoo.patch'
 
 $dependencies = @(
-    @{ Name = 'SDL2-2.26.5'; File = 'SDL2-2.26.5.zip'; Url = 'https://www.libsdl.org/release/SDL2-2.26.5.zip'; Sha256 = 'd88362fc3ee350a037e31381db00df764a294244bac8e427b8c67c6ca4d7e6fd' },
-    @{ Name = 'ppsspp-master'; File = 'ppsspp-dffde6e18902a17d9c3b36806c0a0f94455eef8d.zip'; Url = 'https://codeload.github.com/hrydgard/ppsspp/zip/dffde6e18902a17d9c3b36806c0a0f94455eef8d'; Sha256 = 'a3bf710623430f10744dcd9adabe2a704ef2101e6895702af82fd5814a4216e0' }
+    @{
+        Name = 'SDL2-2.26.5'
+        File = 'SDL2-2.26.5.zip'
+        Url = 'https://www.libsdl.org/release/SDL2-2.26.5.zip'
+        Sha256 = 'd88362fc3ee350a037e31381db00df764a294244bac8e427b8c67c6ca4d7e6fd'
+    },
+    @{
+        Name = 'ppsspp-master'
+        File = 'ppsspp-dffde6e18902a17d9c3b36806c0a0f94455eef8d.zip'
+        Url = 'https://codeload.github.com/hrydgard/ppsspp/zip/dffde6e18902a17d9c3b36806c0a0f94455eef8d'
+        Sha256 = 'a3bf710623430f10744dcd9adabe2a704ef2101e6895702af82fd5814a4216e0'
+    }
 )
 
 New-Item -ItemType Directory -Force -Path $toolsRoot, $thirdPartyRoot | Out-Null

@@ -15,6 +15,7 @@
 #include <string>
 #include <string.h>
 #include <thread>
+#include <unistd.h>
 
 static void waitForInitialCheatLoad(uint32_t previousRevision)
 {
@@ -50,13 +51,40 @@ static void shutdownApplication(void)
 {
     frontendShutdown();
     platformAndroidRequestApplicationExit();
-    MixerPrepareApplicationExit();
+    mixerPrepareApplicationExit();
+}
+
+static bool stopGameRuntimeForTransition(void)
+{
+    const int retryCount = frontendGameExitRequested() ? 1 : 0;
+    for (int attempt = 0; attempt <= retryCount; ++attempt)
+    {
+        if (gameRuntimeStop())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void exitAfterRuntimeStopTimeout(void)
+{
+    printf("main: runtime stop timed out; requesting controlled process exit\n");
+    platformAndroidRequestApplicationExit();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    _exit(1);
 }
 
 extern "C" int SDL_main(int, char*[])
 {
-    freopen("/data/user/0/com.dingoopie.android/files/dingoopie-native.log", "w", stdout);
-    freopen("/data/user/0/com.dingoopie.android/files/dingoopie-native.err", "w", stderr);
+    std::string logDirectory = platformAndroidGetLogDirectory();
+    if (!logDirectory.empty())
+    {
+        std::string stdoutPath = logDirectory + "/dingoopie-native.log";
+        std::string stderrPath = logDirectory + "/dingoopie-native.err";
+        freopen(stdoutPath.c_str(), "w", stdout);
+        freopen(stderrPath.c_str(), "w", stderr);
+    }
     bool externalDebugLog = emulatorEnvEnabled("DINGOO_PIE_LOG_FILE");
     if (externalDebugLog)
     {
@@ -68,8 +96,7 @@ extern "C" int SDL_main(int, char*[])
     EmulatorSettings settings = emulatorLoadSettings();
     runtimeLogInitialize(settings.debugProfile, runtimeLogEnvEnabled("DINGOO_PIE_PROFILE"));
     applyStartupDebugSettings(&settings, externalDebugLog);
-    printf("main: settings loaded last_app=%s debug.profile=%u external_log=%u\n",
-        settings.lastGamePath.empty() ? "(empty)" : settings.lastGamePath.c_str(),
+    printf("main: settings loaded debug.profile=%u external_log=%u\n",
         settings.debugProfile ? 1u : 0u,
         externalDebugLog ? 1u : 0u);
     if (settings.debugProfile || externalDebugLog)
@@ -78,7 +105,7 @@ extern "C" int SDL_main(int, char*[])
     }
     cheatRuntimeSetEnabled(settings.cheatsEnabled || emulatorEnvEnabled("DINGOO_PIE_CHEATS"));
     emulatorApplySharedRuntimeSettings(settings);
-    MixerSetValidationCaptureEnabled(
+    mixerSetValidationCaptureEnabled(
         platformAndroidConsumeAudioValidationAutomationEnabled());
 
     std::string selectedGamePath = platformAndroidConsumeGameAutomationPath();
@@ -128,13 +155,11 @@ extern "C" int SDL_main(int, char*[])
             bool gameStarted = gameRuntimeStart(
                 currentGamePath.c_str(),
                 options,
-                false,
                 emulatorCheatFeatureKeysForGame(settings, currentGamePath));
             frontendSetGameRunning(gameStarted);
             if (gameStarted)
             {
                 frontendNotifyGameStarted(currentGamePath.c_str());
-                emulatorRememberRecentGame(&settings, currentGamePath);
                 emulatorSaveSettings(settings);
                 waitForInitialCheatLoad(cheatRevisionBeforeStart);
                 if (cheatManagerAutomation)
@@ -147,7 +172,10 @@ extern "C" int SDL_main(int, char*[])
 
         frontendRunLoop(options);
         frontendSetGameRunning(false);
-        gameRuntimeStop();
+        if (!stopGameRuntimeForTransition())
+        {
+            exitAfterRuntimeStopTimeout();
+        }
 
         std::string requestedGamePath;
         if (!frontendConsumeGameLaunchRequest(&requestedGamePath))

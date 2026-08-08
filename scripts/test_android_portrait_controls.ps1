@@ -4,6 +4,7 @@ param(
     [string]$Serial = '127.0.0.1:7555',
     [Parameter(Mandatory = $true)][string]$GamePath,
     [string]$OutputDirectory,
+    [ValidateSet(75, 100, 125, 150)][int]$VirtualControlScalePercent = 100,
     [switch]$SkipBuild,
     [switch]$SkipInstall
 )
@@ -131,11 +132,11 @@ $packageName = 'com.dingoopie.android'
 $settingsFile = Join-Path $resolvedOutputDirectory 'portrait-settings.ini'
 [System.IO.File]::WriteAllText(
     $settingsFile,
-    "[video]`r`nscreen_orientation=portrait`r`n",
+    "[video]`r`nscreen_orientation=portrait`r`n`r`n[input]`r`nvirtual_control_scale=$VirtualControlScalePercent`r`n",
     [System.Text.UTF8Encoding]::new($false))
 $extension = [System.IO.Path]::GetExtension($GamePath)
 $deviceGamePath = "/sdcard/Download/dingoopie-portrait-controls$extension"
-$screenshot = Join-Path $resolvedOutputDirectory 'portrait-controls.png'
+$screenshot = Join-Path $resolvedOutputDirectory "portrait-controls-$VirtualControlScalePercent.png"
 $settingsBackup = 'files/DingooPie.portrait-controls-backup.ini'
 $null = & $adb -s $Serial shell run-as $packageName cp `
     'files/DingooPie.ini' $settingsBackup 2>&1
@@ -199,6 +200,7 @@ try {
     }
 
     Write-Host 'Portrait virtual control visual automation passed.'
+    Write-Host "Virtual control scale: $VirtualControlScalePercent%"
     Write-Host "Screenshot: $screenshot"
     Write-Host ("Labels: SELECT={0:N0},{1:N0} MENU={2:N0},{3:N0} START={4:N0},{5:N0}" -f `
         $select.X, $select.Y, $menu.X, $menu.Y, $start.X, $start.Y)

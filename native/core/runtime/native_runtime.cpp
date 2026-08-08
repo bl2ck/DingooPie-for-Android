@@ -234,61 +234,48 @@ static uint32_t parseHexEnv(const char* name)
 
 static bool shouldTraceWrite(uint32_t address, size_t size)
 {
-    static bool initialized = false;
-    static uint32_t traceStart = 0;
-    static uint32_t traceEnd = 0;
-    if (!initialized)
-    {
-        traceStart = parseHexEnv("DINGOO_PIE_TRACE_MEM_START");
-        traceEnd = parseHexEnv("DINGOO_PIE_TRACE_MEM_END");
-        initialized = true;
-    }
+    struct TraceRange { uint32_t start; uint32_t end; };
+    static const TraceRange trace = {
+        parseHexEnv("DINGOO_PIE_TRACE_MEM_START"),
+        parseHexEnv("DINGOO_PIE_TRACE_MEM_END")
+    };
 
-    if (!traceStart || !traceEnd)
+    if (!trace.start || !trace.end)
     {
         return false;
     }
 
     uint64_t begin = address;
     uint64_t end = begin + size;
-    return begin < traceEnd && end > traceStart;
+    return begin < trace.end && end > trace.start;
 }
 
 static bool shouldTracePc(uint32_t address)
 {
-    static bool initialized = false;
-    static uint32_t traceStart = 0;
-    static uint32_t traceEnd = 0;
-    if (!initialized)
-    {
-        traceStart = parseHexEnv("DINGOO_PIE_TRACE_PC_START");
-        traceEnd = parseHexEnv("DINGOO_PIE_TRACE_PC_END");
-        initialized = true;
-    }
-
-    return traceStart && traceEnd && address >= traceStart && address < traceEnd;
+    struct TraceRange { uint32_t start; uint32_t end; };
+    static const TraceRange trace = {
+        parseHexEnv("DINGOO_PIE_TRACE_PC_START"),
+        parseHexEnv("DINGOO_PIE_TRACE_PC_END")
+    };
+    return trace.start && trace.end && address >= trace.start && address < trace.end;
 }
 
 static bool shouldSamplePc(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_TRACE_PC_SAMPLE");
-        enabled = value && value[0] && strcmp(value, "0") != 0 ? 1 : 0;
-    }
-    return enabled != 0;
+        return value && value[0] && strcmp(value, "0") != 0;
+    }();
+    return enabled;
 }
 
 static bool shouldTraceInterpreterOps(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_TRACE_INTERPRETER_OPS");
-        enabled = value && value[0] && strcmp(value, "0") != 0 ? 1 : 0;
-    }
-    return enabled != 0;
+        return value && value[0] && strcmp(value, "0") != 0;
+    }();
+    return enabled;
 }
 
 static bool runtimeEnvEnabled(const char* name)
@@ -527,7 +514,10 @@ static void profileInterpreterInstruction(NativeRuntime* runtime)
             return;
         }
 
-        printf("profile:interpreter ips=%llu hooks=%llu/s fb_submit=%llu fb_copy_us=%llu fb_interval_us=%llu/%llu over25=%llu over33=%llu pc=0x%08x ra=0x%08x\n",
+        printf(
+            "profile:interpreter ips=%llu hooks=%llu/s fb_submit=%llu "
+            "fb_copy_us=%llu fb_interval_us=%llu/%llu over25=%llu over33=%llu "
+            "pc=0x%08x ra=0x%08x\n",
             (unsigned long long)ips,
             (unsigned long long)runtimeLogRatePerSecondUs(
                 runtime->interpreterProfileHooks, elapsedMicros),
@@ -1640,6 +1630,11 @@ RuntimeError nativeRuntimeRequestStop(NativeRuntime* runtime)
         ppssppIrJitRequestStop(runtime);
     }
     return RUNTIME_OK;
+}
+
+bool nativeRuntimeStopRequested(NativeRuntime* runtime)
+{
+    return runtime && runtime->stopRequested.load(std::memory_order_acquire);
 }
 
 RuntimeError nativeRuntimeStart(NativeRuntime* runtime, uint64_t begin, uint64_t until, uint64_t timeout, size_t count)

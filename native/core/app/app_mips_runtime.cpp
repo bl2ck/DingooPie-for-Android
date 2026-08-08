@@ -1,11 +1,10 @@
-#include "app/app_runtime.h"
+#include "app/app_mips_runtime.h"
 
 #include "guest/guest_package.h"
 #include "game/game_paths.h"
 #include "config/cheat_runtime.h"
 #include "runtime/crash_log.h"
 #include "runtime/debug_log.h"
-#include "game/game_history.h"
 #include "app/sdk_hle.h"
 #include "frontend/framebuffer.h"
 #include "guest/guest_text_format.h"
@@ -16,6 +15,7 @@
 #include "app/emulated_memory.h"
 #include "app/ppsspp_irjit_backend.h"
 #include "runtime/runtime_debug.h"
+#include "runtime/thread_join.h"
 #include "frontend/sdl_frontend.h"
 #include "frontend/sdl_audio.h"
 #include "app/task_scheduler.h"
@@ -113,22 +113,243 @@ static FILE* makeSeekableAndroidAppFile(FILE* source, void** bufferOut, uint32_t
 }
 
 static EmulatorOptions g_options;
-static bool g_clearRecentOnStartupFailure = false;
 static pthread_mutex_t g_runtimeThreadMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_runtimeThread;
 static bool g_runtimeThreadStarted = false;
 static NativeRuntime* g_mainRuntime = NULL;
+static GuestPackage* g_mainPackage = NULL;
 static std::atomic<bool> g_runtimeStopRequested(false);
-static std::atomic<bool> g_lastRunExitedNormally(false);
-static std::string g_lastRunAppPath;
+static std::atomic<bool> g_appMainHookFailed(false);
+static RuntimeThreadCompletion g_runtimeThreadCompletion =
+    RUNTIME_THREAD_COMPLETION_INITIALIZER;
 
-uint32_t s_AppDataAddr = 0;
-uint32_t s_AppDataBuffSize = 0;
-void* s_AppDataBuff = 0;
+static const uint32_t kRuntimeStopTimeoutMs = 5000;
+static const uint32_t kSaveStatePauseTimeoutMs = 2000;
+
+static bool waitForSaveStatePause(void)
+{
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(kSaveStatePauseTimeoutMs);
+    do
+    {
+        const uint32_t requiredWaiters =
+            1u + (uint32_t)taskSchedulerRuntimeCount();
+        if (pauseGateWaitForPausedWaiters(10, requiredWaiters))
+        {
+            return true;
+        }
+    }
+    while (std::chrono::steady_clock::now() < deadline);
+
+    printf("save-state: pause timeout waiters=%u runtimes=%u\n",
+        pauseGateWaiterCount(),
+        1u + (unsigned int)taskSchedulerRuntimeCount());
+    return false;
+}
+
+static void setSaveStateRuntimeError(std::string* error, const char* message)
+{
+    if (error)
+    {
+        *error = message ? message : "";
+    }
+}
+
+static void captureRuntimeRegisters(
+    NativeRuntime* runtime, EmulatorRuntimeRegisterSnapshot* out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!runtime)
+    {
+        return;
+    }
+    if (nativeRuntimeGetBackend(runtime) == EXECUTION_BACKEND_PPSSPP_IRJIT)
+    {
+        ppssppShimSyncStateToRuntime(runtime);
+    }
+    out->running = true;
+    for (int index = 0; index < 32; ++index)
+    {
+        nativeRuntimeReadRegister(runtime, index, &out->gpr[index]);
+    }
+    float* fpr = nativeRuntimeFpr(runtime);
+    float* vfpu = nativeRuntimeVfpu(runtime);
+    uint32_t* vfpuCtrl = nativeRuntimeVfpuCtrl(runtime);
+    uint32_t* fcr31 = nativeRuntimeFcr31(runtime);
+    uint32_t* fpcond = nativeRuntimeFpCond(runtime);
+    if (fpr) memcpy(out->fpr, fpr, sizeof(out->fpr));
+    if (vfpu) memcpy(out->vfpu, vfpu, sizeof(out->vfpu));
+    if (vfpuCtrl) memcpy(out->vfpuCtrl, vfpuCtrl, sizeof(out->vfpuCtrl));
+    if (fcr31) out->fcr31 = *fcr31;
+    if (fpcond) out->fpcond = *fpcond;
+    nativeRuntimeReadRegister(runtime, RUNTIME_REG_PC, &out->pc);
+    nativeRuntimeReadRegister(runtime, RUNTIME_REG_HI, &out->hi);
+    nativeRuntimeReadRegister(runtime, RUNTIME_REG_LO, &out->lo);
+}
+
+static bool restoreRuntimeRegisters(
+    NativeRuntime* runtime, const EmulatorRuntimeRegisterSnapshot& state)
+{
+    if (!runtime || !state.running)
+    {
+        return false;
+    }
+    uint32_t zero = 0;
+    nativeRuntimeWriteRegister(runtime, RUNTIME_REG_ZERO, &zero);
+    for (int index = 1; index < 32; ++index)
+    {
+        if (nativeRuntimeWriteRegister(runtime, index, &state.gpr[index]) != RUNTIME_OK)
+        {
+            return false;
+        }
+    }
+    if (nativeRuntimeWriteRegister(runtime, RUNTIME_REG_PC, &state.pc) != RUNTIME_OK ||
+        nativeRuntimeWriteRegister(runtime, RUNTIME_REG_HI, &state.hi) != RUNTIME_OK ||
+        nativeRuntimeWriteRegister(runtime, RUNTIME_REG_LO, &state.lo) != RUNTIME_OK)
+    {
+        return false;
+    }
+    float* fpr = nativeRuntimeFpr(runtime);
+    float* vfpu = nativeRuntimeVfpu(runtime);
+    uint32_t* vfpuCtrl = nativeRuntimeVfpuCtrl(runtime);
+    uint32_t* fcr31 = nativeRuntimeFcr31(runtime);
+    uint32_t* fpcond = nativeRuntimeFpCond(runtime);
+    if (fpr) memcpy(fpr, state.fpr, sizeof(state.fpr));
+    if (vfpu) memcpy(vfpu, state.vfpu, sizeof(state.vfpu));
+    if (vfpuCtrl) memcpy(vfpuCtrl, state.vfpuCtrl, sizeof(state.vfpuCtrl));
+    if (fcr31) *fcr31 = state.fcr31;
+    if (fpcond) *fpcond = state.fpcond;
+    if (nativeRuntimeGetBackend(runtime) == EXECUTION_BACKEND_PPSSPP_IRJIT)
+    {
+        ppssppShimSyncStateFromRuntime(runtime);
+    }
+    return true;
+}
+
+uint32_t g_appDataAddress = 0;
+uint32_t g_appDataSize = 0;
+void* g_appDataBuffer = 0;
 GuestPackage* s_guestPackage = NULL;
 
 static uint32_t g_appMainEntry = 0;
 static uint32_t g_appMainInitCheckAddress = 0;
+
+static bool isPpssppRunBlockMarkerValue(uint32_t value)
+{
+    return (value & 0xff000000u) == 0x68000000u;
+}
+
+static uint32_t loadStateLe32(const uint8_t* bytes)
+{
+    return (uint32_t)bytes[0] |
+        ((uint32_t)bytes[1] << 8) |
+        ((uint32_t)bytes[2] << 16) |
+        ((uint32_t)bytes[3] << 24);
+}
+
+static void storeStateLe32(uint8_t* bytes, uint32_t value)
+{
+    bytes[0] = (uint8_t)(value & 0xff);
+    bytes[1] = (uint8_t)((value >> 8) & 0xff);
+    bytes[2] = (uint8_t)((value >> 16) & 0xff);
+    bytes[3] = (uint8_t)((value >> 24) & 0xff);
+}
+
+static bool addressInRange32(uint32_t address, uint32_t rangeStart, uint32_t rangeSize)
+{
+    return rangeSize != 0 && address >= rangeStart &&
+        address - rangeStart < rangeSize;
+}
+
+static bool addressInMappedAppCode(uint32_t address)
+{
+    if (g_appDataSize == 0)
+    {
+        return false;
+    }
+    uint32_t aliasStart = g_appDataAddress & 0x1fffffffu;
+    return addressInRange32(address, g_appDataAddress, g_appDataSize) ||
+        addressInRange32(address, aliasStart, g_appDataSize);
+}
+
+struct RestoredIrJitMarkerReplacement
+{
+    size_t offset;
+    uint32_t original;
+};
+
+static void stripIrJitMarkersFromCapturedRegion(EmulatorRuntimeStateRegion* region)
+{
+    if (!region || region->data.size() != region->size ||
+        region->size < sizeof(uint32_t))
+    {
+        return;
+    }
+    for (size_t offset = 0;
+        offset + sizeof(uint32_t) <= region->data.size();
+        offset += sizeof(uint32_t))
+    {
+        uint8_t* bytes = region->data.data() + offset;
+        uint32_t value = loadStateLe32(bytes);
+        uint32_t original = 0;
+        if (isPpssppRunBlockMarkerValue(value) &&
+            ppssppShimResolveEmuHack(
+                region->start + (uint32_t)offset, value, &original))
+        {
+            storeStateLe32(bytes, original);
+        }
+    }
+}
+
+static void collectRestoredIrJitMarkerReplacements(
+    const RuntimeMemoryRegion& target,
+    const EmulatorRuntimeStateRegion& region,
+    std::vector<RestoredIrJitMarkerReplacement>* replacements)
+{
+    replacements->clear();
+    if (!target.data || region.data.size() != region.size ||
+        region.start != target.start || region.size != target.size)
+    {
+        return;
+    }
+    for (size_t offset = 0;
+        offset + sizeof(uint32_t) <= region.data.size();
+        offset += sizeof(uint32_t))
+    {
+        uint32_t value = loadStateLe32(region.data.data() + offset);
+        if (!isPpssppRunBlockMarkerValue(value))
+        {
+            continue;
+        }
+        uint32_t original = 0;
+        bool resolved = ppssppShimResolveEmuHack(
+                region.start + (uint32_t)offset, value, &original) &&
+            !isPpssppRunBlockMarkerValue(original);
+        if (!resolved && addressInMappedAppCode(region.start + (uint32_t)offset))
+        {
+            uint32_t current = loadStateLe32(target.data + offset);
+            if (isPpssppRunBlockMarkerValue(current))
+            {
+                resolved = ppssppShimResolveEmuHack(
+                        region.start + (uint32_t)offset, current, &original) &&
+                    !isPpssppRunBlockMarkerValue(original);
+            }
+            else
+            {
+                original = current;
+                resolved = true;
+            }
+        }
+        if (resolved)
+        {
+            RestoredIrJitMarkerReplacement replacement;
+            replacement.offset = offset;
+            replacement.original = original;
+            replacements->push_back(replacement);
+        }
+    }
+}
 
 static void clearMainRuntimeIfCurrent(NativeRuntime* runtime)
 {
@@ -157,6 +378,19 @@ static void destroyMainRuntime(NativeRuntime* runtime)
     }
     clearMainRuntimeIfCurrent(runtime);
     nativeRuntimeDestroy(runtime);
+}
+
+static void destroyMainPackage(void)
+{
+    pthread_mutex_lock(&g_runtimeThreadMutex);
+    GuestPackage* package = g_mainPackage;
+    g_mainPackage = NULL;
+    s_guestPackage = NULL;
+    g_appDataAddress = 0;
+    g_appDataSize = 0;
+    g_appDataBuffer = NULL;
+    pthread_mutex_unlock(&g_runtimeThreadMutex);
+    guestPackageDestroy(package);
 }
 
 static std::string sha256Hex(const uint8_t* data, uint32_t size)
@@ -353,21 +587,29 @@ static void hookAppMain(NativeRuntime* runtime, uint64_t address, uint32_t size,
     if (!pathPtr)
     {
         printf("DingooPie: vm_malloc failed for AppMain path, size=%u\n", pathBytes);
-        exit(1);
+        g_appMainHookFailed.store(true, std::memory_order_release);
+        nativeRuntimeRequestStop(runtime);
+        return;
     }
 
     err = nativeRuntimeWriteMemory(runtime, pathPtr, appPathW.data(), pathBytes);
     if (err)
     {
         printf("DingooPie: nativeRuntimeWriteMemory(AppMain path) failed: %u (%s)\n", err, nativeRuntimeErrorString(err));
-        exit(1);
+        vm_free(pathPtr);
+        g_appMainHookFailed.store(true, std::memory_order_release);
+        nativeRuntimeRequestStop(runtime);
+        return;
     }
 
     err = nativeRuntimeWriteRegister(runtime, RUNTIME_REG_A0, &pathPtr);
     if (err)
     {
         printf("DingooPie: nativeRuntimeWriteRegister(A0) failed: %u (%s)\n", err, nativeRuntimeErrorString(err));
-        exit(1);
+        vm_free(pathPtr);
+        g_appMainHookFailed.store(true, std::memory_order_release);
+        nativeRuntimeRequestStop(runtime);
+        return;
     }
 
     uint32_t appMainEntry = (uint32_t)address;
@@ -375,7 +617,10 @@ static void hookAppMain(NativeRuntime* runtime, uint64_t address, uint32_t size,
     if (err)
     {
         printf("DingooPie: nativeRuntimeWriteRegister(T9) failed: %u (%s)\n", err, nativeRuntimeErrorString(err));
-        exit(1);
+        vm_free(pathPtr);
+        g_appMainHookFailed.store(true, std::memory_order_release);
+        nativeRuntimeRequestStop(runtime);
+        return;
     }
 
     RuntimeHook* hookHandle = (RuntimeHook*)userData;
@@ -383,7 +628,10 @@ static void hookAppMain(NativeRuntime* runtime, uint64_t address, uint32_t size,
     if (err)
     {
         printf("DingooPie: nativeRuntimeRemoveHook(AppMain) failed: %u (%s)\n", err, nativeRuntimeErrorString(err));
-        exit(1);
+        vm_free(pathPtr);
+        g_appMainHookFailed.store(true, std::memory_order_release);
+        nativeRuntimeRequestStop(runtime);
+        return;
     }
 
     free(userData);
@@ -391,20 +639,20 @@ static void hookAppMain(NativeRuntime* runtime, uint64_t address, uint32_t size,
 
 static bool mapAppMemory(NativeRuntime* runtime, GuestPackage* loadedApp)
 {
-    s_AppDataAddr = loadedApp->origin;
-    s_AppDataBuffSize = loadedApp->bin_size;
-    s_AppDataBuff = loadedApp->bin_data;
+    g_appDataAddress = loadedApp->origin;
+    g_appDataSize = loadedApp->bin_size;
+    g_appDataBuffer = loadedApp->bin_data;
     s_guestPackage = loadedApp;
 
-    RuntimeError err = nativeRuntimeMapMemory(runtime, s_AppDataAddr, s_AppDataBuffSize, RUNTIME_PROT_ALL, s_AppDataBuff);
+    RuntimeError err = nativeRuntimeMapMemory(runtime, g_appDataAddress, g_appDataSize, RUNTIME_PROT_ALL, g_appDataBuffer);
     if (err)
     {
         printf("DingooPie: failed to map app memory: %u (%s)\n", err, nativeRuntimeErrorString(err));
         return false;
     }
 
-    uint32_t aliasAddr = s_AppDataAddr & 0x1fffffff;
-    err = nativeRuntimeMapMemory(runtime, aliasAddr, s_AppDataBuffSize, RUNTIME_PROT_ALL, s_AppDataBuff);
+    uint32_t aliasAddr = g_appDataAddress & 0x1fffffff;
+    err = nativeRuntimeMapMemory(runtime, aliasAddr, g_appDataSize, RUNTIME_PROT_ALL, g_appDataBuffer);
     if (err)
     {
         printf("DingooPie: failed to map app alias: %u (%s)\n", err, nativeRuntimeErrorString(err));
@@ -518,6 +766,7 @@ static CompatGuestExitDecision runtimeExceptionGuestExitDecision(NativeRuntime* 
 static NativeRuntime* initDingooPie(void)
 {
     taskSchedulerResetShutdown();
+    g_appMainHookFailed.store(false, std::memory_order_release);
 
     NativeRuntime* runtime;
     RuntimeError err = nativeRuntimeCreate(&runtime);
@@ -540,6 +789,9 @@ static NativeRuntime* initDingooPie(void)
         destroyMainRuntime(runtime);
         return NULL;
     }
+    pthread_mutex_lock(&g_runtimeThreadMutex);
+    g_mainPackage = loadedApp;
+    pthread_mutex_unlock(&g_runtimeThreadMutex);
     std::string appSha256 = sha256Hex(loadedApp->file_data, loadedApp->file_size);
     pthread_mutex_lock(&g_runtimeThreadMutex);
     g_currentAppSha256 = appSha256;
@@ -547,7 +799,8 @@ static NativeRuntime* initDingooPie(void)
     bridge_set_game_identity(appSha256.c_str());
     fsys_set_game_identity(appSha256.c_str());
     fsys_set_game_name(g_appMainPath.c_str());
-    std::string saveDirectory = platformAndroidGetSaveDirectory(g_appLoadPath);
+    std::string saveDirectory = platformAndroidGetSaveDirectory(
+        g_appLoadPath, appSha256);
     fsys_set_save_directory(saveDirectory.c_str());
     printf("DingooPie: save directory: %s\n", saveDirectory.c_str());
     cheatRuntimeLoadForGame(
@@ -602,9 +855,9 @@ static NativeRuntime* initDingooPie(void)
     printf("DingooPie: init bridge done\n");
 
     printf("DingooPie: init vm memory begin\n");
-    if (InitVmMem(runtime, loadedApp))
+    if (initializeVmMemory(runtime, loadedApp))
     {
-        printf("DingooPie: InitVmMem failed\n");
+        printf("DingooPie: initializeVmMemory failed\n");
         destroyMainRuntime(runtime);
         return NULL;
     }
@@ -683,7 +936,6 @@ static NativeRuntime* initDingooPie(void)
     {
         nativeRuntimeWriteRegister(runtime, RUNTIME_REG_PC, &loadedApp->bin_entry);
         printf("DingooPie: forcing guest crash for diagnostics\n");
-        g_lastRunExitedNormally.store(false, std::memory_order_release);
         logEmulationFailure(runtime, RUNTIME_ERROR_EXCEPTION, crashContext);
         frontendRequestQuit();
         return runtime;
@@ -692,8 +944,18 @@ static NativeRuntime* initDingooPie(void)
     printf("DingooPie: native runtime start pc=0x%08x until=0xffffffff\n", loadedApp->bin_entry);
     err = nativeRuntimeStart(runtime, loadedApp->bin_entry, 0xFFFFFFFF, 0, 0);
     printf("DingooPie: native runtime returned err=%u (%s)\n", err, nativeRuntimeErrorString(err));
+    if (g_appMainHookFailed.load(std::memory_order_acquire))
+    {
+        printf("DingooPie: AppMain hook initialization failed; returning to library\n");
+        frontendRequestGameExit();
+        return runtime;
+    }
     if (err)
     {
+        if (frontendGameExitRequested())
+        {
+            return runtime;
+        }
         CompatGuestExitDecision exitDecision = (err == RUNTIME_ERROR_EXCEPTION)
             ? runtimeExceptionGuestExitDecision(runtime, appSha256)
             : noGuestExitDecision();
@@ -701,19 +963,14 @@ static NativeRuntime* initDingooPie(void)
         {
             printf("DingooPie: treating %s as normal guest exit\n",
                 exitDecision.label ? exitDecision.label : "compat exception");
-            g_lastRunAppPath = g_appLoadPath;
-            g_lastRunExitedNormally.store(true, std::memory_order_release);
             frontendRequestGameExit();
             return runtime;
         }
-        g_lastRunExitedNormally.store(false, std::memory_order_release);
         logEmulationFailure(runtime, err, crashContext);
         frontendRequestQuit();
         return runtime;
     }
 
-    g_lastRunAppPath = g_appLoadPath;
-    g_lastRunExitedNormally.store(true, std::memory_order_release);
     if (!g_runtimeStopRequested.load(std::memory_order_acquire))
     {
         printf("DingooPie: guest completed; returning to library\n");
@@ -724,38 +981,39 @@ static NativeRuntime* initDingooPie(void)
 
 static void* dingoopieRun(void* data)
 {
+    struct RuntimeThreadCompletionGuard
+    {
+        ~RuntimeThreadCompletionGuard()
+        {
+            runtimeThreadCompletionSignal(&g_runtimeThreadCompletion);
+        }
+    } completionGuard;
     (void)data;
     NativeRuntime* runtime = initDingooPie();
-    if (!runtime)
-    {
-        gameHistoryClearRecentIfCurrent(
-            g_appLoadPath, g_clearRecentOnStartupFailure, "APP startup failure");
-    }
-    printf("DingooPie: runtime thread exited runtime=%p\n", (void*)runtime);
+    taskSchedulerRequestShutdown("main runtime exit");
+    taskSchedulerWaitForTasks();
+    bridge_release_game_resources();
     if (runtime)
     {
         destroyMainRuntime(runtime);
-        printf("DingooPie: native runtime destroyed runtime=%p\n", (void*)runtime);
     }
+    destroyMainPackage();
     return 0;
 }
 
 bool appRuntimeStart(
     const char* appPath,
     const EmulatorOptions& options,
-    bool clearRecentOnStartupFailure,
     const std::vector<std::string>& enabledCheatFeatureKeys)
 {
     g_runtimeStopRequested.store(false, std::memory_order_release);
-    g_lastRunExitedNormally.store(false, std::memory_order_release);
-    g_lastRunAppPath.clear();
+    runtimeThreadCompletionReset(&g_runtimeThreadCompletion);
     pthread_mutex_lock(&g_runtimeThreadMutex);
     g_appMainEntry = 0;
     g_appMainInitCheckAddress = 0;
     g_currentAppSha256.clear();
     pthread_mutex_unlock(&g_runtimeThreadMutex);
     g_options = options;
-    g_clearRecentOnStartupFailure = clearRecentOnStartupFailure;
     g_enabledCheatFeatureKeys = enabledCheatFeatureKeys;
     g_appLoadPath = gamePathNormalize(appPath);
     if (g_appLoadPath.empty() || !gamePathHasAppExtension(g_appLoadPath))
@@ -809,7 +1067,213 @@ void appRuntimeNotifyPauseRequested(void)
     pthread_mutex_unlock(&g_runtimeThreadMutex);
 }
 
-void appRuntimeStop(void)
+uint32_t appRuntimeActiveThreadCount(void)
+{
+    pthread_mutex_lock(&g_runtimeThreadMutex);
+    uint32_t count = g_mainRuntime ?
+        1u + (uint32_t)taskSchedulerRuntimeCount() : 0u;
+    pthread_mutex_unlock(&g_runtimeThreadMutex);
+    return count;
+}
+
+bool appRuntimeCaptureState(EmulatorRuntimeState* out, std::string* error)
+{
+    if (!out)
+    {
+        setSaveStateRuntimeError(error, "runtime state output is invalid");
+        return false;
+    }
+    out->regions.clear();
+    out->taskRegisters.clear();
+    out->hleSemaphoreCounts.clear();
+    memset(&out->registers, 0, sizeof(out->registers));
+    memset(&out->heap, 0, sizeof(out->heap));
+    out->osTicks = 0;
+
+    if (!waitForSaveStatePause())
+    {
+        setSaveStateRuntimeError(error, "runtime did not pause in time");
+        return false;
+    }
+
+    pthread_mutex_lock(&g_runtimeThreadMutex);
+    NativeRuntime* runtime = g_mainRuntime;
+    if (!runtime)
+    {
+        pthread_mutex_unlock(&g_runtimeThreadMutex);
+        setSaveStateRuntimeError(error, "runtime state is not available");
+        return false;
+    }
+    captureRuntimeRegisters(runtime, &out->registers);
+    out->osTicks = bridge_capture_os_ticks();
+    uint32_t semaphoreCount = bridge_semaphore_state_count();
+    out->hleSemaphoreCounts.resize(semaphoreCount);
+    bridge_capture_semaphore_counts(out->hleSemaphoreCounts.data(), semaphoreCount);
+    if (!vmHeapCaptureSnapshot(&out->heap))
+    {
+        pthread_mutex_unlock(&g_runtimeThreadMutex);
+        return false;
+    }
+
+    std::vector<NativeRuntime*> taskRuntimes;
+    taskSchedulerSnapshotRuntimes(&taskRuntimes);
+    out->taskRegisters.reserve(taskRuntimes.size());
+    for (size_t index = 0; index < taskRuntimes.size(); ++index)
+    {
+        EmulatorRuntimeRegisterSnapshot snapshot;
+        captureRuntimeRegisters(taskRuntimes[index], &snapshot);
+        out->taskRegisters.push_back(snapshot);
+    }
+
+    std::vector<const uint8_t*> capturedPointers;
+    size_t regionCount = nativeRuntimeMemoryRegionCount(runtime);
+    for (size_t index = 0; index < regionCount; ++index)
+    {
+        RuntimeMemoryRegion region;
+        if (!nativeRuntimeGetMemoryRegion(runtime, index, &region) || !region.data ||
+            !(region.perms & RUNTIME_PROT_WRITE) || region.size == 0 ||
+            std::find(capturedPointers.begin(), capturedPointers.end(), region.data) !=
+                capturedPointers.end())
+        {
+            continue;
+        }
+        EmulatorRuntimeStateRegion captured;
+        captured.start = region.start;
+        captured.size = region.size;
+        captured.perms = region.perms;
+        captured.data.assign(region.data, region.data + region.size);
+        stripIrJitMarkersFromCapturedRegion(&captured);
+        out->regions.push_back(std::move(captured));
+        capturedPointers.push_back(region.data);
+    }
+    pthread_mutex_unlock(&g_runtimeThreadMutex);
+    bool captured = out->registers.running && !out->regions.empty();
+    if (!captured)
+    {
+        setSaveStateRuntimeError(error, "runtime state is not available");
+    }
+    return captured;
+}
+
+bool appRuntimeRestoreState(const EmulatorRuntimeState& state, std::string* error)
+{
+    if (!state.registers.running)
+    {
+        setSaveStateRuntimeError(error, "saved runtime state is invalid");
+        return false;
+    }
+    if (!waitForSaveStatePause())
+    {
+        setSaveStateRuntimeError(error, "runtime did not pause in time");
+        return false;
+    }
+    pthread_mutex_lock(&g_runtimeThreadMutex);
+    NativeRuntime* runtime = g_mainRuntime;
+    if (!runtime)
+    {
+        pthread_mutex_unlock(&g_runtimeThreadMutex);
+        setSaveStateRuntimeError(error, "runtime state is not available");
+        return false;
+    }
+    std::vector<NativeRuntime*> taskRuntimes;
+    taskSchedulerSnapshotRuntimes(&taskRuntimes);
+    if (taskRuntimes.size() != state.taskRegisters.size())
+    {
+        pthread_mutex_unlock(&g_runtimeThreadMutex);
+        setSaveStateRuntimeError(error, "runtime thread count does not match save state");
+        return false;
+    }
+
+    std::vector<RuntimeMemoryRegion> runtimeRegions;
+    size_t regionCount = nativeRuntimeMemoryRegionCount(runtime);
+    for (size_t index = 0; index < regionCount; ++index)
+    {
+        RuntimeMemoryRegion region;
+        if (nativeRuntimeGetMemoryRegion(runtime, index, &region) && region.data &&
+            (region.perms & RUNTIME_PROT_WRITE) && region.size)
+        {
+            runtimeRegions.push_back(region);
+        }
+    }
+    std::vector<size_t> restoreTargets(state.regions.size(), (size_t)-1);
+    std::vector<bool> usedRuntimeRegions(runtimeRegions.size(), false);
+    for (size_t index = 0; index < state.regions.size(); ++index)
+    {
+        const EmulatorRuntimeStateRegion& saved = state.regions[index];
+        if (saved.size == 0 || saved.data.size() != saved.size)
+        {
+            pthread_mutex_unlock(&g_runtimeThreadMutex);
+            setSaveStateRuntimeError(error, "runtime memory layout does not match save state");
+            return false;
+        }
+        for (size_t targetIndex = 0; targetIndex < runtimeRegions.size(); ++targetIndex)
+        {
+            if (!usedRuntimeRegions[targetIndex] &&
+                runtimeRegions[targetIndex].start == saved.start &&
+                runtimeRegions[targetIndex].size == saved.size)
+            {
+                restoreTargets[index] = targetIndex;
+                usedRuntimeRegions[targetIndex] = true;
+                break;
+            }
+        }
+        if (restoreTargets[index] == (size_t)-1)
+        {
+            pthread_mutex_unlock(&g_runtimeThreadMutex);
+            setSaveStateRuntimeError(error, "runtime memory layout does not match save state");
+            return false;
+        }
+    }
+    std::vector<std::vector<RestoredIrJitMarkerReplacement> > markerReplacements(
+        state.regions.size());
+    for (size_t index = 0; index < state.regions.size(); ++index)
+    {
+        collectRestoredIrJitMarkerReplacements(
+            runtimeRegions[restoreTargets[index]], state.regions[index],
+            &markerReplacements[index]);
+    }
+    for (size_t index = 0; index < state.regions.size(); ++index)
+    {
+        const EmulatorRuntimeStateRegion& saved = state.regions[index];
+        RuntimeMemoryRegion& target = runtimeRegions[restoreTargets[index]];
+        memcpy(target.data, saved.data.data(), saved.size);
+        for (size_t replacementIndex = 0;
+            replacementIndex < markerReplacements[index].size();
+            ++replacementIndex)
+        {
+            const RestoredIrJitMarkerReplacement& replacement =
+                markerReplacements[index][replacementIndex];
+            storeStateLe32(target.data + replacement.offset, replacement.original);
+        }
+    }
+
+    bool restored = vmHeapRestoreSnapshot(state.heap) &&
+        bridge_restore_semaphore_counts(state.hleSemaphoreCounts.data(),
+            (uint32_t)state.hleSemaphoreCounts.size()) &&
+        restoreRuntimeRegisters(runtime, state.registers);
+    for (size_t index = 0; restored && index < taskRuntimes.size(); ++index)
+    {
+        restored = restoreRuntimeRegisters(taskRuntimes[index], state.taskRegisters[index]);
+    }
+    if (restored)
+    {
+        bridge_restore_os_ticks(state.osTicks);
+        nativeRuntimeFlushCodeCache(runtime);
+        for (size_t index = 0; index < taskRuntimes.size(); ++index)
+        {
+            nativeRuntimeFlushCodeCache(taskRuntimes[index]);
+        }
+        framebufferPresentRestoredFrame();
+    }
+    pthread_mutex_unlock(&g_runtimeThreadMutex);
+    if (!restored)
+    {
+        setSaveStateRuntimeError(error, "failed to restore runtime state");
+    }
+    return restored;
+}
+
+bool appRuntimeStop(void)
 {
     pthread_t tid = {};
     NativeRuntime* runtime = NULL;
@@ -822,12 +1286,10 @@ void appRuntimeStop(void)
     {
         tid = g_runtimeThread;
         shouldJoin = true;
-        g_runtimeThreadStarted = false;
     }
     runtime = g_mainRuntime;
     if (runtime && requestStop)
     {
-        printf("DingooPie: stop requested runtime=%p\n", (void*)runtime);
         taskSchedulerRequestShutdown("frontend exit");
         nativeRuntimeRequestStop(runtime);
     }
@@ -835,34 +1297,31 @@ void appRuntimeStop(void)
 
     if (shouldJoin)
     {
-        int joinResult = pthread_join(tid, NULL);
-        joinedRuntime = joinResult == 0;
+        int joinError = 0;
+        const RuntimeThreadJoinResult joinResult = runtimeThreadJoinWithTimeout(
+            tid, &g_runtimeThreadCompletion, kRuntimeStopTimeoutMs, &joinError);
+        joinedRuntime = joinResult == RUNTIME_THREAD_JOINED;
         if (joinedRuntime)
         {
-            printf("DingooPie: runtime thread joined\n");
+            pthread_mutex_lock(&g_runtimeThreadMutex);
+            g_runtimeThreadStarted = false;
+            pthread_mutex_unlock(&g_runtimeThreadMutex);
+        }
+        else if (joinResult == RUNTIME_THREAD_JOIN_TIMEOUT)
+        {
+            printf("DingooPie: runtime thread did not stop within %u ms\n",
+                kRuntimeStopTimeoutMs);
         }
         else
         {
-            printf("DingooPie: runtime thread join failed: %d\n", joinResult);
+            printf("DingooPie: runtime thread join failed: %d\n", joinError);
         }
     }
 
-    bool exitedNormally = joinedRuntime && g_lastRunExitedNormally.load(std::memory_order_acquire);
     if (joinedRuntime)
     {
-        MixerResetAfterRuntimeStop();
+        mixerResetAfterRuntimeStop();
     }
 
-    if (shouldJoin && !joinedRuntime)
-    {
-        printf("DingooPie: recent app not saved because runtime thread did not join\n");
-    }
-    else if (shouldJoin && !exitedNormally)
-    {
-        printf("DingooPie: recent app not saved because runtime did not exit normally\n");
-    }
-    if (exitedNormally)
-    {
-        gameHistorySaveRecent(g_lastRunAppPath, "normal APP runtime exit");
-    }
+    return !shouldJoin || joinedRuntime;
 }

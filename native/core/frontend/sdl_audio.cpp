@@ -2,6 +2,7 @@
 #include "frontend/audio_validation_capture.h"
 
 #include <SDL2/SDL.h>
+#include <math.h>
 #include <stdint.h>
 #include <deque>
 #include <vector>
@@ -12,10 +13,16 @@
 static const uint32_t kQueueBackpressureLogIntervalMs = 1000;
 static const uint32_t kAudioQueueDropDisabledMs = 0;
 static const uint32_t kAudioQueueDropMaxMs = 60000;
+static const uint32_t kMaxQueuedAudioMs = 150;
 static const uint32_t kPendingAudioMaxBytes = 512 * 1024;
 static const int kAudioEffectStateChannels = 8;
-static const int kCcStableHostSampleRate = 48000;
-static const Uint8 kCcStableHostChannels = 2;
+static const int kStableHostSampleRate = 48000;
+static const Uint8 kStableHostChannels = 2;
+static const int kOutputConditionerChannels = 8;
+static const int kOutputDiscontinuityThreshold = 12000;
+static const int32_t kNoiseSuppressorCloseThreshold = 64;
+static const int32_t kNoiseSuppressorOpenThreshold = 256;
+static const int32_t kNoiseSuppressorFloorGain = 1024;
 
 static SDL_AudioDeviceID g_audioDevice = 0;
 static SDL_AudioSpec g_audioSpec;
@@ -26,16 +33,42 @@ static uint32_t g_volume = 100;
 static int g_masterVolumePercent = 100;
 static int g_bufferSamples = 2048;
 static AudioEffectMode g_audioEffect = AUDIO_EFFECT_OFF;
+static DigitalNoiseReductionLevel g_digitalNoiseReduction =
+    DIGITAL_NOISE_REDUCTION_HIGH;
 static int32_t g_audioEffectState[kAudioEffectStateChannels] = {};
 static bool g_audioEffectStateValid[kAudioEffectStateChannels] = {};
 static bool g_guestMuteRequested = false;
 static bool g_frontendPauseRequested = false;
 static bool g_audioOutputUnavailable = false;
 static bool g_gameAudioResourcesActive = false;
-static MixerRuntimeAudioProfile g_runtimeAudioProfile = MIXER_RUNTIME_AUDIO_NATIVE_GUEST;
 static uint64_t g_lastQueueBackpressureLogTicks = 0;
 static std::deque<std::vector<char> > g_pendingAudio;
 static uint32_t g_pendingAudioBytes = 0;
+static std::vector<char> g_guestAudioRemainder;
+static bool g_resampleLowPassEnabled = false;
+static double g_resampleLowPassB0 = 0.0;
+static double g_resampleLowPassB1 = 0.0;
+static double g_resampleLowPassB2 = 0.0;
+static double g_resampleLowPassA1 = 0.0;
+static double g_resampleLowPassA2 = 0.0;
+static uint64_t g_audioQueueExpectedEndTicks = 0;
+static int32_t g_dcBlockPreviousInput[kOutputConditionerChannels] = {};
+static int32_t g_dcBlockPreviousOutput[kOutputConditionerChannels] = {};
+static bool g_dcBlockStateValid[kOutputConditionerChannels] = {};
+static int16_t g_outputPreviousSample[kOutputConditionerChannels] = {};
+static bool g_outputPreviousSampleValid[kOutputConditionerChannels] = {};
+static int32_t g_noiseSuppressorEnvelope = 0;
+static int32_t g_noiseSuppressorGain = 32768;
+
+struct ResampleLowPassState
+{
+    double input1;
+    double input2;
+    double output1;
+    double output2;
+};
+
+static ResampleLowPassState g_resampleLowPassState[kAudioEffectStateChannels] = {};
 
 enum AudioQueueWaitResult
 {
@@ -43,6 +76,10 @@ enum AudioQueueWaitResult
     AUDIO_QUEUE_OUTPUT_STOPPED,
     AUDIO_QUEUE_DROP_BUFFER
 };
+
+static void applyQueueRecoveryFadeInLocked(char* buffer, int count,
+    uint32_t queuedBytes);
+static int audioFrameChannelsLocked(void);
 
 static uint32_t parseBoundedUintEnv(const char* name, uint32_t defaultValue, uint32_t maxValue)
 {
@@ -85,13 +122,11 @@ static uint32_t audioQueueDropAfterMs(void)
 
 static bool audioQueueTraceEnabled(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_AUDIO_QUEUE_TRACE");
-        enabled = value && value[0] && value[0] != '0' ? 1 : 0;
-    }
-    return enabled != 0;
+        return value && value[0] && value[0] != '0';
+    }();
+    return enabled;
 }
 
 static void resetAudioBackpressureLog(void)
@@ -164,9 +199,46 @@ static uint32_t audioBytesPerSecondLocked(void)
 
 static uint32_t maxQueuedAudioBytesLocked(void)
 {
-    uint32_t quarterSecond = audioBytesPerSecondLocked() / 4;
+    uint32_t latencyTarget =
+        (audioBytesPerSecondLocked() * kMaxQueuedAudioMs) / 1000;
     uint32_t deviceBuffer = g_audioSpec.size ? g_audioSpec.size : 4096;
-    return quarterSecond > deviceBuffer ? quarterSecond : deviceBuffer;
+    return latencyTarget > deviceBuffer ? latencyTarget : deviceBuffer;
+}
+
+static void resetResampleLowPassLocked(void)
+{
+    memset(g_resampleLowPassState, 0, sizeof(g_resampleLowPassState));
+}
+
+static void configureResampleLowPassLocked(void)
+{
+    g_resampleLowPassEnabled = false;
+    resetResampleLowPassLocked();
+    if (g_digitalNoiseReduction != DIGITAL_NOISE_REDUCTION_HIGH ||
+        g_guestAudioSpec.freq <= 0 || g_audioSpec.freq <= g_guestAudioSpec.freq ||
+        g_audioSpec.format != AUDIO_S16LSB)
+    {
+        return;
+    }
+
+    const double cutoff = (double)g_guestAudioSpec.freq * 0.40;
+    const double hostNyquist = (double)g_audioSpec.freq * 0.5;
+    if (cutoff <= 0.0 || cutoff >= hostNyquist)
+    {
+        return;
+    }
+
+    const double pi = 3.14159265358979323846;
+    const double omega = 2.0 * pi * cutoff / (double)g_audioSpec.freq;
+    const double cosine = cos(omega);
+    const double alpha = sin(omega) / sqrt(2.0);
+    const double a0 = 1.0 + alpha;
+    g_resampleLowPassB0 = ((1.0 - cosine) * 0.5) / a0;
+    g_resampleLowPassB1 = (1.0 - cosine) / a0;
+    g_resampleLowPassB2 = g_resampleLowPassB0;
+    g_resampleLowPassA1 = (-2.0 * cosine) / a0;
+    g_resampleLowPassA2 = (1.0 - alpha) / a0;
+    g_resampleLowPassEnabled = true;
 }
 
 static void clearPendingAudioLocked(void)
@@ -177,6 +249,10 @@ static void clearPendingAudioLocked(void)
 
 static void clearAudioStreamLocked(void)
 {
+    g_guestAudioRemainder.clear();
+    g_resampleLowPassEnabled = false;
+    resetResampleLowPassLocked();
+    g_audioQueueExpectedEndTicks = 0;
     if (g_audioStream)
     {
         SDL_AudioStreamClear(g_audioStream);
@@ -185,6 +261,8 @@ static void clearAudioStreamLocked(void)
 
 static bool configureAudioStreamLocked(const waveout_args* args)
 {
+    g_guestAudioRemainder.clear();
+    g_audioQueueExpectedEndTicks = 0;
     if (g_audioStream)
     {
         SDL_FreeAudioStream(g_audioStream);
@@ -195,6 +273,7 @@ static bool configureAudioStreamLocked(const waveout_args* args)
     g_guestAudioSpec.freq = args->sample_rate;
     g_guestAudioSpec.format = convertFormat(args->format);
     g_guestAudioSpec.channels = args->channel ? args->channel : 2;
+    configureResampleLowPassLocked();
     if (g_guestAudioSpec.freq == g_audioSpec.freq &&
         g_guestAudioSpec.format == g_audioSpec.format &&
         g_guestAudioSpec.channels == g_audioSpec.channels)
@@ -227,11 +306,32 @@ static bool convertAudioBufferLocked(const char* buffer, int count,
         output->assign(buffer, buffer + count);
         return true;
     }
-    if (SDL_AudioStreamPut(g_audioStream, buffer, count) != 0)
+
+    const uint32_t frameBytes = audioBytesPerSample(g_guestAudioSpec.format) *
+        (g_guestAudioSpec.channels ? g_guestAudioSpec.channels : 1u);
+    const size_t totalBytes = g_guestAudioRemainder.size() + (size_t)count;
+    const size_t alignedBytes = frameBytes ? totalBytes - totalBytes % frameBytes : totalBytes;
+    std::vector<char> combined;
+    const char* input = buffer;
+    if (!g_guestAudioRemainder.empty() || alignedBytes != (size_t)count)
+    {
+        combined.reserve(totalBytes);
+        combined.insert(combined.end(), g_guestAudioRemainder.begin(),
+            g_guestAudioRemainder.end());
+        combined.insert(combined.end(), buffer, buffer + count);
+        input = combined.data();
+    }
+    if (!alignedBytes)
+    {
+        g_guestAudioRemainder.assign(input, input + totalBytes);
+        return true;
+    }
+    if (SDL_AudioStreamPut(g_audioStream, input, (int)alignedBytes) != 0)
     {
         SDL_Log("Audio conversion input failed: %s", SDL_GetError());
         return false;
     }
+    g_guestAudioRemainder.assign(input + alignedBytes, input + totalBytes);
     int available = SDL_AudioStreamAvailable(g_audioStream);
     if (available <= 0)
     {
@@ -255,8 +355,12 @@ static void flushPendingAudioLocked(void)
         SDL_GetQueuedAudioSize(g_audioDevice) < maxQueuedAudioBytesLocked())
     {
         std::vector<char>& pending = g_pendingAudio.front();
+        uint32_t queuedBytes = SDL_GetQueuedAudioSize(g_audioDevice);
+        applyQueueRecoveryFadeInLocked(pending.data(), (int)pending.size(),
+            queuedBytes);
         if (SDL_QueueAudio(g_audioDevice, pending.data(), (Uint32)pending.size()) != 0)
         {
+            g_audioQueueExpectedEndTicks = 0;
             break;
         }
         g_pendingAudioBytes -= (uint32_t)pending.size();
@@ -267,6 +371,11 @@ static void flushPendingAudioLocked(void)
 static bool outputMutedLocked(void)
 {
     return g_frontendPauseRequested || g_guestMuteRequested || g_volume == 0 || g_masterVolumePercent == 0;
+}
+
+static bool outputMutedWithoutFrontendPauseLocked(void)
+{
+    return g_guestMuteRequested || g_volume == 0 || g_masterVolumePercent == 0;
 }
 
 static void logAudioBackpressure(uint64_t nowTicks, uint64_t waitBeginTicks, bool dropping)
@@ -370,12 +479,27 @@ static AudioEffectMode normalizeAudioEffect(AudioEffectMode effect)
     }
 }
 
+static DigitalNoiseReductionLevel normalizeDigitalNoiseReduction(
+    DigitalNoiseReductionLevel level)
+{
+    switch (level)
+    {
+    case DIGITAL_NOISE_REDUCTION_HIGH:
+    case DIGITAL_NOISE_REDUCTION_MEDIUM:
+    case DIGITAL_NOISE_REDUCTION_LOW:
+        return level;
+    default:
+        return DIGITAL_NOISE_REDUCTION_HIGH;
+    }
+}
+
 static int effectiveVolumePercentLocked(void)
 {
     uint32_t guestVolume = g_volume > 255 ? 255 : g_volume;
-    // Dingoo samples commonly pass 0-100, while some SDK layers document 0-255.
-    // Treat 0-100 as direct percent and only normalize larger values from 255.
-    int guestPercent = guestVolume <= 100 ? (int)guestVolume : (int)((guestVolume * 100u + 127u) / 255u);
+    // Games mix percentage and legacy byte-scale values. Preserve explicit
+    // 0-100 controls and treat larger legacy values as full volume so crossing
+    // 100 cannot cause a sudden output drop.
+    int guestPercent = guestVolume <= 100 ? (int)guestVolume : 100;
     int masterVolume = clampIntLocal(g_masterVolumePercent, 0, 150);
     return (guestPercent * masterVolume + 50) / 100;
 }
@@ -399,10 +523,201 @@ static int clampS16(int value)
     return value;
 }
 
+static void resetOutputConditionerLocked(void)
+{
+    memset(g_dcBlockPreviousInput, 0, sizeof(g_dcBlockPreviousInput));
+    memset(g_dcBlockPreviousOutput, 0, sizeof(g_dcBlockPreviousOutput));
+    memset(g_dcBlockStateValid, 0, sizeof(g_dcBlockStateValid));
+    memset(g_outputPreviousSample, 0, sizeof(g_outputPreviousSample));
+    memset(g_outputPreviousSampleValid, 0, sizeof(g_outputPreviousSampleValid));
+    g_noiseSuppressorEnvelope = 0;
+    g_noiseSuppressorGain = 32768;
+}
+
+static int32_t noiseSuppressorTargetGainLocked(int32_t envelope)
+{
+    if (envelope <= kNoiseSuppressorCloseThreshold)
+    {
+        return kNoiseSuppressorFloorGain;
+    }
+    if (envelope >= kNoiseSuppressorOpenThreshold)
+    {
+        return 32768;
+    }
+
+    return kNoiseSuppressorFloorGain +
+        (envelope - kNoiseSuppressorCloseThreshold) *
+        (32768 - kNoiseSuppressorFloorGain) /
+        (kNoiseSuppressorOpenThreshold - kNoiseSuppressorCloseThreshold);
+}
+
+static int16_t softLimitS16(int32_t sample)
+{
+    const int32_t threshold = 28672;
+    const int32_t ceiling = 32000;
+    const int32_t magnitude = sample < 0 ? -sample : sample;
+    if (magnitude <= threshold)
+    {
+        return (int16_t)sample;
+    }
+
+    const int32_t headroom = ceiling - threshold;
+    const int32_t excess = magnitude - threshold;
+    const int32_t compressed = threshold +
+        (excess * headroom) / (excess + headroom);
+    return (int16_t)(sample < 0 ? -compressed : compressed);
+}
+
+static void applyOutputConditionerS16Locked(char* buffer, int count)
+{
+    if (!buffer || count <= 0 || g_audioSpec.format != AUDIO_S16LSB)
+    {
+        return;
+    }
+
+    const int channels = audioFrameChannelsLocked();
+    const int frameCount = count / (int)(sizeof(int16_t) * channels);
+    if (channels <= 0 || frameCount <= 0)
+    {
+        return;
+    }
+
+    int16_t* samples = (int16_t*)buffer;
+    const int smoothingFrames = g_audioSpec.freq > 0 ?
+        clampIntLocal(g_audioSpec.freq / 2000, 8, 32) : 24;
+    int32_t correction[kOutputConditionerChannels] = {};
+    for (int channel = 0;
+        channel < channels && channel < kOutputConditionerChannels; ++channel)
+    {
+        const int32_t first = samples[channel];
+        if (g_outputPreviousSampleValid[channel] &&
+            abs((int)first - (int)g_outputPreviousSample[channel]) >=
+                kOutputDiscontinuityThreshold)
+        {
+            correction[channel] =
+                (int32_t)g_outputPreviousSample[channel] - first;
+        }
+    }
+
+    for (int frame = 0; frame < frameCount; ++frame)
+    {
+        int32_t frameOutput[kOutputConditionerChannels] = {};
+        int32_t framePeak = 0;
+        for (int channel = 0; channel < channels; ++channel)
+        {
+            const int stateChannel = channel % kOutputConditionerChannels;
+            const int index = frame * channels + channel;
+            int32_t input = samples[index];
+            int32_t output;
+            if (g_digitalNoiseReduction == DIGITAL_NOISE_REDUCTION_LOW)
+            {
+                output = input;
+            }
+            else if (!g_dcBlockStateValid[stateChannel])
+            {
+                g_dcBlockPreviousInput[stateChannel] = input;
+                g_dcBlockPreviousOutput[stateChannel] = 0;
+                g_dcBlockStateValid[stateChannel] = true;
+                output = 0;
+            }
+            else
+            {
+                output = input - g_dcBlockPreviousInput[stateChannel] +
+                    (g_dcBlockPreviousOutput[stateChannel] * 32700) / 32768;
+                g_dcBlockPreviousInput[stateChannel] = input;
+                g_dcBlockPreviousOutput[stateChannel] = output;
+            }
+            if (frame < smoothingFrames)
+            {
+                output += correction[stateChannel] *
+                    (smoothingFrames - frame) / smoothingFrames;
+            }
+            frameOutput[stateChannel] = output;
+            framePeak = std::max(framePeak, (int32_t)abs(output));
+        }
+
+        int32_t noiseSuppressorGain = 32768;
+        if (g_digitalNoiseReduction == DIGITAL_NOISE_REDUCTION_HIGH)
+        {
+            if (framePeak >= g_noiseSuppressorEnvelope)
+            {
+                g_noiseSuppressorEnvelope = framePeak;
+            }
+            else
+            {
+                g_noiseSuppressorEnvelope = std::max(framePeak,
+                    (g_noiseSuppressorEnvelope * 32760) / 32768);
+            }
+            const int32_t targetGain =
+                noiseSuppressorTargetGainLocked(g_noiseSuppressorEnvelope);
+            if (targetGain >= g_noiseSuppressorGain)
+            {
+                g_noiseSuppressorGain = targetGain;
+            }
+            else
+            {
+                g_noiseSuppressorGain +=
+                    (targetGain - g_noiseSuppressorGain) / 512;
+            }
+            noiseSuppressorGain = g_noiseSuppressorGain;
+        }
+
+        for (int channel = 0; channel < channels; ++channel)
+        {
+            const int stateChannel = channel % kOutputConditionerChannels;
+            const int index = frame * channels + channel;
+            samples[index] = softLimitS16(
+                frameOutput[stateChannel] * noiseSuppressorGain / 32768);
+        }
+    }
+
+    for (int channel = 0;
+        channel < channels && channel < kOutputConditionerChannels; ++channel)
+    {
+        g_outputPreviousSample[channel] =
+            samples[(frameCount - 1) * channels + channel];
+        g_outputPreviousSampleValid[channel] = true;
+    }
+}
+
+static void applyResampleLowPassInPlaceLocked(char* buffer, int count)
+{
+    if (!g_resampleLowPassEnabled || !buffer || count <= 0)
+    {
+        return;
+    }
+
+    const int channels = audioFrameChannelsLocked();
+    const int sampleCount = count / (int)sizeof(int16_t);
+    int16_t* samples = (int16_t*)buffer;
+    for (int index = 0; index < sampleCount; ++index)
+    {
+        ResampleLowPassState& state =
+            g_resampleLowPassState[index % channels % kAudioEffectStateChannels];
+        const double input = samples[index];
+        const double output = g_resampleLowPassB0 * input +
+            g_resampleLowPassB1 * state.input1 +
+            g_resampleLowPassB2 * state.input2 -
+            g_resampleLowPassA1 * state.output1 -
+            g_resampleLowPassA2 * state.output2;
+        state.input2 = state.input1;
+        state.input1 = input;
+        state.output2 = state.output1;
+        state.output1 = output;
+        samples[index] = (int16_t)clampS16((int)output);
+    }
+}
+
 static void resetAudioEffectStateLocked(void)
 {
     memset(g_audioEffectState, 0, sizeof(g_audioEffectState));
     memset(g_audioEffectStateValid, 0, sizeof(g_audioEffectStateValid));
+}
+
+static void resetAudioProcessingStateLocked(void)
+{
+    resetAudioEffectStateLocked();
+    resetOutputConditionerLocked();
 }
 
 static int audioFrameChannelsLocked(void)
@@ -578,7 +893,72 @@ static void applyVolumeInPlaceLocked(char* buffer, int count)
     }
 }
 
-uint32_t MixerOpen(waveout_args* args)
+static void applyQueueRecoveryFadeInLocked(char* buffer, int count,
+    uint32_t queuedBytes)
+{
+    if (!buffer || count <= 0 || g_audioSpec.freq <= 0)
+    {
+        return;
+    }
+
+    const uint64_t now = SDL_GetTicks64();
+    const uint64_t deviceBufferGraceMs = g_audioSpec.samples ?
+        ((uint64_t)g_audioSpec.samples * 1000u + (uint64_t)g_audioSpec.freq - 1u) /
+            (uint64_t)g_audioSpec.freq : 0;
+    const bool hardwareBufferMayBePlaying =
+        g_audioQueueExpectedEndTicks != 0 &&
+        (g_audioQueueExpectedEndTicks >= now ||
+            now - g_audioQueueExpectedEndTicks <= deviceBufferGraceMs);
+    const uint64_t bytesPerSecond = audioBytesPerSecondLocked();
+    const uint64_t bufferedBytes = (uint64_t)queuedBytes + (uint64_t)count;
+    g_audioQueueExpectedEndTicks = now + (bytesPerSecond ?
+        (bufferedBytes * 1000u + bytesPerSecond - 1u) / bytesPerSecond : 0);
+    if (queuedBytes != 0 || hardwareBufferMayBePlaying)
+    {
+        return;
+    }
+
+    const int channels = audioFrameChannelsLocked();
+    const int fadeFrames = g_audioSpec.freq * 4 / 1000;
+    if (channels <= 0 || fadeFrames <= 1)
+    {
+        return;
+    }
+
+    if (g_audioSpec.format == AUDIO_S16LSB)
+    {
+        int16_t* samples = (int16_t*)buffer;
+        const int frameCount = count / (int)(sizeof(int16_t) * channels);
+        const int frames = frameCount < fadeFrames ? frameCount : fadeFrames;
+        for (int frame = 0; frame < frames; ++frame)
+        {
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                int index = frame * channels + channel;
+                samples[index] = (int16_t)(((int32_t)samples[index] * frame) /
+                    (fadeFrames - 1));
+            }
+        }
+    }
+    else if (g_audioSpec.format == AUDIO_U8)
+    {
+        uint8_t* samples = (uint8_t*)buffer;
+        const int frameCount = count / channels;
+        const int frames = frameCount < fadeFrames ? frameCount : fadeFrames;
+        for (int frame = 0; frame < frames; ++frame)
+        {
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                int index = frame * channels + channel;
+                int centered = (int)samples[index] - 128;
+                samples[index] = (uint8_t)(128 + centered * frame /
+                    (fadeFrames - 1));
+            }
+        }
+    }
+}
+
+uint32_t mixerOpen(waveout_args* args)
 {
     if (!args)
     {
@@ -591,7 +971,7 @@ uint32_t MixerOpen(waveout_args* args)
         g_volume = args->volume;
         g_audioOutputUnavailable = false;
         g_gameAudioResourcesActive = true;
-        resetAudioEffectStateLocked();
+        resetAudioProcessingStateLocked();
         resetAudioBackpressureLog();
         clearPendingAudioLocked();
         SDL_ClearQueuedAudio(g_audioDevice);
@@ -611,7 +991,7 @@ uint32_t MixerOpen(waveout_args* args)
     g_volume = args->volume;
     g_audioOutputUnavailable = false;
     g_gameAudioResourcesActive = true;
-    resetAudioEffectStateLocked();
+    resetAudioProcessingStateLocked();
     resetAudioBackpressureLog();
     int bufferSamples = normalizeBufferSamples(g_bufferSamples);
     SDL_Log(
@@ -627,17 +1007,13 @@ uint32_t MixerOpen(waveout_args* args)
 
     SDL_AudioSpec want;
     SDL_zero(want);
-    const bool stableCcOutput =
-        g_runtimeAudioProfile == MIXER_RUNTIME_AUDIO_CC_STABLE_HOST;
-    want.freq = stableCcOutput ? kCcStableHostSampleRate : (int)args->sample_rate;
-    want.format = stableCcOutput ? AUDIO_S16LSB : convertFormat(args->format);
-    want.channels = stableCcOutput ? kCcStableHostChannels :
-        (args->channel ? args->channel : 2);
+    want.freq = kStableHostSampleRate;
+    want.format = AUDIO_S16LSB;
+    want.channels = kStableHostChannels;
     want.samples = (Uint16)bufferSamples;
     want.callback = NULL;
 
-    SDL_Log("Audio runtime profile=%s output_request=%dHz/0x%x/%uch",
-        stableCcOutput ? "cc_stable_host" : "native_guest",
+    SDL_Log("Audio output profile=stable_host output_request=%dHz/0x%x/%uch",
         want.freq, want.format, (unsigned int)want.channels);
 
     const int allowedChanges = SDL_AUDIO_ALLOW_FREQUENCY_CHANGE |
@@ -684,13 +1060,13 @@ uint32_t MixerOpen(waveout_args* args)
     return 1;
 }
 
-uint32_t MixerClose()
+uint32_t mixerClose()
 {
-    MixerReleaseGameResources();
+    mixerReleaseGameResources();
     return 1;
 }
 
-void MixerReleaseGameResources(void)
+void mixerReleaseGameResources(void)
 {
     lockAudio();
     audioValidationClose();
@@ -702,13 +1078,13 @@ void MixerReleaseGameResources(void)
     }
     clearPendingAudioLocked();
     clearAudioStreamLocked();
-    resetAudioEffectStateLocked();
+    resetAudioProcessingStateLocked();
     resetAudioBackpressureLog();
     SDL_Log("Released game audio resources");
     unlockAudio();
 }
 
-void MixerResetAfterRuntimeStop(void)
+void mixerResetAfterRuntimeStop(void)
 {
     SDL_mutex* previousMutex = g_audioMutex;
     // Keep the SDL device alive across guest restarts; closing it blocks on MuMu.
@@ -717,7 +1093,7 @@ void MixerResetAfterRuntimeStop(void)
     g_gameAudioResourcesActive = false;
     g_frontendPauseRequested = false;
     g_guestMuteRequested = false;
-    resetAudioEffectStateLocked();
+    resetAudioProcessingStateLocked();
     resetAudioBackpressureLog();
     audioValidationClose();
     clearPendingAudioLocked();
@@ -734,7 +1110,7 @@ void MixerResetAfterRuntimeStop(void)
     }
 }
 
-void MixerPrepareApplicationExit(void)
+void mixerPrepareApplicationExit(void)
 {
     SDL_AudioDeviceID audioDevice = 0;
     SDL_AudioStream* audioStream = NULL;
@@ -757,7 +1133,7 @@ void MixerPrepareApplicationExit(void)
     g_frontendPauseRequested = false;
     g_guestMuteRequested = false;
     clearPendingAudioLocked();
-    resetAudioEffectStateLocked();
+    resetAudioProcessingStateLocked();
     resetAudioBackpressureLog();
     unlockAudio();
 
@@ -772,7 +1148,7 @@ void MixerPrepareApplicationExit(void)
     SDL_Log("Application audio state released and device closed");
 }
 
-uint32_t MixerWriteBuff(char* buffer, int count)
+uint32_t mixerWriteBuffer(char* buffer, int count)
 {
     if (!buffer || count <= 0)
     {
@@ -815,14 +1191,19 @@ uint32_t MixerWriteBuff(char* buffer, int count)
         return 1;
     }
 
+    applyResampleLowPassInPlaceLocked(converted.data(), (int)converted.size());
     applyAudioEffectInPlaceLocked(converted.data(), (int)converted.size());
     applyVolumeInPlaceLocked(converted.data(), (int)converted.size());
+    applyOutputConditionerS16Locked(converted.data(), (int)converted.size());
     uint32_t queuedBytes = SDL_GetQueuedAudioSize(g_audioDevice);
+    applyQueueRecoveryFadeInLocked(converted.data(), (int)converted.size(),
+        queuedBytes);
     audioValidationRecordAudio(converted.data(), (uint32_t)converted.size(),
         "queue", queuedBytes, g_pendingAudioBytes);
     int queued = SDL_QueueAudio(g_audioDevice, converted.data(), (Uint32)converted.size());
     if (queued != 0)
     {
+        g_audioQueueExpectedEndTicks = 0;
         audioValidationRecordEvent("queue_error", (uint32_t)converted.size(),
             queuedBytes, g_pendingAudioBytes, 0);
     }
@@ -830,7 +1211,7 @@ uint32_t MixerWriteBuff(char* buffer, int count)
     return queued == 0 ? 1 : 0;
 }
 
-uint32_t MixerTryWriteBuff(char* buffer, int count)
+uint32_t mixerTryWriteBuffer(char* buffer, int count)
 {
     if (!buffer || count <= 0)
     {
@@ -867,8 +1248,10 @@ uint32_t MixerTryWriteBuff(char* buffer, int count)
     }
     if (SDL_GetQueuedAudioSize(g_audioDevice) >= maxQueuedAudioBytesLocked())
     {
+        applyResampleLowPassInPlaceLocked(converted.data(), (int)converted.size());
         applyAudioEffectInPlaceLocked(converted.data(), (int)converted.size());
         applyVolumeInPlaceLocked(converted.data(), (int)converted.size());
+        applyOutputConditionerS16Locked(converted.data(), (int)converted.size());
         audioValidationRecordAudio(converted.data(), (uint32_t)converted.size(),
             "pending", SDL_GetQueuedAudioSize(g_audioDevice),
             g_pendingAudioBytes);
@@ -883,14 +1266,19 @@ uint32_t MixerTryWriteBuff(char* buffer, int count)
         return 0;
     }
 
+    applyResampleLowPassInPlaceLocked(converted.data(), (int)converted.size());
     applyAudioEffectInPlaceLocked(converted.data(), (int)converted.size());
     applyVolumeInPlaceLocked(converted.data(), (int)converted.size());
+    applyOutputConditionerS16Locked(converted.data(), (int)converted.size());
     uint32_t queuedBytes = SDL_GetQueuedAudioSize(g_audioDevice);
+    applyQueueRecoveryFadeInLocked(converted.data(), (int)converted.size(),
+        queuedBytes);
     audioValidationRecordAudio(converted.data(), (uint32_t)converted.size(),
         "queue", queuedBytes, g_pendingAudioBytes);
     int queued = SDL_QueueAudio(g_audioDevice, converted.data(), (Uint32)converted.size());
     if (queued != 0)
     {
+        g_audioQueueExpectedEndTicks = 0;
         audioValidationRecordEvent("queue_error", (uint32_t)converted.size(),
             queuedBytes, g_pendingAudioBytes, 0);
     }
@@ -898,9 +1286,9 @@ uint32_t MixerTryWriteBuff(char* buffer, int count)
     return queued == 0 ? 1 : 0;
 }
 
-uint32_t MixerPlaying()
+uint32_t mixerIsPlaying()
 {
-    uint32_t canWrite = MixerCanWriteNonBlocking();
+    uint32_t canWrite = mixerCanWriteNonBlocking();
     if (!canWrite)
     {
         SDL_Delay(1);
@@ -908,7 +1296,7 @@ uint32_t MixerPlaying()
     return canWrite;
 }
 
-uint32_t MixerCanWriteNonBlocking()
+uint32_t mixerCanWriteNonBlocking()
 {
     lockAudio();
     flushPendingAudioLocked();
@@ -926,7 +1314,7 @@ uint32_t MixerCanWriteNonBlocking()
     return canWrite;
 }
 
-bool MixerSkipsAudioOutput()
+bool mixerSkipsAudioOutput()
 {
     if (audioDisabledEnvEnabled())
     {
@@ -939,7 +1327,7 @@ bool MixerSkipsAudioOutput()
     return skipsAudioOutput;
 }
 
-void MixerSetVolume(uint32_t vol)
+void mixerSetGuestVolume(uint32_t vol)
 {
     lockAudio();
     g_volume = vol > 255 ? 255 : vol;
@@ -959,7 +1347,7 @@ void MixerSetVolume(uint32_t vol)
     unlockAudio();
 }
 
-void MixerSetMuted(bool muted)
+void mixerSetMuted(bool muted)
 {
     lockAudio();
     g_guestMuteRequested = muted;
@@ -978,28 +1366,24 @@ void MixerSetMuted(bool muted)
     unlockAudio();
 }
 
-void MixerSetFrontendPaused(bool paused)
+void mixerSetFrontendPaused(bool paused)
 {
     lockAudio();
     g_frontendPauseRequested = paused;
     if (g_audioDevice)
     {
-        bool outputMuted = outputMutedLocked();
+        bool outputMuted = outputMutedWithoutFrontendPauseLocked();
         SDL_PauseAudioDevice(g_audioDevice, outputMuted ? 1 : 0);
         if (paused)
         {
-            // Avoid replaying stale guest audio when gameplay resumes.
-            SDL_ClearQueuedAudio(g_audioDevice);
             clearPendingAudioLocked();
-            clearAudioStreamLocked();
-            resetAudioEffectStateLocked();
         }
     }
     SDL_Log("Audio frontend pause %s", g_frontendPauseRequested ? "on" : "off");
     unlockAudio();
 }
 
-void MixerSetMasterVolumePercent(int percent)
+void mixerSetMasterVolumePercent(int percent)
 {
     lockAudio();
     g_masterVolumePercent = clampIntLocal(percent, 0, 150);
@@ -1015,7 +1399,7 @@ void MixerSetMasterVolumePercent(int percent)
     unlockAudio();
 }
 
-void MixerSetBufferSamples(int samples)
+void mixerSetBufferSamples(int samples)
 {
     lockAudio();
     g_bufferSamples = normalizeBufferSamples(samples);
@@ -1023,7 +1407,7 @@ void MixerSetBufferSamples(int samples)
     unlockAudio();
 }
 
-void MixerSetAudioEffect(AudioEffectMode effect)
+void mixerSetAudioEffect(AudioEffectMode effect)
 {
     lockAudio();
     effect = normalizeAudioEffect(effect);
@@ -1042,17 +1426,40 @@ void MixerSetAudioEffect(AudioEffectMode effect)
     unlockAudio();
 }
 
-void MixerSetRuntimeAudioProfile(MixerRuntimeAudioProfile profile)
+void mixerSetDigitalNoiseReduction(DigitalNoiseReductionLevel level)
 {
     lockAudio();
-    g_runtimeAudioProfile = profile;
-    SDL_Log("Audio runtime profile selected: %s",
-        profile == MIXER_RUNTIME_AUDIO_CC_STABLE_HOST ?
-        "cc_stable_host" : "native_guest");
+    level = normalizeDigitalNoiseReduction(level);
+    if (g_digitalNoiseReduction != level)
+    {
+        g_digitalNoiseReduction = level;
+        resetOutputConditionerLocked();
+        configureResampleLowPassLocked();
+        if (g_audioDevice)
+        {
+            SDL_ClearQueuedAudio(g_audioDevice);
+            clearPendingAudioLocked();
+            if (g_audioStream)
+            {
+                SDL_AudioStreamClear(g_audioStream);
+            }
+        }
+    }
+    SDL_Log("Digital noise reduction set to %s",
+        emulatorDigitalNoiseReductionName(g_digitalNoiseReduction));
     unlockAudio();
 }
 
-void MixerSetValidationCaptureEnabled(bool enabled)
+void mixerRecordInput(uint32_t controlMask)
+{
+    lockAudio();
+    audioValidationRecordEvent("input", controlMask,
+        g_audioDevice ? SDL_GetQueuedAudioSize(g_audioDevice) : 0,
+        g_pendingAudioBytes, 0);
+    unlockAudio();
+}
+
+void mixerSetValidationCaptureEnabled(bool enabled)
 {
     lockAudio();
     audioValidationSetEnabled(enabled);

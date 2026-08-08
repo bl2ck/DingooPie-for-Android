@@ -308,6 +308,39 @@ static AudioEffectMode parseAudioEffectMode(const std::string& value, AudioEffec
     return fallback;
 }
 
+static DigitalNoiseReductionLevel normalizeDigitalNoiseReductionLevel(
+    DigitalNoiseReductionLevel level, DigitalNoiseReductionLevel fallback)
+{
+    if (level >= DIGITAL_NOISE_REDUCTION_HIGH &&
+        level < DIGITAL_NOISE_REDUCTION_LEVEL_COUNT)
+    {
+        return level;
+    }
+    return fallback >= DIGITAL_NOISE_REDUCTION_HIGH &&
+        fallback < DIGITAL_NOISE_REDUCTION_LEVEL_COUNT ?
+        fallback : DIGITAL_NOISE_REDUCTION_HIGH;
+}
+
+static DigitalNoiseReductionLevel parseDigitalNoiseReductionLevel(
+    const std::string& value, DigitalNoiseReductionLevel fallback)
+{
+    fallback = normalizeDigitalNoiseReductionLevel(
+        fallback, DIGITAL_NOISE_REDUCTION_HIGH);
+    if (strcasecmp(value.c_str(), "high") == 0)
+    {
+        return DIGITAL_NOISE_REDUCTION_HIGH;
+    }
+    if (strcasecmp(value.c_str(), "medium") == 0)
+    {
+        return DIGITAL_NOISE_REDUCTION_MEDIUM;
+    }
+    if (strcasecmp(value.c_str(), "low") == 0)
+    {
+        return DIGITAL_NOISE_REDUCTION_LOW;
+    }
+    return fallback;
+}
+
 static MinimizedBehavior parseMinimizedBehavior(const std::string& value, MinimizedBehavior fallback)
 {
     if (fallback < MINIMIZED_BEHAVIOR_NORMAL || fallback >= MINIMIZED_BEHAVIOR_COUNT)
@@ -359,6 +392,46 @@ static ScreenOrientationMode parseScreenOrientationMode(
     return fallback;
 }
 
+static ScreenFillMode parseScreenFill(
+    const std::string& value, ScreenFillMode fallback)
+{
+    if (fallback < SCREEN_FILL_ASPECT || fallback >= SCREEN_FILL_COUNT)
+    {
+        fallback = SCREEN_FILL_ASPECT;
+    }
+    if (strcasecmp(value.c_str(), "blurred") == 0)
+    {
+        return SCREEN_FILL_BLURRED_EXTENSION;
+    }
+    if (strcasecmp(value.c_str(), "stretch") == 0)
+    {
+        return SCREEN_FILL_STRETCH;
+    }
+    if (strcasecmp(value.c_str(), "aspect") == 0)
+    {
+        return SCREEN_FILL_ASPECT;
+    }
+    return fallback;
+}
+
+static VirtualDpadType parseVirtualDpadType(
+    const std::string& value, VirtualDpadType fallback)
+{
+    if (fallback < VIRTUAL_DPAD_JOYSTICK || fallback >= VIRTUAL_DPAD_TYPE_COUNT)
+    {
+        fallback = VIRTUAL_DPAD_JOYSTICK;
+    }
+    if (strcasecmp(value.c_str(), "segmented_ring") == 0)
+    {
+        return VIRTUAL_DPAD_SEGMENTED_RING;
+    }
+    if (strcasecmp(value.c_str(), "joystick") == 0)
+    {
+        return VIRTUAL_DPAD_JOYSTICK;
+    }
+    return fallback;
+}
+
 static int normalizeAudioBufferSamples(int value, int fallback)
 {
     switch (value)
@@ -372,11 +445,6 @@ static int normalizeAudioBufferSamples(int value, int fallback)
     default:
         return fallback;
     }
-}
-
-static bool recentGamePathsMatch(const std::string& a, const std::string& b)
-{
-    return gamePathNormalize(a.c_str()) == gamePathNormalize(b.c_str());
 }
 
 static UiLanguage parseUiLanguage(const std::string& value, UiLanguage fallback)
@@ -398,42 +466,6 @@ static UiLanguage parseUiLanguage(const std::string& value, UiLanguage fallback)
         return UI_LANGUAGE_CHINESE;
     }
     return fallback;
-}
-
-static bool recentListContains(const std::vector<std::string>& paths, const std::string& gamePath)
-{
-    for (size_t i = 0; i < paths.size(); ++i)
-    {
-        if (recentGamePathsMatch(paths[i], gamePath))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void appendRecentIfUnique(std::vector<std::string>* paths, const std::string& gamePath)
-{
-    if (!paths || gamePath.empty() || paths->size() >= EMULATOR_RECENT_GAME_LIMIT ||
-        recentListContains(*paths, gamePath))
-    {
-        return;
-    }
-    paths->push_back(gamePath);
-}
-
-static std::vector<std::string> buildNormalizedRecentGameList(
-    const std::string& lastGamePath,
-    const std::vector<std::string>& gamePaths)
-{
-    std::vector<std::string> normalized;
-    normalized.reserve(EMULATOR_RECENT_GAME_LIMIT);
-    appendRecentIfUnique(&normalized, lastGamePath);
-    for (size_t i = 0; i < gamePaths.size(); ++i)
-    {
-        appendRecentIfUnique(&normalized, gamePaths[i]);
-    }
-    return normalized;
 }
 
 static std::string cheatSelectionKeyForGame(const std::string& gamePath)
@@ -562,25 +594,6 @@ static std::vector<std::string> decodeCheatFeatureKeys(const std::string& text)
     return keys;
 }
 
-static bool recentListsEqual(
-    const std::vector<std::string>& a,
-    const std::vector<std::string>& b)
-{
-    if (a.size() != b.size())
-    {
-        return false;
-    }
-    for (size_t i = 0; i < a.size(); ++i)
-    {
-        if (a[i] != b[i])
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-
 static std::string trimIniText(const std::string& text)
 {
     size_t begin = 0;
@@ -640,6 +653,74 @@ static bool readTextFileUtf8(const std::string& path, std::string* out)
         out->erase(0, 3);
     }
     return true;
+}
+
+static bool writeTextFileUtf8(const std::string& path, const std::string& text)
+{
+    FILE* file = fopen(path.c_str(), "wb");
+    if (!file)
+    {
+        return false;
+    }
+    bool ok = text.empty() || fwrite(text.data(), 1, text.size(), file) == text.size();
+    if (fclose(file) != 0)
+    {
+        ok = false;
+    }
+    return ok;
+}
+
+static std::string settingsTemporaryPath(const std::string& path)
+{
+    return path + ".tmp";
+}
+
+static std::string settingsBackupPath(const std::string& path)
+{
+    return path + ".backup";
+}
+
+static bool restoreSettingsFile(const std::string& sourcePath, const std::string& path)
+{
+    if (rename(sourcePath.c_str(), path.c_str()) == 0)
+    {
+        return true;
+    }
+    std::string text;
+    if (!readTextFileUtf8(sourcePath, &text) || text.empty() ||
+        !writeTextFileUtf8(path, text))
+    {
+        return false;
+    }
+    remove(sourcePath.c_str());
+    return true;
+}
+
+static void recoverSettingsTransaction(const std::string& path)
+{
+    std::string currentText;
+    if (readTextFileUtf8(path, &currentText) && !currentText.empty())
+    {
+        remove(settingsTemporaryPath(path).c_str());
+        remove(settingsBackupPath(path).c_str());
+        return;
+    }
+
+    const std::string backupPath = settingsBackupPath(path);
+    const std::string temporaryPath = settingsTemporaryPath(path);
+    std::string recoveryText;
+    if (readTextFileUtf8(backupPath, &recoveryText) && !recoveryText.empty())
+    {
+        if (restoreSettingsFile(backupPath, path))
+        {
+            remove(temporaryPath.c_str());
+            return;
+        }
+    }
+    if (readTextFileUtf8(temporaryPath, &recoveryText) && !recoveryText.empty())
+    {
+        restoreSettingsFile(temporaryPath, path);
+    }
 }
 
 static std::string readIniString(const char* section, const char* key, const char* fallback, const std::string& path)
@@ -961,21 +1042,16 @@ static void setEnvValue(const char* name, const std::string& value)
 
 static bool externalBackendOverrideEnabled(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_BACKEND");
-        enabled = value && value[0] ? 1 : 0;
-    }
-    return enabled != 0;
+        return value && value[0];
+    }();
+    return enabled;
 }
 
 EmulatorSettings emulatorDefaultSettings(void)
 {
     EmulatorSettings settings;
-    settings.lastGamePath = "";
-    settings.recentGamePaths.clear();
-
     settings.antiAliasing = ANTI_ALIASING_OFF;
     settings.colorEffect = COLOR_EFFECT_NORMAL;
     settings.brightnessPercent = 100;
@@ -984,15 +1060,19 @@ EmulatorSettings emulatorDefaultSettings(void)
     settings.saturationPercent = 100;
     settings.minimizedBehavior = MINIMIZED_BEHAVIOR_PAUSE;
     settings.screenOrientationMode = SCREEN_ORIENTATION_LANDSCAPE;
+    settings.screenFill = SCREEN_FILL_ASPECT;
     settings.showFps = false;
 
     settings.audioVolumePercent = 100;
     settings.audioBufferSamples = 2048;
     settings.audioEffect = AUDIO_EFFECT_OFF;
+    settings.digitalNoiseReduction = DIGITAL_NOISE_REDUCTION_HIGH;
     settings.audioDisabled = false;
 
     settings.systemImeDisabled = true;
     settings.showVirtualControls = true;
+    settings.virtualControlScalePercent = 100;
+    settings.virtualDpadType = VIRTUAL_DPAD_JOYSTICK;
     settings.controllerMapping = "";
     settings.keyboardMapping = "";
 
@@ -1019,19 +1099,8 @@ EmulatorSettings emulatorLoadSettings(void)
 {
     EmulatorSettings defaults = emulatorDefaultSettings();
     std::string path = emulatorSettingsPath();
+    recoverSettingsTransaction(path);
     EmulatorSettings settings = defaults;
-    settings.lastGamePath = readIniString("recent", "last_app", defaults.lastGamePath.c_str(), path);
-    std::vector<std::string> recentGames;
-    recentGames.reserve(EMULATOR_RECENT_GAME_LIMIT);
-    appendRecentIfUnique(&recentGames, settings.lastGamePath);
-    for (int i = 1; i <= EMULATOR_RECENT_GAME_LIMIT; ++i)
-    {
-        char key[16] = {};
-        snprintf(key, sizeof(key), "app%d", i);
-        appendRecentIfUnique(&recentGames, readIniString("recent", key, "", path));
-    }
-    settings.recentGamePaths = recentGames;
-
     std::string antiAliasing = readIniString("video", "anti_aliasing", emulatorAntiAliasingName(defaults.antiAliasing), path);
     settings.antiAliasing = parseAntiAliasingMode(antiAliasing, defaults.antiAliasing);
     std::string effect = readIniString("video", "effect", emulatorColorEffectName(defaults.colorEffect), path);
@@ -1054,6 +1123,10 @@ EmulatorSettings emulatorLoadSettings(void)
         readIniString("video", "screen_orientation",
             emulatorScreenOrientationName(defaults.screenOrientationMode), path),
         defaults.screenOrientationMode);
+    settings.screenFill = parseScreenFill(
+        readIniString("video", "screen_fill",
+            emulatorScreenFillName(defaults.screenFill), path),
+        defaults.screenFill);
     settings.showFps = readIniBool("video", "show_fps", defaults.showFps, path);
 
     settings.audioVolumePercent = normalizeIntPreset(
@@ -1068,11 +1141,23 @@ EmulatorSettings emulatorLoadSettings(void)
         emulatorAudioEffectName(defaults.audioEffect),
         path);
     settings.audioEffect = parseAudioEffectMode(audioEffect, defaults.audioEffect);
+    settings.digitalNoiseReduction = parseDigitalNoiseReductionLevel(
+        readIniString("audio", "digital_noise_reduction",
+            emulatorDigitalNoiseReductionName(defaults.digitalNoiseReduction), path),
+        defaults.digitalNoiseReduction);
     settings.audioDisabled = readIniBool("audio", "audio_disabled", defaults.audioDisabled, path);
 
     settings.systemImeDisabled = readIniBool(
         "input", "system_ime_disabled", defaults.systemImeDisabled, path);
     settings.showVirtualControls = readIniBool("input", "show_virtual_controls", defaults.showVirtualControls, path);
+    settings.virtualControlScalePercent = normalizeIntPreset(
+        readIniInt("input", "virtual_control_scale", defaults.virtualControlScalePercent, path),
+        EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES,
+        defaults.virtualControlScalePercent);
+    settings.virtualDpadType = parseVirtualDpadType(
+        readIniString("input", "virtual_dpad_type",
+            emulatorVirtualDpadTypeName(defaults.virtualDpadType), path),
+        defaults.virtualDpadType);
     settings.controllerMapping = readIniString("input", "controller_mapping", defaults.controllerMapping.c_str(), path);
     settings.keyboardMapping = readIniString("input", "keyboard_mapping", defaults.keyboardMapping.c_str(), path);
 
@@ -1087,7 +1172,8 @@ EmulatorSettings emulatorLoadSettings(void)
         readIniString("runtime", "speed_scale", defaults.runtimeSpeedScale.c_str(), path),
         defaults.runtimeSpeedScale);
     settings.osTimeDelayScale = normalizeScaleValue(
-        readIniString("runtime", "ostimedly_scale", defaults.osTimeDelayScale.c_str(), path),
+        readIniString("runtime", "ostimedly_scale",
+            defaults.osTimeDelayScale.c_str(), path),
         defaults.osTimeDelayScale);
     settings.cheatsEnabled = readIniBool("runtime", "cheats_enabled", defaults.cheatsEnabled, path);
     std::vector<std::pair<std::string, std::string> > cheatValues =
@@ -1113,13 +1199,17 @@ EmulatorSettings emulatorLoadSettings(void)
     return settings;
 }
 
-bool emulatorSaveSettings(const EmulatorSettings& settings)
+static bool writeEmulatorSettings(const EmulatorSettings& settings, const std::string& path)
 {
-    std::string path = emulatorSettingsPath();
-    bool ok = true;
+    bool ok = removeIniSection("recent", path);
+    const AudioEffectMode audioEffect =
+        normalizeAudioEffectMode(settings.audioEffect, AUDIO_EFFECT_OFF);
+    const DigitalNoiseReductionLevel digitalNoiseReduction =
+        normalizeDigitalNoiseReductionLevel(
+            settings.digitalNoiseReduction, DIGITAL_NOISE_REDUCTION_HIGH);
     static const char* managedSections[] =
     {
-        "recent", "video", "audio", "input", "runtime", "cheats", "ui", "debug"
+        "video", "audio", "input", "runtime", "cheats", "ui", "debug"
     };
     for (size_t index = 0; index < sizeof(managedSections) / sizeof(managedSections[0]); ++index)
     {
@@ -1127,16 +1217,6 @@ bool emulatorSaveSettings(const EmulatorSettings& settings)
     }
 
     // Recreate managed sections in the same order as the settings menus and structure.
-    ok = writeIniString("recent", "last_app", settings.lastGamePath, path) && ok;
-    std::vector<std::string> recentGames = buildNormalizedRecentGameList(
-        settings.lastGamePath, settings.recentGamePaths);
-    for (size_t i = 0; i < EMULATOR_RECENT_GAME_LIMIT; ++i)
-    {
-        char key[16] = {};
-        snprintf(key, sizeof(key), "app%u", (unsigned int)(i + 1));
-        ok = writeIniString("recent", key,
-            i < recentGames.size() ? recentGames[i] : "", path) && ok;
-    }
     ok = writeIniString("video", "anti_aliasing", emulatorAntiAliasingName(settings.antiAliasing), path) && ok;
     ok = writeIniString("video", "effect", emulatorColorEffectName(settings.colorEffect), path) && ok;
     ok = writeIniInt("video", "brightness", normalizeIntPreset(
@@ -1150,17 +1230,23 @@ bool emulatorSaveSettings(const EmulatorSettings& settings)
     ok = writeIniString("video", "minimized_behavior", emulatorMinimizedBehaviorName(settings.minimizedBehavior), path) && ok;
     ok = writeIniString("video", "screen_orientation",
         emulatorScreenOrientationName(settings.screenOrientationMode), path) && ok;
+    ok = writeIniString("video", "screen_fill",
+        emulatorScreenFillName(settings.screenFill), path) && ok;
     ok = writeIniBool("video", "show_fps", settings.showFps, path) && ok;
-    const AudioEffectMode audioEffect =
-        normalizeAudioEffectMode(settings.audioEffect, AUDIO_EFFECT_OFF);
     ok = writeIniInt("audio", "volume_percent", normalizeIntPreset(
         settings.audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100), path) && ok;
     ok = writeIniInt("audio", "buffer_samples", normalizeAudioBufferSamples(settings.audioBufferSamples, 2048), path) && ok;
     ok = writeIniString("audio", "effect", emulatorAudioEffectName(audioEffect), path) && ok;
+    ok = writeIniString("audio", "digital_noise_reduction",
+        emulatorDigitalNoiseReductionName(digitalNoiseReduction), path) && ok;
     ok = writeIniBool("audio", "audio_disabled", settings.audioDisabled, path) && ok;
     ok = writeIniBool(
         "input", "system_ime_disabled", settings.systemImeDisabled, path) && ok;
     ok = writeIniBool("input", "show_virtual_controls", settings.showVirtualControls, path) && ok;
+    ok = writeIniInt("input", "virtual_control_scale", normalizeIntPreset(
+        settings.virtualControlScalePercent, EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES, 100), path) && ok;
+    ok = writeIniString("input", "virtual_dpad_type",
+        emulatorVirtualDpadTypeName(settings.virtualDpadType), path) && ok;
     ok = writeIniString("input", "controller_mapping", settings.controllerMapping, path) && ok;
     ok = writeIniString("input", "keyboard_mapping", settings.keyboardMapping, path) && ok;
     ok = writeIniString("runtime", "backend",
@@ -1183,82 +1269,56 @@ bool emulatorSaveSettings(const EmulatorSettings& settings)
     }
     ok = writeIniString("ui", "language", emulatorUiLanguageName(settings.uiLanguage), path) && ok;
     ok = writeIniBool("debug", "profile", settings.debugProfile, path) && ok;
-    if (ok && (settings.debugProfile || runtimeLogEnvEnabled("DINGOO_PIE_LOG_FILE")))
-    {
-        emulatorTraceSettings("saved", settings);
-    }
     return ok;
 }
 
-bool emulatorRememberRecentGame(EmulatorSettings* settings, const std::string& gamePath)
+bool emulatorSaveSettings(const EmulatorSettings& settings)
 {
-    if (!settings || gamePath.empty())
+    const std::string path = emulatorSettingsPath();
+    recoverSettingsTransaction(path);
+
+    std::string originalText;
+    const bool hadOriginal = readTextFileUtf8(path, &originalText);
+    const std::string temporaryPath = settingsTemporaryPath(path);
+    const std::string backupPath = settingsBackupPath(path);
+    remove(temporaryPath.c_str());
+    remove(backupPath.c_str());
+
+    if (!writeTextFileUtf8(temporaryPath, hadOriginal ? originalText : std::string()) ||
+        !writeEmulatorSettings(settings, temporaryPath))
     {
+        remove(temporaryPath.c_str());
         return false;
     }
 
-    std::vector<std::string> next;
-    next.reserve(EMULATOR_RECENT_GAME_LIMIT);
-    appendRecentIfUnique(&next, gamePath);
-    for (size_t i = 0; i < settings->recentGamePaths.size(); ++i)
+    std::string savedText;
+    if (!readTextFileUtf8(temporaryPath, &savedText) || savedText.empty())
     {
-        appendRecentIfUnique(&next, settings->recentGamePaths[i]);
-    }
-    appendRecentIfUnique(&next, settings->lastGamePath);
-
-    bool changed = !recentGamePathsMatch(settings->lastGamePath, gamePath) ||
-        !recentListsEqual(settings->recentGamePaths, next);
-    settings->lastGamePath = gamePath;
-    settings->recentGamePaths = next;
-    return changed;
-}
-
-bool emulatorRemoveRecentGame(EmulatorSettings* settings, const std::string& gamePath)
-{
-    if (!settings || gamePath.empty())
-    {
+        remove(temporaryPath.c_str());
         return false;
     }
 
-    const std::string targetPath = gamePath;
-    std::vector<std::string> next;
-    next.reserve(EMULATOR_RECENT_GAME_LIMIT);
-    bool removed = false;
-    for (size_t i = 0; i < settings->recentGamePaths.size(); ++i)
+    if (hadOriginal && rename(path.c_str(), backupPath.c_str()) != 0)
     {
-        if (recentGamePathsMatch(settings->recentGamePaths[i], targetPath))
+        remove(temporaryPath.c_str());
+        return false;
+    }
+    if (rename(temporaryPath.c_str(), path.c_str()) != 0)
+    {
+        if (hadOriginal)
         {
-            removed = true;
-            continue;
+            restoreSettingsFile(backupPath, path);
         }
-        appendRecentIfUnique(&next, settings->recentGamePaths[i]);
-    }
-
-    if (!settings->lastGamePath.empty() && recentGamePathsMatch(settings->lastGamePath, targetPath))
-    {
-        removed = true;
-        settings->lastGamePath = next.empty() ? "" : next[0];
-    }
-
-    if (removed || !recentListsEqual(settings->recentGamePaths, next))
-    {
-        settings->recentGamePaths = next;
-        return true;
-    }
-    return false;
-}
-
-bool emulatorClearRecentGames(EmulatorSettings* settings)
-{
-    if (!settings)
-    {
+        remove(temporaryPath.c_str());
         return false;
     }
 
-    bool changed = !settings->lastGamePath.empty() || !settings->recentGamePaths.empty();
-    settings->lastGamePath.clear();
-    settings->recentGamePaths.clear();
-    return changed;
+    remove(backupPath.c_str());
+    if (settings.debugProfile || runtimeLogEnvEnabled("DINGOO_PIE_LOG_FILE"))
+    {
+        emulatorTraceSettings("saved", settings);
+    }
+    return true;
 }
 
 std::vector<std::string> emulatorCheatFeatureKeysForGame(
@@ -1333,22 +1393,18 @@ void emulatorTraceSettings(const char* reason, const EmulatorSettings& settings)
     const char* label = (reason && reason[0]) ? reason : "snapshot";
     const AudioEffectMode audioEffect =
         normalizeAudioEffectMode(settings.audioEffect, AUDIO_EFFECT_OFF);
+    const DigitalNoiseReductionLevel digitalNoiseReduction =
+        normalizeDigitalNoiseReductionLevel(
+            settings.digitalNoiseReduction, DIGITAL_NOISE_REDUCTION_HIGH);
     const std::string cpuClockHz = normalizeCpuClockHz(settings.cpuClockHz, "");
     const std::string runtimeSpeedScale = normalizeScaleValue(settings.runtimeSpeedScale, "");
     const std::string osTimeDelayScale = normalizeScaleValue(settings.osTimeDelayScale, "");
-    printf("settings-trace:%s recent.last_app=\"%s\"\n",
-        label,
-        settings.lastGamePath.empty() ? "(empty)" : settings.lastGamePath.c_str());
-    std::vector<std::string> recentGames = buildNormalizedRecentGameList(
-        settings.lastGamePath, settings.recentGamePaths);
-    for (size_t i = 0; i < recentGames.size(); ++i)
-    {
-        printf("settings-trace:%s recent.app%u=\"%s\"\n",
-            label,
-            (unsigned int)(i + 1),
-            recentGames[i].c_str());
-    }
-    printf("settings-trace:%s video.anti_aliasing=%s video.effect=%s video.brightness=%d video.contrast=%d video.gamma=%d video.saturation=%d video.minimized_behavior=%s video.screen_orientation=%s video.portrait=%u video.show_fps=%u\n",
+    printf(
+        "settings-trace:%s video.anti_aliasing=%s video.effect=%s "
+        "video.brightness=%d video.contrast=%d video.gamma=%d "
+        "video.saturation=%d video.minimized_behavior=%s "
+        "video.screen_orientation=%s video.screen_fill=%s video.portrait=%u "
+        "video.show_fps=%u\n",
         label,
         emulatorAntiAliasingName(settings.antiAliasing),
         emulatorColorEffectName(settings.colorEffect),
@@ -1358,18 +1414,29 @@ void emulatorTraceSettings(const char* reason, const EmulatorSettings& settings)
         normalizeIntPreset(settings.saturationPercent, EMULATOR_VIDEO_PERCENT_VALUES, 100),
         emulatorMinimizedBehaviorName(settings.minimizedBehavior),
         emulatorScreenOrientationName(settings.screenOrientationMode),
+        emulatorScreenFillName(settings.screenFill),
         settings.portraitMode ? 1u : 0u,
         settings.showFps ? 1u : 0u);
-    printf("settings-trace:%s audio.volume_percent=%d audio.buffer_samples=%d audio.effect=%s audio.audio_disabled=%u\n",
+    printf(
+        "settings-trace:%s audio.volume_percent=%d audio.buffer_samples=%d "
+        "audio.effect=%s audio.digital_noise_reduction=%s "
+        "audio.audio_disabled=%u\n",
         label,
         normalizeIntPreset(settings.audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100),
         normalizeAudioBufferSamples(settings.audioBufferSamples, 2048),
         emulatorAudioEffectName(audioEffect),
+        emulatorDigitalNoiseReductionName(digitalNoiseReduction),
         settings.audioDisabled ? 1u : 0u);
-    printf("settings-trace:%s input.system_ime_disabled=%u input.show_virtual_controls=%u input.controller_mapping=\"%s\" input.keyboard_mapping=\"%s\"\n",
+    printf(
+        "settings-trace:%s input.system_ime_disabled=%u "
+        "input.show_virtual_controls=%u input.virtual_control_scale=%d "
+        "input.virtual_dpad_type=%s input.controller_mapping=\"%s\" "
+        "input.keyboard_mapping=\"%s\"\n",
         label,
         settings.systemImeDisabled ? 1u : 0u,
         settings.showVirtualControls ? 1u : 0u,
+        normalizeIntPreset(settings.virtualControlScalePercent, EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES, 100),
+        emulatorVirtualDpadTypeName(settings.virtualDpadType),
         settings.controllerMapping.empty() ? "(default)" : settings.controllerMapping.c_str(),
         settings.keyboardMapping.empty() ? "(default)" : settings.keyboardMapping.c_str());
     printf("settings-trace:%s runtime.backend=%s runtime.cpu_hz=%s runtime.speed_scale=%s runtime.ostimedly_scale=%s runtime.cheats_enabled=%u\n",
@@ -1488,6 +1555,17 @@ const char* emulatorAudioEffectName(AudioEffectMode mode)
     }
 }
 
+const char* emulatorDigitalNoiseReductionName(DigitalNoiseReductionLevel level)
+{
+    switch (level)
+    {
+    case DIGITAL_NOISE_REDUCTION_HIGH: return "high";
+    case DIGITAL_NOISE_REDUCTION_MEDIUM: return "medium";
+    case DIGITAL_NOISE_REDUCTION_LOW: return "low";
+    default: return "high";
+    }
+}
+
 const char* emulatorUiLanguageName(UiLanguage language)
 {
     switch (language)
@@ -1526,5 +1604,31 @@ const char* emulatorScreenOrientationName(ScreenOrientationMode mode)
     case SCREEN_ORIENTATION_LANDSCAPE:
     default:
         return "landscape";
+    }
+}
+
+const char* emulatorScreenFillName(ScreenFillMode fill)
+{
+    switch (fill)
+    {
+    case SCREEN_FILL_BLURRED_EXTENSION:
+        return "blurred";
+    case SCREEN_FILL_STRETCH:
+        return "stretch";
+    case SCREEN_FILL_ASPECT:
+    default:
+        return "aspect";
+    }
+}
+
+const char* emulatorVirtualDpadTypeName(VirtualDpadType type)
+{
+    switch (type)
+    {
+    case VIRTUAL_DPAD_SEGMENTED_RING:
+        return "segmented_ring";
+    case VIRTUAL_DPAD_JOYSTICK:
+    default:
+        return "joystick";
     }
 }

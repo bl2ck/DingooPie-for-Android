@@ -25,7 +25,13 @@ static ARM32_ALWAYS_INLINE uint8_t* directPointer(const Arm32Bus* bus, uint32_t 
     size_t size)
 {
     if (!bus) return NULL;
-    uint32_t offset = address - bus->directRamBase;
+    uint32_t offset = address - bus->directSystemRamBase;
+    if (bus->directSystemRam && address >= bus->directSystemRamBase &&
+        offset < bus->directSystemRamSize && size <= bus->directSystemRamSize - offset)
+    {
+        return bus->directSystemRam + offset;
+    }
+    offset = address - bus->directRamBase;
     if (bus->directRam && address >= bus->directRamBase &&
         offset < bus->directRamSize && size <= bus->directRamSize - offset)
     {

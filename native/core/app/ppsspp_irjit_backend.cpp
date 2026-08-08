@@ -18,13 +18,11 @@
 
 static bool traceIrJitBackend(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_IRJIT_TRACE");
-        enabled = value && value[0] && strcmp(value, "0") != 0 ? 1 : 0;
-    }
-    return enabled != 0;
+        return value && value[0] && strcmp(value, "0") != 0;
+    }();
+    return enabled;
 }
 
 static void copyRuntimeToPpssppState(NativeRuntime* runtime, MIPSState* state, uint32_t begin)
@@ -196,8 +194,13 @@ RuntimeError ppssppIrJitStart(NativeRuntime* runtime, uint64_t begin, uint64_t u
         }
         for (;;)
         {
+            if (nativeRuntimeStopRequested(runtime))
+            {
+                break;
+            }
             jit.RunLoopUntil(maxTicks ? beginTicks + maxTicks : 0);
-            if (!ppssppShimWaitForPauseResume(runtime))
+            if (nativeRuntimeStopRequested(runtime) ||
+                !ppssppShimWaitForPauseResume(runtime))
             {
                 break;
             }

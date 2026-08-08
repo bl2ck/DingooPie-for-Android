@@ -12,10 +12,16 @@ std::string platformAndroidConsumeCheatManagerAutomationGamePath(void);
 std::string platformAndroidConsumeGameAutomationPath(void);
 bool platformAndroidConsumeAudioValidationAutomationEnabled(void);
 void platformAndroidRequestApplicationExit(void);
-std::string platformAndroidGetSaveDirectory(const std::string& gamePath);
+std::string platformAndroidGetSaveDirectory(const std::string& gamePath,
+    const std::string& gameIdentity);
 std::string platformAndroidGetCcSaveDirectory(const std::string& gamePath,
     const std::string& gameIdentity);
+std::string platformAndroidGetLogDirectory(void);
+bool platformAndroidIsPrivateSaveDirectory(const std::string& directoryUri);
 FILE* platformAndroidOpenSaveFile(const std::string& directoryUri, const std::string& fileName, const char* mode);
+bool platformAndroidDeleteSaveFile(const std::string& directoryUri, const std::string& fileName);
+uint64_t platformAndroidGetSaveFileModifiedTime(const std::string& directoryUri,
+    const std::string& fileName);
 std::string platformWideToUtf8(const std::wstring& text);
 
 #endif

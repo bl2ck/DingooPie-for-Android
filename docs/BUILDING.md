@@ -1,4 +1,4 @@
-# Android build
+# Building DingooPie Android
 
 ## Requirements
 
@@ -11,7 +11,10 @@ Set `JAVA_HOME` and `ANDROID_SDK_ROOT`, or place the SDK below `.tools/android/s
 
 ## Dependencies
 
-`bootstrap_android.ps1` downloads SDL 2.26.5 and the pinned PPSSPP source, validates their SHA-256 hashes, and applies `patches/ppsspp-irjit-dingoo.patch`. Downloaded dependencies remain untracked under `third_party/` and `.tools/`.
+`bootstrap_android.ps1` downloads SDL 2.26.5 and the pinned PPSSPP source,
+validates their SHA-256 hashes, and applies
+`patches/ppsspp-irjit-dingoo.patch`. Downloaded dependencies remain untracked
+under `third_party/` and `.tools/`.
 
 ## Build
 
@@ -28,7 +31,13 @@ scripts for the changed subsystem, run `scripts/test_android.ps1`, and finish
 with `scripts/check_text_format.ps1`. This preserves the APP/CC architecture
 boundary and catches accidental encoding or line-ending changes before commit.
 
-## Release build
+When settings, menus, enums, or INI output change, also run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_settings_order.ps1
+```
+
+## Release Build
 
 Production release builds require these environment variables:
 
@@ -51,13 +60,17 @@ powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1 `
     -OutputDirectory "$HOME\Desktop"
 ```
 
-The signed artifact is named `DingooPie-Android-v<version>-release.apk`. The build script reads the local untracked `.tools/signing/release-signing.properties` file automatically when it exists.
+The signed artifact is named `DingooPie-Android-v<version>-release.apk`. The
+build script reads the local untracked
+`.tools/signing/release-signing.properties` file automatically when it exists.
 
 The official certificate fingerprint and verification procedure are recorded
 in `docs/RELEASE_SIGNING.md`. Compare the certificate SHA-256 fingerprint before
 publishing every release.
 
-When production signing credentials are unavailable, pass `-AllowUnsignedRelease` explicitly. The resulting filename includes `-unsigned` and must be signed before store distribution.
+When production signing credentials are unavailable, pass
+`-AllowUnsignedRelease` explicitly. The resulting filename includes `-unsigned`
+and must be signed before store distribution.
 
 Use `-AndroidSdkRoot` when the SDK is not configured through the environment or `.tools/android/sdk`.
 
@@ -65,10 +78,10 @@ Validate the generated release before distribution:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test_android.ps1 `
-    -ApkPath "$HOME\Desktop\DingooPie-Android-v1.0-release.apk"
+    -ApkPath "app\build\outputs\apk\release\DingooPie.apk"
 ```
 
-## Text format
+## Text Format
 
 Repository text files use UTF-8 without a byte-order mark, CRLF line endings, and a final CRLF. Validate them with:
 

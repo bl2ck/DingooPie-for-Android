@@ -1,6 +1,9 @@
 #ifndef DINGOO_PIE_FRONTEND_MENU_OVERLAY_INL
 #define DINGOO_PIE_FRONTEND_MENU_OVERLAY_INL
 
+#include "cc/cc_arm_runtime.h"
+#include "cc/cc_save_state.h"
+
 struct AndroidMenuRowContent
 {
     std::string label;
@@ -42,30 +45,13 @@ static std::string androidMenuString(AndroidMenuTextId id)
     {
         language = UI_LANGUAGE_CHINESE;
     }
-    std::string text = platformWideToUtf8(androidMenuText(language, id));
-    size_t accelerator = text.find("(&");
-    while (accelerator != std::string::npos)
-    {
-        size_t end = text.find(')', accelerator + 2);
-        if (end == accelerator + 3)
-            text.erase(accelerator, 4);
-        else
-            accelerator += 2;
-        accelerator = text.find("(&", accelerator);
-    }
-    size_t escapedAmpersand = text.find("&&");
-    while (escapedAmpersand != std::string::npos)
-    {
-        text.replace(escapedAmpersand, 2, "&");
-        escapedAmpersand = text.find("&&", escapedAmpersand + 1);
-    }
-    return text;
+    return platformWideToUtf8(androidMenuText(language, id));
 }
 
 static std::string androidBooleanValue(bool enabled)
 {
     return androidChineseUi() ?
-        (enabled ? u8"\u5f00\u542f" : u8"\u5173\u95ed") :
+        (enabled ? u8"\u5f00" : u8"\u5173") :
         (enabled ? "On" : "Off");
 }
 
@@ -364,7 +350,7 @@ static std::string androidCheatManagerStatusValue(const CheatRuntimeStatus& stat
     }
     char text[48] = {};
     snprintf(text, sizeof(text), androidChineseUi() ?
-        u8"%u \u9879 / \u5df2\u542f\u7528 %u" : "%u features / %u enabled",
+        u8"%u \u9879\uff0c\u5df2\u542f\u7528 %u \u9879" : "%u total, %u enabled",
         (unsigned int)status.entries.size(), enabledCount);
     return text;
 }
@@ -378,7 +364,7 @@ static AndroidMenuRowContent androidMenuRowContent(int row)
         if (row == ANDROID_MAIN_OPTIONS) return { androidMenuString(ANDROID_TEXT_ROOT_OPTIONS), "" };
         if (row == ANDROID_MAIN_SETTINGS) return { androidMenuString(ANDROID_TEXT_ROOT_SETTINGS), "" };
         if (row == ANDROID_MAIN_ABOUT) return { androidMenuString(ANDROID_TEXT_HELP_ABOUT), "" };
-        if (row == ANDROID_MAIN_EXIT_APPLICATION) return { chinese ? kZhExitApp : "Exit app", "" };
+        if (row == ANDROID_MAIN_EXIT_APPLICATION) return { chinese ? kZhExitApp : "Exit App", "" };
         if (row == ANDROID_MAIN_BACK) return { chinese ? kZhBack : "Back", "" };
     }
     else if (g_androidMenuScreen == ANDROID_MENU_OPTIONS)
@@ -447,6 +433,16 @@ static AndroidMenuRowContent androidMenuRowContent(int row)
             return { androidMenuString(ANDROID_TEXT_VIDEO_SCREEN_ORIENTATION),
                 androidMenuString(valueId) };
         }
+        if (row == ANDROID_VIDEO_SCREEN_FILL)
+        {
+            ScreenFillMode fill = g_frontendSettings->screenFill;
+            AndroidMenuTextId valueId = fill == SCREEN_FILL_BLURRED_EXTENSION ?
+                ANDROID_TEXT_VIDEO_SCREEN_FILL_BLURRED_EXTENSION :
+                fill == SCREEN_FILL_STRETCH ? ANDROID_TEXT_VIDEO_SCREEN_FILL_STRETCH :
+                ANDROID_TEXT_VIDEO_SCREEN_FILL_ASPECT;
+            return { androidMenuString(ANDROID_TEXT_VIDEO_SCREEN_FILL),
+                androidMenuString(valueId) };
+        }
         if (row == ANDROID_VIDEO_SHOW_FPS)
             return { androidMenuString(ANDROID_TEXT_VIDEO_SHOW_FPS), androidBooleanValue(g_frontendSettings->showFps) };
         if (row == ANDROID_VIDEO_BACK) return { chinese ? kZhBack : "Back", "" };
@@ -460,6 +456,14 @@ static AndroidMenuRowContent androidMenuRowContent(int row)
         };
         static_assert(sizeof(effectTextIds) / sizeof(effectTextIds[0]) == AUDIO_EFFECT_MODE_COUNT,
             "Audio effect menu text must match AudioEffectMode");
+        static const AndroidMenuTextId noiseReductionTextIds[] = {
+            ANDROID_TEXT_AUDIO_DIGITAL_NOISE_REDUCTION_HIGH,
+            ANDROID_TEXT_AUDIO_DIGITAL_NOISE_REDUCTION_MEDIUM,
+            ANDROID_TEXT_AUDIO_DIGITAL_NOISE_REDUCTION_LOW
+        };
+        static_assert(sizeof(noiseReductionTextIds) / sizeof(noiseReductionTextIds[0]) ==
+            DIGITAL_NOISE_REDUCTION_LEVEL_COUNT,
+            "Noise reduction menu text must match DigitalNoiseReductionLevel");
         if (row == ANDROID_AUDIO_VOLUME)
             return { androidMenuString(ANDROID_TEXT_AUDIO_VOLUME), androidPercentValue(androidNormalizedIntPreset(
                 g_frontendSettings->audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100)) };
@@ -472,6 +476,14 @@ static AndroidMenuRowContent androidMenuRowContent(int row)
             if (index < 0 || index >= AUDIO_EFFECT_MODE_COUNT) index = 0;
             return { androidMenuString(ANDROID_TEXT_AUDIO_EFFECT), androidMenuString(effectTextIds[index]) };
         }
+        if (row == ANDROID_AUDIO_DIGITAL_NOISE_REDUCTION)
+        {
+            int index = (int)g_frontendSettings->digitalNoiseReduction;
+            if (index < 0 || index >= DIGITAL_NOISE_REDUCTION_LEVEL_COUNT)
+                index = DIGITAL_NOISE_REDUCTION_HIGH;
+            return { androidMenuString(ANDROID_TEXT_AUDIO_DIGITAL_NOISE_REDUCTION),
+                androidMenuString(noiseReductionTextIds[index]) };
+        }
         if (row == ANDROID_AUDIO_DISABLED)
             return { androidMenuString(ANDROID_TEXT_AUDIO_DISABLE), androidBooleanValue(g_frontendSettings->audioDisabled) };
         if (row == ANDROID_AUDIO_BACK) return { chinese ? kZhBack : "Back", "" };
@@ -483,6 +495,18 @@ static AndroidMenuRowContent androidMenuRowContent(int row)
                 androidBooleanValue(g_frontendSettings->systemImeDisabled) };
         if (row == ANDROID_INPUT_VIRTUAL_CONTROLS)
             return { androidMenuString(ANDROID_TEXT_INPUT_VIRTUAL_CONTROLS), androidBooleanValue(g_frontendSettings->showVirtualControls) };
+        if (row == ANDROID_INPUT_VIRTUAL_CONTROL_SCALE)
+            return { androidMenuString(ANDROID_TEXT_INPUT_VIRTUAL_CONTROL_SCALE), androidPercentValue(androidNormalizedIntPreset(
+                g_frontendSettings->virtualControlScalePercent, EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES, 100)) };
+        if (row == ANDROID_INPUT_VIRTUAL_DPAD_TYPE)
+        {
+            AndroidMenuTextId valueId =
+                g_frontendSettings->virtualDpadType == VIRTUAL_DPAD_SEGMENTED_RING ?
+                ANDROID_TEXT_INPUT_VIRTUAL_DPAD_SEGMENTED_RING :
+                ANDROID_TEXT_INPUT_VIRTUAL_DPAD_JOYSTICK;
+            return { androidMenuString(ANDROID_TEXT_INPUT_VIRTUAL_DPAD_TYPE),
+                androidMenuString(valueId) };
+        }
         if (row == ANDROID_INPUT_CONTROLLER_MAPPING)
             return { androidMenuString(ANDROID_TEXT_INPUT_CONTROLLER_MAPPING), " " };
         if (row == ANDROID_INPUT_BACK) return { chinese ? kZhBack : "Back", "" };
@@ -597,6 +621,471 @@ static void requestAndroidExitApplication(void)
     {
         frontendRequestQuit();
     }
+}
+
+static SaveStateGameFormat androidCurrentSaveStateFormat(void)
+{
+    return saveStateFormatForPath(g_frontendCurrentGamePath);
+}
+
+
+static std::string androidSaveStateTimeText(uint64_t timestamp);
+
+static std::string androidSaveStateSlotText(
+    int slot, const SaveStateSlotInfo& info)
+{
+    char label[48] = {};
+    snprintf(label, sizeof(label), androidChineseUi() ?
+        u8"\u6863\u4f4d %d%s" : "Slot %d%s", slot,
+        info.exists ? "" : (androidChineseUi() ? u8"\uff08\u7a7a\uff09" : " (Empty)"));
+    std::string text = label;
+    if (info.exists && info.modifiedTime)
+    {
+        text += "\n";
+        text += androidSaveStateTimeText(info.modifiedTime);
+    }
+    return text;
+}
+
+static std::string androidSaveStateErrorText(const std::string& error)
+{
+    if (error.empty()) return "";
+    bool chinese = androidChineseUi();
+    if (error == "runtime did not pause in time")
+        return chinese ? u8"\u6e38\u620f\u672a\u80fd\u53ca\u65f6\u6682\u505c\u3002" :
+            "The game did not pause in time.";
+    if (error == "runtime state is not available" ||
+        error == "runtime state output is invalid")
+        return chinese ? u8"\u5f53\u524d\u6e38\u620f\u72b6\u6001\u4e0d\u53ef\u7528\u3002" :
+            "The current game state is unavailable.";
+    if (error == "saved runtime state is invalid")
+        return chinese ? u8"\u5b58\u6863\u4e2d\u7684\u6e38\u620f\u72b6\u6001\u65e0\u6548\u3002" :
+            "The saved game state is invalid.";
+    if (error == "runtime state has too many records")
+        return chinese ? u8"\u6e38\u620f\u72b6\u6001\u6570\u636e\u8fc7\u591a\u3002" :
+            "The game state contains too many records.";
+    if (error == "invalid state region")
+        return chinese ? u8"\u6e38\u620f\u72b6\u6001\u5305\u542b\u65e0\u6548\u5185\u5b58\u533a\u57df\u3002" :
+            "The game state contains an invalid memory region.";
+    if (error == "runtime thread count does not match save state")
+        return chinese ?
+            u8"\u5f53\u524d\u6e38\u620f\u8fdb\u5ea6\u4e0e\u5b58\u6863\u4e0d\u5339\u914d\u3002"
+            u8"\u8bf7\u8fdb\u5165\u4fdd\u5b58\u65f6\u7684\u76f8\u540c\u573a\u666f\u540e\u91cd\u8bd5\u3002" :
+            "The current game state does not match this save. Return to the same scene and try again.";
+    if (error == "runtime memory layout does not match save state")
+        return chinese ? u8"\u5f53\u524d\u5185\u5b58\u5e03\u5c40\u4e0e\u5b58\u6863\u4e0d\u5339\u914d\u3002" :
+            "The current memory layout does not match this save.";
+    if (error == "failed to restore runtime state")
+        return chinese ? u8"\u65e0\u6cd5\u6062\u590d\u6e38\u620f\u72b6\u6001\u3002" :
+            "Could not restore the game state.";
+    if (error == "invalid slot")
+        return chinese ? u8"\u5b58\u6863\u6863\u4f4d\u65e0\u6548\u3002" : "The save slot is invalid.";
+    if (error == "failed to compress save-state file")
+        return chinese ? u8"\u65e0\u6cd5\u538b\u7f29\u5b58\u6863\u3002" : "Could not compress the save state.";
+    if (error == "save-state file is too large")
+        return chinese ? u8"\u5b58\u6863\u6587\u4ef6\u8fc7\u5927\u3002" : "The save-state file is too large.";
+    if (error == "save-state payload is too large")
+        return chinese ? u8"\u5b58\u6863\u6570\u636e\u8fc7\u5927\u3002" : "The save-state data is too large.";
+    if (error == "save-state payload size mismatch")
+        return chinese ? u8"\u5b58\u6863\u6570\u636e\u5927\u5c0f\u4e0d\u5339\u914d\u3002" :
+            "The save-state data size does not match.";
+    if (error == "failed to write save-state file")
+        return chinese ? u8"\u65e0\u6cd5\u5199\u5165\u5b58\u6863\u6587\u4ef6\u3002" :
+            "Could not write the save-state file.";
+    if (error == "save-state file not found")
+        return chinese ? u8"\u672a\u627e\u5230\u5b58\u6863\u6587\u4ef6\u3002" :
+            "The save-state file was not found.";
+    if (error == "save-state file is truncated")
+        return chinese ? u8"\u5b58\u6863\u6587\u4ef6\u4e0d\u5b8c\u6574\u3002" :
+            "The save-state file is incomplete.";
+    if (error == "unsupported save-state file")
+        return chinese ? u8"\u4e0d\u652f\u6301\u6b64\u5b58\u6863\u6587\u4ef6\u3002" :
+            "This save-state file is not supported.";
+    if (error == "save-state belongs to a different game")
+        return chinese ? u8"\u6b64\u5b58\u6863\u5c5e\u4e8e\u5176\u4ed6\u6e38\u620f\u3002" :
+            "This save state belongs to a different game.";
+    if (error == "failed to decompress save-state file")
+        return chinese ? u8"\u65e0\u6cd5\u89e3\u538b\u5b58\u6863\u3002" : "Could not decompress the save state.";
+    if (error == "save-state file has unexpected data")
+        return chinese ? u8"\u5b58\u6863\u6587\u4ef6\u5305\u542b\u5f02\u5e38\u6570\u636e\u3002" :
+            "The save-state file contains unexpected data.";
+    if (error == "save-state task register table is truncated")
+        return chinese ? u8"\u5b58\u6863\u4efb\u52a1\u6570\u636e\u4e0d\u5b8c\u6574\u3002" :
+            "The save-state task data is incomplete.";
+    if (error == "save-state semaphore table is truncated")
+        return chinese ? u8"\u5b58\u6863\u540c\u6b65\u6570\u636e\u4e0d\u5b8c\u6574\u3002" :
+            "The save-state synchronization data is incomplete.";
+    if (error == "save-state region table is truncated")
+        return chinese ? u8"\u5b58\u6863\u5185\u5b58\u6570\u636e\u4e0d\u5b8c\u6574\u3002" :
+            "The save-state memory data is incomplete.";
+    if (error == "save-state region data is too large")
+        return chinese ? u8"\u5b58\u6863\u5185\u5b58\u6570\u636e\u8fc7\u5927\u3002" :
+            "The save-state memory data is too large.";
+    if (error == "save-state region data is truncated")
+        return chinese ? u8"\u5b58\u6863\u5185\u5b58\u6570\u636e\u4e0d\u5b8c\u6574\u3002" :
+            "The save-state memory data is incomplete.";
+    return (chinese ? std::string(u8"\u64cd\u4f5c\u5931\u8d25\uff1a") :
+        std::string("Operation failed: ")) + error;
+}
+
+static bool validateAndroidSaveStateRuntimeCount(
+    const SaveStateSlotInfo& info, SaveStateGameFormat format,
+    std::string* error)
+{
+    if (!info.runtimeCountValid)
+    {
+        if (error) *error = "unsupported save-state file";
+        return false;
+    }
+    uint32_t currentRuntimeCount = format == SAVE_STATE_FORMAT_CC ?
+        ccArmRuntimeActiveTaskCount() : appRuntimeActiveThreadCount();
+    if (currentRuntimeCount == 0)
+    {
+        if (error) *error = "runtime is not available";
+        return false;
+    }
+    if (format != SAVE_STATE_FORMAT_CC && info.runtimeCount != currentRuntimeCount)
+    {
+        printf("frontend: save-state runtime count mismatch current=%u saved=%u\n",
+            currentRuntimeCount, info.runtimeCount);
+        if (error) *error = "runtime thread count does not match save state";
+        return false;
+    }
+    if (format == SAVE_STATE_FORMAT_CC && info.runtimeCount != currentRuntimeCount)
+    {
+        printf("frontend: CC save-state task count differs current=%u saved=%u; restore will rebuild tasks\n",
+            currentRuntimeCount, info.runtimeCount);
+    }
+    return true;
+}
+
+static void refreshAndroidSaveStateSlotInfo(int slot)
+{
+    if (slot < 1 || slot > kSaveStateSlotCount ||
+        g_frontendCurrentGamePath.empty())
+    {
+        return;
+    }
+    SaveStateSlotInfo info = saveStateSlotInfo(
+        g_frontendCurrentGamePath, androidCurrentSaveStateFormat(), slot);
+    g_androidSaveStateSlotExists[slot - 1] = info.exists;
+    g_androidSaveStateSlotModifiedTime[slot - 1] = info.modifiedTime;
+}
+
+static void refreshAndroidSaveStateSlots(void)
+{
+    if (g_frontendCurrentGamePath.empty())
+    {
+        return;
+    }
+    SaveStateGameFormat format = androidCurrentSaveStateFormat();
+    for (int slot = 1; slot <= kSaveStateSlotCount; ++slot)
+    {
+        if (slot == g_androidSaveStateSelectedSlot)
+        {
+            refreshAndroidSaveStateSlotInfo(slot);
+            continue;
+        }
+        g_androidSaveStateSlotExists[slot - 1] = saveStateSlotExists(
+            g_frontendCurrentGamePath, format, slot);
+        g_androidSaveStateSlotModifiedTime[slot - 1] = 0;
+    }
+    g_androidSaveStateSlotCacheGamePath = g_frontendCurrentGamePath;
+}
+
+static void invalidateAndroidSaveStateThumbnail(void)
+{
+    if (g_androidSaveStateThumbnail)
+    {
+        SDL_DestroyTexture(g_androidSaveStateThumbnail);
+        g_androidSaveStateThumbnail = NULL;
+    }
+}
+
+static void refreshAndroidSaveStateThumbnail(void)
+{
+    invalidateAndroidSaveStateThumbnail();
+    if (!g_renderer || g_frontendCurrentGamePath.empty())
+    {
+        return;
+    }
+    if (!g_androidSaveStateSlotExists[g_androidSaveStateSelectedSlot - 1])
+    {
+        return;
+    }
+
+    std::vector<uint8_t> bytes;
+    if (!saveStateReadThumbnail(g_frontendCurrentGamePath,
+        androidCurrentSaveStateFormat(), g_androidSaveStateSelectedSlot, &bytes) ||
+        bytes.empty() || bytes.size() > 0x7fffffffu)
+    {
+        return;
+    }
+    SDL_RWops* stream = SDL_RWFromConstMem(bytes.data(), (int)bytes.size());
+    SDL_Surface* surface = stream ? SDL_LoadBMP_RW(stream, 1) : NULL;
+    if (surface)
+    {
+        g_androidSaveStateThumbnail = SDL_CreateTextureFromSurface(g_renderer, surface);
+        SDL_FreeSurface(surface);
+    }
+}
+
+static void androidSaveStateProgressCallback(
+    const SaveStateProgress& progress, void*)
+{
+    g_androidSaveStateProgress = progress;
+    uint16_t pixels[SCREEN_WIDTH * SCREEN_HEIGHT];
+    framebufferCopyPresented(pixels, sizeof(pixels));
+    drawFrame(pixels, 0);
+}
+
+static bool writeAndroidSaveState(
+    SaveStateGameFormat format, int slot, std::string* error)
+{
+    if (format == SAVE_STATE_FORMAT_CC)
+    {
+        CcRuntimeState state;
+        if (!ccArmRuntimeCaptureState(&state, error) ||
+            !saveStateWriteCcSlot(g_frontendCurrentGamePath, slot, state,
+                error, androidSaveStateProgressCallback, NULL))
+        {
+            return false;
+        }
+        uint16_t pixels[SCREEN_WIDTH * SCREEN_HEIGHT];
+        framebufferCopyPresented(pixels, sizeof(pixels));
+        saveStateWriteThumbnailRgb565(g_frontendCurrentGamePath, format,
+            slot, pixels, SCREEN_WIDTH, SCREEN_HEIGHT);
+        return true;
+    }
+    EmulatorRuntimeState state;
+    if (!appRuntimeCaptureState(&state, error) ||
+        !saveStateWriteSlot(g_frontendCurrentGamePath, format, slot,
+            state, error, androidSaveStateProgressCallback, NULL))
+    {
+        return false;
+    }
+
+    uint16_t pixels[SCREEN_WIDTH * SCREEN_HEIGHT];
+    framebufferCopyPresented(pixels, sizeof(pixels));
+    saveStateWriteThumbnailRgb565(g_frontendCurrentGamePath, format,
+        slot, pixels, SCREEN_WIDTH, SCREEN_HEIGHT);
+    return true;
+}
+
+static bool loadAndroidSaveState(SaveStateGameFormat format, int slot,
+    const SaveStateSlotInfo& info, std::string* error)
+{
+    if (!validateAndroidSaveStateRuntimeCount(info, format, error))
+    {
+        return false;
+    }
+    if (format == SAVE_STATE_FORMAT_CC)
+    {
+        CcRuntimeState state;
+        return saveStateReadCcSlot(g_frontendCurrentGamePath, slot, &state,
+                error, androidSaveStateProgressCallback, NULL) &&
+            ccArmRuntimeRestoreState(state, error);
+    }
+    EmulatorRuntimeState state;
+    return saveStateReadSlot(g_frontendCurrentGamePath, format, slot,
+            &state, error, androidSaveStateProgressCallback, NULL) &&
+        appRuntimeRestoreState(state, error);
+}
+
+static void performAndroidSaveStateAction(bool saving)
+{
+    if (g_androidSaveStateBusy || g_frontendCurrentGamePath.empty())
+    {
+        return;
+    }
+    bool chinese = androidChineseUi();
+    SaveStateGameFormat format = androidCurrentSaveStateFormat();
+    int slot = g_androidSaveStateSelectedSlot;
+    SaveStateSlotInfo slotInfo = saveStateSlotInfo(
+        g_frontendCurrentGamePath, format, slot);
+    std::string slotText = androidSaveStateSlotText(slot, slotInfo);
+    if (saving)
+    {
+        std::string body = slotInfo.exists ?
+            (chinese ? u8"\u6b64\u6863\u4f4d\u5df2\u6709\u5b58\u6863\uff0c\u662f\u5426\u8986\u76d6\uff1f" :
+                "This slot already contains a save. Overwrite it?") :
+            (chinese ? u8"\u4fdd\u5b58\u5230\u6b64\u6863\u4f4d\uff1f" : "Save to this slot?");
+        body += "\n" + slotText;
+        if (!showAndroidConfirmationDialog(chinese ?
+                u8"\u4fdd\u5b58\u5b58\u6863" : "Save State", body,
+            slotInfo.exists ? (chinese ? u8"\u8986\u76d6" : "Overwrite") :
+                (chinese ? u8"\u4fdd\u5b58" : "Save"),
+            chinese ? u8"\u53d6\u6d88" : "Cancel"))
+        {
+            return;
+        }
+    }
+    else
+    {
+        if (!slotInfo.exists)
+        {
+            showAndroidMessageDialog(chinese ?
+                u8"\u8bfb\u53d6\u5b58\u6863" : "Load State",
+                (chinese ? u8"\u6b64\u6863\u4f4d\u4e3a\u7a7a\u3002\n" : "This slot is empty.\n") + slotText);
+            return;
+        }
+        std::string body = chinese ?
+            u8"\u8bfb\u53d6\u6b64\u5b58\u6863\uff1f\u5f53\u524d\u8fdb\u5ea6\u5c06\u88ab\u8986\u76d6\u3002\n" :
+            "Load this state? Current progress will be overwritten.\n";
+        body += slotText;
+        if (!showAndroidConfirmationDialog(chinese ?
+                u8"\u8bfb\u53d6\u5b58\u6863" : "Load State", body,
+            chinese ? u8"\u8bfb\u53d6" : "Load",
+            chinese ? u8"\u53d6\u6d88" : "Cancel"))
+        {
+            return;
+        }
+    }
+
+    g_androidSaveStateBusy = true;
+    g_androidSaveStateProgress.phase = saving ?
+        SAVE_STATE_PROGRESS_COMPRESS : SAVE_STATE_PROGRESS_DECOMPRESS;
+    g_androidSaveStateProgress.percent = 0;
+    std::string error;
+    bool ok = saving ? writeAndroidSaveState(format, slot, &error) :
+        loadAndroidSaveState(format, slot, slotInfo, &error);
+    g_androidSaveStateBusy = false;
+    g_androidSaveStateStatus = ok ?
+        (saving ? (chinese ? u8"\u5b58\u6863\u5df2\u4fdd\u5b58\u3002" : "State saved.") :
+            (chinese ? u8"\u5b58\u6863\u5df2\u8bfb\u53d6\u3002" : "State loaded.")) :
+        (error.empty() ? (saving ?
+            (chinese ? u8"\u65e0\u6cd5\u4fdd\u5b58\u5b58\u6863\u3002" : "Could not save state.") :
+            (chinese ? u8"\u65e0\u6cd5\u8bfb\u53d6\u5b58\u6863\u3002" : "Could not load state.")) :
+            androidSaveStateErrorText(error));
+    refreshAndroidSaveStateSlotInfo(slot);
+    refreshAndroidSaveStateThumbnail();
+    showAndroidMessageDialog(saving ?
+        (chinese ? u8"\u4fdd\u5b58\u5b58\u6863" : "Save State") :
+        (chinese ? u8"\u8bfb\u53d6\u5b58\u6863" : "Load State"),
+        g_androidSaveStateStatus + "\n" + slotText);
+    if (androidSaveStateActionReturnsToGame(saving, ok))
+    {
+        openAndroidMenu(ANDROID_MENU_NONE);
+    }
+}
+
+static void deleteAndroidSaveState(void)
+{
+    if (g_androidSaveStateBusy || g_frontendCurrentGamePath.empty()) return;
+    SaveStateGameFormat format = androidCurrentSaveStateFormat();
+    int slot = g_androidSaveStateSelectedSlot;
+    SaveStateSlotInfo info = saveStateSlotInfo(
+        g_frontendCurrentGamePath, format, slot);
+    bool chinese = androidChineseUi();
+    if (!info.exists)
+    {
+        showAndroidMessageDialog(chinese ?
+            u8"\u5220\u9664\u5b58\u6863" : "Delete State",
+            chinese ? u8"\u6b64\u6863\u4f4d\u4e3a\u7a7a\u3002" : "This slot is empty.");
+        return;
+    }
+    std::string body = chinese ?
+        u8"\u6240\u9009\u5b58\u6863\u548c\u622a\u56fe\u5c06\u88ab\u6c38\u4e45\u5220\u9664\u3002\u662f\u5426\u7ee7\u7eed\uff1f\n" :
+        "The selected state and screenshot will be permanently deleted. Continue?\n";
+    body += androidSaveStateSlotText(slot, info);
+    if (!showAndroidConfirmationDialog(chinese ?
+            u8"\u5220\u9664\u5b58\u6863" : "Delete State", body,
+        chinese ? u8"\u5220\u9664" : "Delete",
+        chinese ? u8"\u53d6\u6d88" : "Cancel")) return;
+    bool ok = saveStateDeleteSlot(g_frontendCurrentGamePath, format, slot);
+    refreshAndroidSaveStateSlotInfo(slot);
+    refreshAndroidSaveStateThumbnail();
+    showAndroidMessageDialog(chinese ?
+        u8"\u5220\u9664\u5b58\u6863" : "Delete State",
+        ok ? (chinese ? u8"\u5b58\u6863\u5df2\u5220\u9664\u3002" : "State deleted.") :
+            (chinese ? u8"\u65e0\u6cd5\u5220\u9664\u5b58\u6863\u3002" : "Could not delete state."));
+}
+
+static SDL_Rect androidSaveStateSlotRect(const SDL_Rect& panel, int slot)
+{
+    int gap = androidUiMetric(6);
+    int horizontalInset = androidUiMetric(24);
+    int top = panel.y + androidUiMetric(kAndroidMenuRowTop);
+    int previewGap = gap;
+    int contentWidth = panel.w - horizontalInset * 2;
+    int previewHeight = androidUiMetric(
+        4 * kAndroidMenuRowHeight + 3 * kAndroidMenuRowGap);
+    int previewWidth = previewHeight * 4 / 3;
+    if (previewWidth > contentWidth * 2 / 5)
+    {
+        previewWidth = contentWidth * 2 / 5;
+    }
+    int gridWidth = contentWidth - previewGap - previewWidth;
+    int width = (gridWidth - gap * 2) / 3;
+    int height = androidUiMetric(kAndroidMenuRowHeight);
+    int index = slot - 1;
+    return SDL_Rect{ panel.x + horizontalInset + (index % 3) * (width + gap),
+        top + (index / 3) * (height + gap), width, height };
+}
+
+static SDL_Rect androidSaveStatePreviewRect(const SDL_Rect& panel)
+{
+    int horizontalInset = androidUiMetric(24);
+    int previewGap = androidUiMetric(6);
+    int contentWidth = panel.w - horizontalInset * 2;
+    int previewHeight = androidUiMetric(
+        4 * kAndroidMenuRowHeight + 3 * kAndroidMenuRowGap);
+    int previewWidth = previewHeight * 4 / 3;
+    if (previewWidth > contentWidth * 2 / 5)
+    {
+        previewWidth = contentWidth * 2 / 5;
+        previewHeight = previewWidth * 3 / 4;
+    }
+    int gridWidth = contentWidth - previewGap - previewWidth;
+    int top = panel.y + androidUiMetric(kAndroidMenuRowTop);
+    return SDL_Rect{ panel.x + horizontalInset + gridWidth + previewGap,
+        top, previewWidth, previewHeight };
+}
+
+static SDL_Rect androidSaveStateActionRect(const SDL_Rect& panel, int index)
+{
+    int gap = androidUiMetric(kAndroidMenuRowGap);
+    int horizontalInset = androidUiMetric(24);
+    int contentWidth = panel.w - horizontalInset * 2;
+    SDL_Rect finalSlotRow = androidSaveStateSlotRect(panel, 13);
+    int firstRowTop = finalSlotRow.y + finalSlotRow.h + gap;
+    int secondRowTop = firstRowTop + androidUiMetric(kAndroidMenuRowHeight) + gap;
+    if (index < 2)
+    {
+        int firstWidth = (contentWidth - gap) / 2;
+        return SDL_Rect{ panel.x + horizontalInset + index * (firstWidth + gap),
+            firstRowTop, index == 0 ? firstWidth : contentWidth - gap - firstWidth,
+            androidUiMetric(kAndroidMenuRowHeight) };
+    }
+
+    int previewHeight = androidUiMetric(
+        4 * kAndroidMenuRowHeight + 3 * kAndroidMenuRowGap);
+    int previewWidth = previewHeight * 4 / 3;
+    if (previewWidth > contentWidth * 2 / 5)
+    {
+        previewWidth = contentWidth * 2 / 5;
+    }
+    int gridWidth = contentWidth - gap - previewWidth;
+    int deleteWidth = (gridWidth - gap * 2) / 3;
+    return index == 2 ?
+        SDL_Rect{ panel.x + horizontalInset, secondRowTop, deleteWidth,
+            androidUiMetric(kAndroidMenuRowHeight) } :
+        SDL_Rect{ panel.x + horizontalInset + deleteWidth + gap, secondRowTop,
+            contentWidth - gap - deleteWidth, androidUiMetric(kAndroidMenuRowHeight) };
+}
+
+static std::string androidSaveStateTimeText(uint64_t timestamp)
+{
+    if (!timestamp) return androidChineseUi() ? u8"\u5c1a\u672a\u4fdd\u5b58" : "Not saved";
+    time_t value = (time_t)timestamp;
+    struct tm localTime;
+    if (localtime_r(&value, &localTime) == NULL)
+        return androidChineseUi() ? u8"\u65f6\u95f4\u4e0d\u53ef\u7528" : "Time unavailable";
+    char text[48] = {};
+    snprintf(text, sizeof(text), "%04d-%02d-%02d %02d:%02d:%02d",
+        localTime.tm_year + 1900, localTime.tm_mon + 1, localTime.tm_mday,
+        localTime.tm_hour, localTime.tm_min, localTime.tm_sec);
+    return text;
 }
 
 static void handleAndroidMainMenuSelection(int row)
@@ -822,6 +1311,13 @@ static void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row)
             clearAndroidSystemTextTextures();
             break;
         }
+        case ANDROID_VIDEO_SCREEN_FILL:
+            g_frontendSettings->screenFill =
+                (ScreenFillMode)nextAndroidEnumValue(
+                    (int)g_frontendSettings->screenFill,
+                    SCREEN_FILL_COUNT,
+                    SCREEN_FILL_ASPECT);
+            break;
         case ANDROID_VIDEO_SHOW_FPS:
             g_frontendSettings->showFps = !g_frontendSettings->showFps;
             break;
@@ -848,6 +1344,13 @@ static void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row)
                     AUDIO_EFFECT_MODE_COUNT,
                     AUDIO_EFFECT_OFF);
             break;
+        case ANDROID_AUDIO_DIGITAL_NOISE_REDUCTION:
+            g_frontendSettings->digitalNoiseReduction =
+                (DigitalNoiseReductionLevel)nextAndroidEnumValue(
+                    (int)g_frontendSettings->digitalNoiseReduction,
+                    DIGITAL_NOISE_REDUCTION_LEVEL_COUNT,
+                    DIGITAL_NOISE_REDUCTION_HIGH);
+            break;
         case ANDROID_AUDIO_DISABLED:
             g_frontendSettings->audioDisabled = !g_frontendSettings->audioDisabled;
             break;
@@ -865,6 +1368,19 @@ static void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row)
             break;
         case ANDROID_INPUT_VIRTUAL_CONTROLS:
             g_frontendSettings->showVirtualControls = !g_frontendSettings->showVirtualControls;
+            break;
+        case ANDROID_INPUT_VIRTUAL_CONTROL_SCALE:
+            g_frontendSettings->virtualControlScalePercent = nextAndroidIntPreset(
+                g_frontendSettings->virtualControlScalePercent,
+                EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES,
+                100);
+            break;
+        case ANDROID_INPUT_VIRTUAL_DPAD_TYPE:
+            g_frontendSettings->virtualDpadType =
+                (VirtualDpadType)nextAndroidEnumValue(
+                    (int)g_frontendSettings->virtualDpadType,
+                    VIRTUAL_DPAD_TYPE_COUNT,
+                    VIRTUAL_DPAD_JOYSTICK);
             break;
         case ANDROID_INPUT_CONTROLLER_MAPPING:
             openAndroidMenu(ANDROID_MENU_CONTROLLER_MAPPING);
@@ -960,15 +1476,14 @@ static void drawAndroidMenuOverlay(void)
             return;
         }
         SDL_Rect button = androidMenuButtonRect(width);
-        drawAndroidRect(button, SDL_Color{ 0, 0, 0, 185 });
         drawAndroidOutline(button, SDL_Color{ 255, 255, 255, 235 });
         drawAndroidSystemTextCentered("MENU", button,
-            androidCompactButtonTextSize(button), SDL_Color{ 255, 255, 255, 255 });
+            virtualCompactButtonTextSize(button), SDL_Color{ 255, 255, 255, 255 });
         return;
     }
 
     SDL_Rect dim = { 0, 0, width, height };
-    drawAndroidRect(dim, SDL_Color{ 0, 0, 0, 185 });
+    drawAndroidRect(dim, SDL_Color{ 0, 0, 0, 150 });
     SDL_Rect panel = androidPanelRect(width, height);
     drawAndroidRect(panel, SDL_Color{ 0, 0, 0, 245 });
     drawAndroidOutline(panel, SDL_Color{ 160, 160, 160, 255 });
@@ -976,7 +1491,9 @@ static void drawAndroidMenuOverlay(void)
     bool chinese = androidChineseUi();
     std::string title = chinese ? kZhMenu : "Menu";
     if (g_androidMenuScreen == ANDROID_MENU_PAUSE)
-        title = chinese ? kZhGameMenu : "Game menu";
+        title = chinese ? kZhGameMenu : "Game Menu";
+    else if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE)
+        title = chinese ? u8"\u5373\u65f6\u5b58\u6863" : "Save States";
     else if (g_androidMenuScreen == ANDROID_MENU_MAIN)
         title = chinese ? kZhMenu : "Menu";
     else if (g_androidMenuScreen == ANDROID_MENU_ABOUT)
@@ -1004,12 +1521,13 @@ static void drawAndroidMenuOverlay(void)
     {
         std::string rows[] =
         {
-            chinese ? kZhResume : "Resume",
+            chinese ? u8"\u5373\u65f6\u5b58\u6863" : "Save States",
+            chinese ? kZhSwitchGame : "Switch Game",
             androidMenuString(ANDROID_TEXT_FILE_RESTART),
-            chinese ? kZhSwitchGame : "Switch game",
             androidMenuString(ANDROID_TEXT_ROOT_OPTIONS),
             androidMenuString(ANDROID_TEXT_ROOT_SETTINGS),
-            chinese ? kZhExitApp : "Exit app"
+            chinese ? kZhExitApp : "Exit App",
+            chinese ? kZhBack : "Back"
         };
         for (int row = 0; row < ANDROID_PAUSE_ROW_COUNT; ++row)
         {
@@ -1019,18 +1537,106 @@ static void drawAndroidMenuOverlay(void)
                 SDL_Color{ 255, 255, 255, 255 });
         }
     }
+    else if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE)
+    {
+        for (int slot = 1; slot <= kSaveStateSlotCount; ++slot)
+        {
+            SDL_Rect slotRect = androidSaveStateSlotRect(panel, slot);
+            bool selected = slot == g_androidSaveStateSelectedSlot;
+            bool saved = g_androidSaveStateSlotExists[slot - 1];
+            SDL_Color slotColor = saved ?
+                (selected ? SDL_Color{ 48, 72, 96, 255 } :
+                    SDL_Color{ 64, 64, 64, 255 }) :
+                (selected ? SDL_Color{ 62, 92, 126, 255 } :
+                    SDL_Color{ 44, 44, 44, 245 });
+            drawAndroidRect(slotRect, slotColor);
+            char slotText[48] = {};
+            snprintf(slotText, sizeof(slotText), chinese ? u8"\u6863\u4f4d %d%s" : "Slot %d%s",
+                slot, saved ?
+                    (chinese ? u8"  \u5df2\u4fdd\u5b58" : "  Saved") :
+                    (chinese ? u8"  \u7a7a" : "  Empty"));
+            drawAndroidSystemTextCentered(slotText, slotRect, androidUiMetric(15),
+                SDL_Color{ 255, 255, 255, 255 });
+        }
+
+        SDL_Rect preview = androidSaveStatePreviewRect(panel);
+        drawAndroidRect(preview, SDL_Color{ 28, 28, 28, 255 });
+        drawAndroidOutline(preview, SDL_Color{ 112, 112, 112, 255 });
+        SDL_Rect previewInner = { preview.x + 2, preview.y + 2,
+            preview.w - 4, preview.h - 4 };
+        if (g_androidSaveStateThumbnail)
+        {
+            SDL_RenderCopy(g_renderer, g_androidSaveStateThumbnail, NULL, &previewInner);
+        }
+        else
+        {
+            drawAndroidSystemTextCentered(
+                g_androidSaveStateSlotExists[g_androidSaveStateSelectedSlot - 1] ?
+                    (chinese ? u8"\u9884\u89c8\u4e0d\u53ef\u7528" : "Preview unavailable") :
+                    (chinese ? u8"\u7a7a\u6863\u4f4d" : "Empty slot"),
+                previewInner, androidUiMetric(16), SDL_Color{ 190, 190, 190, 255 });
+        }
+        SDL_Rect finalSlotRow = androidSaveStateSlotRect(panel, 13);
+        SDL_Rect previewLabel = { preview.x, finalSlotRow.y,
+            preview.w, finalSlotRow.h };
+        drawAndroidRect(previewLabel, SDL_Color{ 36, 36, 36, 245 });
+        drawAndroidSystemTextCentered(androidSaveStateTimeText(
+            g_androidSaveStateSlotModifiedTime[g_androidSaveStateSelectedSlot - 1]).c_str(),
+            previewLabel, androidUiMetric(15),
+            SDL_Color{ 220, 220, 220, 255 });
+
+        SDL_Rect save = androidSaveStateActionRect(panel, 0);
+        SDL_Rect load = androidSaveStateActionRect(panel, 1);
+        SDL_Rect remove = androidSaveStateActionRect(panel, 2);
+        SDL_Rect back = androidSaveStateActionRect(panel, 3);
+        drawAndroidRect(save, SDL_Color{ 50, 112, 180, 255 });
+        drawAndroidRect(load, SDL_Color{ 50, 112, 180, 255 });
+        drawAndroidRect(remove, SDL_Color{ 120, 58, 58, 255 });
+        drawAndroidRect(back, SDL_Color{ 64, 64, 64, 255 });
+        drawAndroidSystemTextCentered(chinese ? u8"\u4fdd\u5b58\u5373\u65f6\u5b58\u6863" : "Save State",
+            save, androidUiMetric(17), SDL_Color{ 255, 255, 255, 255 });
+        drawAndroidSystemTextCentered(chinese ? u8"\u8bfb\u53d6\u5373\u65f6\u5b58\u6863" : "Load State",
+            load, androidUiMetric(17), SDL_Color{ 255, 255, 255, 255 });
+        drawAndroidSystemTextCentered(chinese ? u8"\u5220\u9664" : "Delete", remove,
+            androidUiMetric(17), SDL_Color{ 255, 255, 255, 255 });
+        drawAndroidSystemTextCentered(chinese ? u8"\u8fd4\u56de" : "Back", back,
+            androidUiMetric(17), SDL_Color{ 255, 255, 255, 255 });
+
+        if (g_androidSaveStateBusy)
+        {
+            SDL_Rect modal = { panel.x + panel.w / 6, panel.y + panel.h / 2 - androidUiMetric(46),
+                panel.w * 2 / 3, androidUiMetric(92) };
+            drawAndroidRect(modal, SDL_Color{ 0, 0, 0, 245 });
+            drawAndroidOutline(modal, SDL_Color{ 210, 210, 210, 255 });
+            std::string progressLabel = g_androidSaveStateProgress.phase == SAVE_STATE_PROGRESS_COMPRESS ?
+                (chinese ? u8"\u6b63\u5728\u538b\u7f29\u5b58\u6863\u2026" : u8"Compressing state\u2026") :
+                (chinese ? u8"\u6b63\u5728\u89e3\u538b\u5b58\u6863\u2026" : u8"Decompressing state\u2026");
+            SDL_Rect labelRect = { modal.x, modal.y + androidUiMetric(8), modal.w,
+                androidUiMetric(28) };
+            drawAndroidSystemTextCentered(progressLabel.c_str(), labelRect,
+                androidUiMetric(17), SDL_Color{ 255, 255, 255, 255 });
+            SDL_Rect bar = { modal.x + androidUiMetric(18), modal.y + androidUiMetric(50),
+                modal.w - androidUiMetric(36), androidUiMetric(12) };
+            drawAndroidRect(bar, SDL_Color{ 72, 72, 72, 255 });
+            SDL_Rect complete = bar;
+            complete.w = bar.w * (int)std::min<uint32_t>(100,
+                g_androidSaveStateProgress.percent) / 100;
+            drawAndroidRect(complete, SDL_Color{ 90, 180, 255, 255 });
+        }
+    }
     else if (g_androidMenuScreen == ANDROID_MENU_ABOUT)
     {
         std::string version = androidAppVersionName();
         const std::string lines[] =
         {
-            chinese ? std::string(u8"\u4e01\u679c\u6d3e DingooPie \u7248\u672c Android ") + version :
-                std::string("DingooPie Version Android ") + version,
-            chinese ? std::string(u8"\u4e01\u679c A320 / \u6b4c\u7f8e X760+ / \u6b4c\u7f8e A330 \u6e38\u620f\u6a21\u62df\u5668") :
-                std::string("Dingoo A320 / Gemei X760+ / Gemei A330 game emulator"),
-            chinese ? std::string(u8".app / .cc \u683c\u5f0f\u6587\u4ef6\u5f52\u4e01\u679c\u79d1\u6280\u6240\u6709\u3002") :
-                std::string("The .app and .cc package formats belong to Dingoo Technology."),
-            "Powered by BL2CK Software"
+            chinese ? std::string(u8"\u4e01\u679c\u6d3e DingooPie Android ") + version :
+                std::string("DingooPie Android ") + version,
+            chinese ? std::string(u8"\u9002\u7528\u4e8e\u4e01\u679c A320\u3001\u6b4c\u7f8e X760+ \u548c\u6b4c\u7f8e A330 \u7684\u6e38\u620f\u6a21\u62df\u5668") :
+                std::string("Game emulator for Dingoo A320, Gemei X760+, and Gemei A330"),
+            chinese ? std::string(u8".app \u548c .cc \u683c\u5f0f\u5f52\u4e01\u679c\u79d1\u6280\u6240\u6709\u3002") :
+                std::string("The .app and .cc formats are owned by Dingoo Technology."),
+            chinese ? std::string(u8"\u7531 BL2CK Software \u63d0\u4f9b\u652f\u6301") :
+                std::string("Powered by BL2CK Software")
         };
         for (int index = 0; index < 4; ++index)
         {

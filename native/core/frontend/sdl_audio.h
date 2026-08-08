@@ -6,29 +6,24 @@
 #include "config/emulator_settings.h"
 #include "guest/guest_audio.h"
 
-enum MixerRuntimeAudioProfile
-{
-    MIXER_RUNTIME_AUDIO_NATIVE_GUEST,
-    MIXER_RUNTIME_AUDIO_CC_STABLE_HOST
-};
-
-uint32_t MixerOpen(waveout_args* args);
-uint32_t MixerClose();
-void MixerReleaseGameResources(void);
-void MixerResetAfterRuntimeStop(void);
-void MixerPrepareApplicationExit(void);
-uint32_t MixerWriteBuff(char* buffer, int count);
-uint32_t MixerTryWriteBuff(char* buffer, int count);
-uint32_t MixerPlaying();
-uint32_t MixerCanWriteNonBlocking();
-bool MixerSkipsAudioOutput();
-void MixerSetVolume(uint32_t vol);
-void MixerSetMuted(bool muted);
-void MixerSetFrontendPaused(bool paused);
-void MixerSetMasterVolumePercent(int percent);
-void MixerSetBufferSamples(int samples);
-void MixerSetAudioEffect(AudioEffectMode effect);
-void MixerSetRuntimeAudioProfile(MixerRuntimeAudioProfile profile);
-void MixerSetValidationCaptureEnabled(bool enabled);
+uint32_t mixerOpen(waveout_args* args);
+uint32_t mixerClose();
+void mixerReleaseGameResources(void);
+void mixerResetAfterRuntimeStop(void);
+void mixerPrepareApplicationExit(void);
+uint32_t mixerWriteBuffer(char* buffer, int count);
+uint32_t mixerTryWriteBuffer(char* buffer, int count);
+uint32_t mixerIsPlaying();
+uint32_t mixerCanWriteNonBlocking();
+bool mixerSkipsAudioOutput();
+void mixerSetGuestVolume(uint32_t vol);
+void mixerSetMuted(bool muted);
+void mixerSetFrontendPaused(bool paused);
+void mixerSetMasterVolumePercent(int percent);
+void mixerSetBufferSamples(int samples);
+void mixerSetAudioEffect(AudioEffectMode effect);
+void mixerSetDigitalNoiseReduction(DigitalNoiseReductionLevel level);
+void mixerRecordInput(uint32_t controlMask);
+void mixerSetValidationCaptureEnabled(bool enabled);
 
 #endif

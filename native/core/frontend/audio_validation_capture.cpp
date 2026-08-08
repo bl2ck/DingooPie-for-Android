@@ -1,7 +1,9 @@
 #include "frontend/audio_validation_capture.h"
+#include "platform_services.h"
 
 #include <SDL2/SDL.h>
 #include <stdio.h>
+#include <string>
 
 struct AudioValidationCapture
 {
@@ -19,11 +21,6 @@ struct AudioValidationCapture
 };
 
 static AudioValidationCapture g_capture = {};
-static const char* kValidationWavePath =
-    "/data/user/0/com.dingoopie.android/files/dingoopie-audio-validation.wav";
-static const char* kValidationEventPath =
-    "/data/user/0/com.dingoopie.android/files/dingoopie-audio-validation.csv";
-
 static void writeUint16(FILE* file, uint16_t value)
 {
     uint8_t bytes[2] = { (uint8_t)value, (uint8_t)(value >> 8) };
@@ -135,8 +132,11 @@ void audioValidationBegin(const SDL_AudioSpec& audioSpec)
         return;
     }
 
-    g_capture.waveFile = fopen(kValidationWavePath, "wb+");
-    g_capture.eventFile = fopen(kValidationEventPath, "w");
+    std::string logDirectory = platformAndroidGetLogDirectory();
+    std::string wavePath = logDirectory + "/dingoopie-audio-validation.wav";
+    std::string eventPath = logDirectory + "/dingoopie-audio-validation.csv";
+    g_capture.waveFile = logDirectory.empty() ? NULL : fopen(wavePath.c_str(), "wb+");
+    g_capture.eventFile = logDirectory.empty() ? NULL : fopen(eventPath.c_str(), "w");
     if (!g_capture.waveFile || !g_capture.eventFile)
     {
         SDL_Log("Audio validation output open failed");
@@ -160,6 +160,7 @@ void audioValidationBegin(const SDL_AudioSpec& audioSpec)
     writeUint32(g_capture.waveFile, 0);
     fprintf(g_capture.eventFile,
         "elapsed_ms,event,bytes,queued_bytes,pending_bytes,wait_ms\n");
+    fprintf(g_capture.eventFile, "0,open,%u,0,0,0\n", audioSpec.size);
     SDL_Log("Audio validation capture started rate=%d format=0x%x channels=%u",
         audioSpec.freq, audioSpec.format, (unsigned int)audioSpec.channels);
 }

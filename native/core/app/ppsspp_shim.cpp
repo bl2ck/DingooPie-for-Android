@@ -56,7 +56,6 @@ static NativeRuntime* g_ppssppRuntime = NULL;
 static uint64_t g_runtimeBeginTicks = 0;
 static uint64_t g_runtimeMaxTicks = 0;
 static bool g_logEnabled = true;
-static int g_irjitTraceEnabled = -1;
 static std::atomic<bool> g_ppssppProfileEnabled(false);
 static bool g_fastPageDirectEnabled = true;
 static int g_fastPageDirectOverride = -1;
@@ -326,23 +325,20 @@ static uint32_t canonicalGuestAddress(uint32_t address)
 
 static bool irjitTraceEnabled()
 {
-    if (g_irjitTraceEnabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_IRJIT_TRACE");
-        g_irjitTraceEnabled = value && value[0] && strcmp(value, "0") != 0 ? 1 : 0;
-    }
-    return g_irjitTraceEnabled != 0;
+        return value && value[0] && strcmp(value, "0") != 0;
+    }();
+    return enabled;
 }
 
 static bool ppssppShimLogEnabled()
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_IRJIT_LOG");
-        enabled = value && value[0] && strcmp(value, "0") != 0 ? 1 : 0;
-    }
-    return enabled != 0 || irjitTraceEnabled();
+        return value && value[0] && strcmp(value, "0") != 0;
+    }();
+    return enabled || irjitTraceEnabled();
 }
 
 static const char* describeCop0Fallback(uint32_t op)
@@ -741,7 +737,13 @@ static void ppssppShimProfileTick()
         return;
     }
 
-    printf("profile:irjit hooks=%llu/s fast_hle=%llu/s fast_lcd=%llu/s fast_audio=%llu/s fast_sem=%llu/s advances=%llu/s reads=%llu/s writes=%llu/s fast_fread=%llu/%llub fast_fseek=%llu guest_mhz=%u throttle=%u throttle_sleep_ms=%llu throttle_ahead_ms=%u clock_hz=%d fb_submit=%llu fb_copy_us=%llu fb_interval_us=%llu/%llu over25=%llu over33=%llu core_ticks=%llu downcount=%d pc=0x%08x ra=0x%08x core=%s\n",
+    printf(
+        "profile:irjit hooks=%llu/s fast_hle=%llu/s fast_lcd=%llu/s "
+        "fast_audio=%llu/s fast_sem=%llu/s advances=%llu/s reads=%llu/s "
+        "writes=%llu/s fast_fread=%llu/%llub fast_fseek=%llu guest_mhz=%u "
+        "throttle=%u throttle_sleep_ms=%llu throttle_ahead_ms=%u clock_hz=%d "
+        "fb_submit=%llu fb_copy_us=%llu fb_interval_us=%llu/%llu over25=%llu "
+        "over33=%llu core_ticks=%llu downcount=%d pc=0x%08x ra=0x%08x core=%s\n",
         (unsigned long long)runtimeLogRatePerSecond(g_ppssppHookCalls, elapsedMs),
         (unsigned long long)runtimeLogRatePerSecond(g_ppssppFastHleCalls, elapsedMs),
         (unsigned long long)runtimeLogRatePerSecond(g_ppssppFastLcdCalls, elapsedMs),
@@ -1505,16 +1507,20 @@ void ppssppShimSyncStateFromRuntime(NativeRuntime* runtime)
 
 void ppssppShimClearJitCache(NativeRuntime* runtime)
 {
-    if (runtime && runtime == g_ppssppRuntime && MIPSComp::jit)
-    {
-        MIPSComp::jit->ClearCache();
-        clearEmuHackOriginals();
-        return;
-    }
     PpssppRuntimeControl* control = findRuntimeControl(runtime);
     if (control)
     {
         control->clearCacheRequested.store(true, std::memory_order_release);
+    }
+}
+
+static void processPendingJitCacheClear(void)
+{
+    if (g_runtimeControl.clearCacheRequested.exchange(false,
+            std::memory_order_acq_rel) && MIPSComp::jit)
+    {
+        MIPSComp::jit->ClearCache();
+        clearEmuHackOriginals();
     }
 }
 
@@ -1532,13 +1538,11 @@ static bool addressMatchesAny(uint32_t address, std::initializer_list<uint32_t> 
 
 static bool traceKbdCallersEnabled()
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_TRACE_KBD_CALLERS");
-        enabled = (value && value[0] && value[0] != '0') ? 1 : 0;
-    }
-    return enabled != 0;
+        return value && value[0] && value[0] != '0';
+    }();
+    return enabled;
 }
 
 static bool writeFastKeyStatus(uint32_t address)
@@ -1598,6 +1602,8 @@ static bool tryRunFastHle(uint32_t address)
         uint32_t len = currentMIPS->r[MIPS_REG_A0];
         if (len >= 0x02000000)
         {
+            char lastHle[192];
+            bridge_copy_last_hle_summary(lastHle, sizeof(lastHle));
             printf("ppsspp-fast-hle: large malloc len=0x%08x pc=0x%08x ra=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x v0=0x%08x last_hle=\"%s\"\n",
                 len,
                 currentMIPS->pc,
@@ -1606,7 +1612,7 @@ static bool tryRunFastHle(uint32_t address)
                 currentMIPS->r[MIPS_REG_A2],
                 currentMIPS->r[MIPS_REG_A3],
                 currentMIPS->r[MIPS_REG_V0],
-                bridge_get_last_hle_summary());
+                lastHle);
         }
         ret = vm_malloc(len);
     }
@@ -1792,15 +1798,10 @@ static bool tryRunFastHle(uint32_t address)
             else if (file.type == GUEST_FILE_TYPE_FILE)
             {
                 fsys_begin_fast_hle_call();
-                const uint8_t* cachedData = NULL;
                 uint32_t cachedBytes = 0;
                 uint32_t cachedItems = 0;
-                if (fsys_read_cached(file.data, size, count, &cachedData, &cachedBytes, &cachedItems))
+                if (fsys_read_cached(file.data, size, count, dst, &cachedBytes, &cachedItems))
                 {
-                    if (cachedBytes > 0)
-                    {
-                        memcpy(dst, cachedData, cachedBytes);
-                    }
                     ret = cachedItems;
                 }
                 else
@@ -1878,15 +1879,10 @@ static bool tryRunFastHle(uint32_t address)
         {
             void* dst = hostPointerCanonical(ptr, bytes);
             fsys_begin_fast_hle_call();
-            const uint8_t* cachedData = NULL;
             uint32_t cachedBytes = 0;
             uint32_t cachedItems = 0;
-            if (dst && fsys_read_cached(stream, size, count, &cachedData, &cachedBytes, &cachedItems))
+            if (dst && fsys_read_cached(stream, size, count, dst, &cachedBytes, &cachedItems))
             {
-                if (cachedBytes > 0)
-                {
-                    memcpy(dst, cachedData, cachedBytes);
-                }
                 ret = cachedItems;
             }
             else
@@ -1958,33 +1954,31 @@ static bool tryRunFastHle(uint32_t address)
 
 static void initVfpuOrder()
 {
-    static bool initialized = false;
-    if (initialized)
-    {
-        return;
-    }
-
-    int index = 0;
-    for (int m = 0; m < 8; ++m)
-    {
-        for (int y = 0; y < 4; ++y)
+    static const bool initialized = []() {
+        int index = 0;
+        for (int m = 0; m < 8; ++m)
         {
-            for (int x = 0; x < 4; ++x)
+            for (int y = 0; y < 4; ++y)
             {
-                voffset[m * 4 + x * 32 + y] = (u8)index++;
+                for (int x = 0; x < 4; ++x)
+                {
+                    voffset[m * 4 + x * 32 + y] = (u8)index++;
+                }
             }
         }
-    }
 
-    for (int i = 0; i < 128; ++i)
-    {
-        fromvoffset[voffset[i]] = (u8)i;
-    }
-    initialized = true;
+        for (int i = 0; i < 128; ++i)
+        {
+            fromvoffset[voffset[i]] = (u8)i;
+        }
+        return true;
+    }();
+    (void)initialized;
 }
 
 void ppssppShimAttachRuntime(NativeRuntime* runtime)
 {
+    const bool stopRequested = nativeRuntimeStopRequested(runtime);
     {
         std::lock_guard<std::mutex> guard(g_runtimeControlMutex);
         if (g_attachedRuntimeCount++ == 0)
@@ -1993,7 +1987,7 @@ void ppssppShimAttachRuntime(NativeRuntime* runtime)
         }
     }
     g_ppssppRuntime = runtime;
-    g_runtimeControl.stopRequested.store(false, std::memory_order_release);
+    g_runtimeControl.stopRequested.store(stopRequested, std::memory_order_release);
     g_runtimeControl.pauseRequested.store(false, std::memory_order_release);
     g_runtimeControl.clearCacheRequested.store(false, std::memory_order_release);
     registerRuntimeControl(runtime);
@@ -2097,6 +2091,10 @@ void ppssppShimSetRuntimeLimit(uint64_t beginTicks, uint64_t maxTicks)
 void ppssppShimRequestStop(NativeRuntime* runtime)
 {
     PpssppRuntimeControl* control = findRuntimeControl(runtime);
+    if (!control && runtime && runtime == g_ppssppRuntime)
+    {
+        control = &g_runtimeControl;
+    }
     if (control)
     {
         control->stopRequested.store(true, std::memory_order_release);
@@ -2125,6 +2123,7 @@ bool ppssppShimWaitForPauseResume(NativeRuntime* runtime)
 
     syncPpssppStateToRuntime();
     pauseGateWaitForResume();
+    processPendingJitCacheClear();
     if (g_runtimeControl.stopRequested.load(std::memory_order_acquire))
     {
         coreState = CORE_POWERDOWN;
@@ -2132,6 +2131,7 @@ bool ppssppShimWaitForPauseResume(NativeRuntime* runtime)
     }
     else
     {
+        syncRuntimeStateToPpsspp();
         coreState = CORE_RUNNING_CPU;
         coreStatePending = false;
     }
@@ -3091,11 +3091,7 @@ bool IsScheduled(int)
 void Advance()
 {
     g_ppssppAdvanceCalls++;
-    if (g_runtimeControl.clearCacheRequested.exchange(false, std::memory_order_acq_rel) && MIPSComp::jit)
-    {
-        MIPSComp::jit->ClearCache();
-        clearEmuHackOriginals();
-    }
+    processPendingJitCacheClear();
     if (g_runtimeControl.stopRequested.load(std::memory_order_acquire))
     {
         coreState = CORE_POWERDOWN;
@@ -3224,11 +3220,6 @@ const char* CoreStateToString(CoreState state)
     }
 }
 
-bool Core_IsStepping()
-{
-    return coreState == CORE_STEPPING_CPU;
-}
-
 bool Core_IsActive()
 {
     return coreState == CORE_RUNNING_CPU || coreState == CORE_NEXTFRAME;
@@ -3298,10 +3289,6 @@ void SetCleanExitOnAssert()
 {
 }
 
-void BreakIntoPSPDebugger(const char*)
-{
-}
-
 void SetAssertDialogParent(void*)
 {
 }
@@ -3320,7 +3307,6 @@ void Init() {}
 void Shutdown() {}
 void DoState(PointerWrap&) {}
 void UpdateConfig() {}
-void NotifyDebugger() {}
 void NotifyExecModule(const char*, int, uint32_t) {}
 bool IsEnabled() { return false; }
 bool IsSupported() { return false; }
@@ -3378,58 +3364,18 @@ std::string MIPSDebugInterface::GetRegName(int cat, int index)
     return temp;
 }
 
-bool MIPSDebugInterface::isAlive() { return true; }
-bool MIPSDebugInterface::isBreakpoint(unsigned int) { return false; }
-void MIPSDebugInterface::setBreakpoint(unsigned int) {}
-void MIPSDebugInterface::clearBreakpoint(unsigned int) {}
-void MIPSDebugInterface::clearAllBreakpoints() {}
-void MIPSDebugInterface::toggleBreakpoint(unsigned int) {}
-unsigned int MIPSDebugInterface::readMemory(unsigned int address) { return Memory::Read_U32(address); }
-int MIPSDebugInterface::getColor(unsigned int, bool) const { return 0; }
-std::string MIPSDebugInterface::getDescription(unsigned int address) { return std::string(); }
-
 bool BreakpointManager::IsAddressBreakPoint(u32) { return false; }
-bool BreakpointManager::IsAddressBreakPoint(u32, bool* enabled)
-{
-    if (enabled)
-    {
-        *enabled = false;
-    }
-    return false;
-}
 bool BreakpointManager::IsTempBreakPoint(u32) { return false; }
 bool BreakpointManager::RangeContainsBreakPoint(u32, u32) { return false; }
-int BreakpointManager::AddBreakPoint(u32, bool) { return -1; }
 void BreakpointManager::RemoveBreakPoint(u32) {}
-void BreakpointManager::ChangeBreakPoint(u32, bool) {}
-void BreakpointManager::ChangeBreakPoint(u32, BreakAction) {}
-void BreakpointManager::ClearAllBreakPoints() {}
-void BreakpointManager::ClearTemporaryBreakPoints() {}
-void BreakpointManager::ChangeBreakPointAddCond(u32, const BreakPointCond&) {}
-void BreakpointManager::ChangeBreakPointRemoveCond(u32) {}
 BreakPointCond* BreakpointManager::GetBreakPointCondition(u32) { return NULL; }
-void BreakpointManager::ChangeBreakPointLogFormat(u32, const std::string&) {}
 BreakAction BreakpointManager::ExecBreakPoint(u32) { return BREAK_ACTION_IGNORE; }
-int BreakpointManager::AddMemCheck(u32, u32, MemCheckCondition, BreakAction) { return -1; }
-void BreakpointManager::RemoveMemCheck(u32, u32) {}
-void BreakpointManager::ChangeMemCheck(u32, u32, MemCheckCondition, BreakAction) {}
-void BreakpointManager::ClearAllMemChecks() {}
-void BreakpointManager::ChangeMemCheckAddCond(u32, u32, const BreakPointCond&) {}
-void BreakpointManager::ChangeMemCheckRemoveCond(u32, u32) {}
-BreakPointCond* BreakpointManager::GetMemCheckCondition(u32, u32) { return NULL; }
-void BreakpointManager::ChangeMemCheckLogFormat(u32, u32, const std::string&) {}
-bool BreakpointManager::GetMemCheck(u32, u32, MemCheck*) { return false; }
 bool BreakpointManager::GetMemCheckInRange(u32, int, MemCheck*) { return false; }
 BreakAction BreakpointManager::ExecMemCheck(u32, bool, int, u32, const char*) { return BREAK_ACTION_IGNORE; }
 BreakAction BreakpointManager::ExecOpMemCheck(u32, u32) { return BREAK_ACTION_IGNORE; }
 void BreakpointManager::SetSkipFirst(u32 pc) { breakSkipFirstAt_ = pc; }
 u32 BreakpointManager::CheckSkipFirst() { return breakSkipFirstAt_; }
 std::vector<MemCheck> BreakpointManager::GetMemCheckRanges(bool) { return std::vector<MemCheck>(); }
-std::vector<MemCheck> BreakpointManager::GetMemChecks() { return std::vector<MemCheck>(); }
-std::vector<BreakPoint> BreakpointManager::GetBreakpoints() { return std::vector<BreakPoint>(); }
-void BreakpointManager::Frame() {}
-bool BreakpointManager::ValidateLogFormat(MIPSDebugInterface*, const std::string&) { return false; }
-bool BreakpointManager::EvaluateLogFormat(MIPSDebugInterface*, const std::string&, std::string&) { return false; }
 
 namespace MIPSAnalyst
 {

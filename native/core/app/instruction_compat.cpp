@@ -10,9 +10,9 @@
 #include "frontend/framebuffer.h"
 #include "runtime/runtime_log.h"
 
-extern uint32_t s_AppDataAddr;
-extern uint32_t s_AppDataBuffSize;
-extern void* s_AppDataBuff;
+extern uint32_t g_appDataAddress;
+extern uint32_t g_appDataSize;
+extern void* g_appDataBuffer;
 
 static EmulatorOptions g_options;
 static std::vector<uint32_t> g_objectFlagsPredicateAddresses;
@@ -980,10 +980,10 @@ static void patchCacheInstructions(GuestPackage* appInfo, const EmulatorOptions&
 
 static bool readRuntimeInsn(NativeRuntime* runtime, uint64_t address, uint32_t* out)
 {
-    if (address >= s_AppDataAddr && address + sizeof(uint32_t) <= (uint64_t)s_AppDataAddr + s_AppDataBuffSize)
+    if (address >= g_appDataAddress && address + sizeof(uint32_t) <= (uint64_t)g_appDataAddress + g_appDataSize)
     {
-        uint64_t offset = address - s_AppDataAddr;
-        *out = readLe32((const uint8_t*)s_AppDataBuff + offset);
+        uint64_t offset = address - g_appDataAddress;
+        *out = readLe32((const uint8_t*)g_appDataBuffer + offset);
         return true;
     }
 
@@ -1178,7 +1178,7 @@ static void hookTransparentBlit16(NativeRuntime* runtime, uint64_t address, uint
     uint32_t objectPtr = 0;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &objectPtr);
 
-    uint8_t* object = (uint8_t*)toHostPtr(objectPtr);
+    uint8_t* object = (uint8_t*)toHostPtrRange(objectPtr, 0x44);
     if (!object)
     {
         return;
@@ -1206,15 +1206,25 @@ static void hookTransparentBlit16(NativeRuntime* runtime, uint64_t address, uint
         return;
     }
 
-    uint8_t* sourceHeader = (uint8_t*)toHostPtr(sourceHeaderPtr);
-    uint16_t* source = (uint16_t*)toHostPtr(sourcePtr);
-    uint16_t* dest = (uint16_t*)toHostPtr(destPtr);
-    if (!sourceHeader || !source || !dest)
+    uint8_t* sourceHeader = (uint8_t*)toHostPtrRange(sourceHeaderPtr, sizeof(uint16_t));
+    if (!sourceHeader)
+    {
+        return;
+    }
+    uint32_t sourceStridePixels = (uint32_t)(sourceHeader[0] | ((uint32_t)sourceHeader[1] << 8));
+    uint64_t sourceBytes = rows ?
+        ((uint64_t)(rows - 1) * sourceStridePixels + columns) * sizeof(uint16_t) : 0;
+    uint64_t destBytes = rows ?
+        ((uint64_t)(rows - 1) * destStridePixels + columns) * sizeof(uint16_t) : 0;
+    uint16_t* source = sourceBytes <= UINT32_MAX ?
+        (uint16_t*)toHostPtrRange(sourcePtr, (uint32_t)sourceBytes) : NULL;
+    uint16_t* dest = destBytes <= UINT32_MAX ?
+        (uint16_t*)toHostPtrRange(destPtr, (uint32_t)destBytes) : NULL;
+    if (!source || !dest)
     {
         return;
     }
 
-    uint32_t sourceStridePixels = (uint32_t)(sourceHeader[0] | ((uint32_t)sourceHeader[1] << 8));
     for (uint32_t row = 0; row < rows; ++row)
     {
         for (uint32_t i = columns; i > 0; --i)
@@ -1244,7 +1254,7 @@ static uint32_t readRegister32(NativeRuntime* runtime, int regid);
 
 static uint32_t readGuestLe32(uint32_t address)
 {
-    uint8_t* ptr = (uint8_t*)toHostPtr(address);
+    uint8_t* ptr = (uint8_t*)toHostPtrRange(address, sizeof(uint32_t));
     return ptr ? readLe32(ptr) : 0;
 }
 
@@ -1279,14 +1289,14 @@ static bool evalObjectFlagsPredicate(const uint8_t* object, uint32_t key, uint32
 
 static bool evalObjectFlagsCallback(uint32_t objectPtr, uint32_t key, uint32_t mask, uint32_t* out)
 {
-    uint8_t* object = (uint8_t*)toHostPtr(objectPtr);
+    uint8_t* object = (uint8_t*)toHostPtrRange(objectPtr, 0x0c);
     if (!object)
     {
         return false;
     }
 
     uint32_t tablePtr = readLe32(object);
-    uint8_t* table = (uint8_t*)toHostPtr(tablePtr + 0x18u);
+    uint8_t* table = (uint8_t*)toHostPtrRange(tablePtr + 0x18u, sizeof(uint32_t));
     if (!table)
     {
         return false;
@@ -1324,7 +1334,7 @@ static void hookObjectPredicateAggregate(NativeRuntime* runtime, uint64_t addres
     uint32_t result = 0;
     uint32_t value = 0;
 
-    uint8_t* initialObject = (uint8_t*)toHostPtr(base + 0x54u);
+    uint8_t* initialObject = (uint8_t*)toHostPtrRange(base + 0x54u, 0x0c);
     if (!evalObjectFlagsPredicate(initialObject, key, mask, &value))
     {
         return;
@@ -1357,7 +1367,7 @@ static void hookObjectPredicateAggregate(NativeRuntime* runtime, uint64_t addres
     };
     for (uint32_t i = 0; i < sizeof(inlineOffsets) / sizeof(inlineOffsets[0]); ++i)
     {
-        uint8_t* object = (uint8_t*)toHostPtr(base + inlineOffsets[i]);
+        uint8_t* object = (uint8_t*)toHostPtrRange(base + inlineOffsets[i], 0x0c);
         if (!evalObjectFlagsPredicate(object, key, mask, &value))
         {
             return;
@@ -1387,7 +1397,7 @@ static void hookMemoryRoutine(NativeRuntime* runtime, uint64_t address, uint32_t
     const uint8_t* src = NULL;
     if (count > 0)
     {
-        dst = (uint8_t*)toHostPtr(dstPtr);
+        dst = (uint8_t*)toHostPtrRange(dstPtr, count);
         if (!dst)
         {
             return;
@@ -1399,7 +1409,7 @@ static void hookMemoryRoutine(NativeRuntime* runtime, uint64_t address, uint32_t
     case MEMORY_ROUTINE_MEMCPY:
         if (count > 0)
         {
-            src = (const uint8_t*)toHostPtr(arg1);
+            src = (const uint8_t*)toHostPtrRange(arg1, count);
             if (!src)
             {
                 return;
@@ -1439,7 +1449,7 @@ static void hookTinyPredicate(NativeRuntime* runtime, uint64_t address, uint32_t
     uint32_t a0 = gpr[RUNTIME_REG_A0];
     uint32_t a1 = gpr[RUNTIME_REG_A1] & 0xffu;
     uint32_t a2 = gpr[RUNTIME_REG_A2] & 0xffu;
-    uint8_t* object = (uint8_t*)toHostPtr(a0);
+    uint8_t* object = (uint8_t*)toHostPtrRange(a0, 0x14);
     if (!object)
     {
         return;
@@ -1472,7 +1482,9 @@ static void hookTinyPredicate(NativeRuntime* runtime, uint64_t address, uint32_t
         if (a1 < width && a2 < readLe32(object + 0x0c))
         {
             uint32_t cellsPtr = readLe32(object + 0x10);
-            const uint8_t* cells = (const uint8_t*)toHostPtr(cellsPtr + a2 * width + a1);
+            uint64_t cellAddress = (uint64_t)cellsPtr + (uint64_t)a2 * width + a1;
+            const uint8_t* cells = cellAddress <= UINT32_MAX ?
+                (const uint8_t*)toHostPtrRange((uint32_t)cellAddress, 1) : NULL;
             if (!cells)
             {
                 return;
@@ -1507,7 +1519,7 @@ static void hookRowCopyLoop(NativeRuntime* runtime, uint64_t address, uint32_t s
         }
 
         uint32_t objectPtr = gpr[RUNTIME_REG_A0];
-        uint8_t* object = (uint8_t*)toHostPtr(objectPtr);
+        uint8_t* object = (uint8_t*)toHostPtrRange(objectPtr, 0x10);
         if (!object)
         {
             return;
@@ -1552,7 +1564,7 @@ static void hookRowCopyLoop(NativeRuntime* runtime, uint64_t address, uint32_t s
     }
 
     uint32_t objectPtr = readRegister32(runtime, RUNTIME_REG_A0);
-    uint8_t* object = (uint8_t*)toHostPtr(objectPtr);
+    uint8_t* object = (uint8_t*)toHostPtrRange(objectPtr, 0x38);
     if (!object)
     {
         return;
@@ -1575,7 +1587,7 @@ static void hookRowCopyLoop(NativeRuntime* runtime, uint64_t address, uint32_t s
     }
 
     uint32_t sourceHeaderPtr = readLe32(object + 0x04);
-    const uint8_t* sourceHeader = (const uint8_t*)toHostPtr(sourceHeaderPtr);
+    const uint8_t* sourceHeader = (const uint8_t*)toHostPtrRange(sourceHeaderPtr, sizeof(uint16_t));
     if (!sourceHeader)
     {
         return;
@@ -1600,8 +1612,12 @@ static void hookRowCopyLoop(NativeRuntime* runtime, uint64_t address, uint32_t s
     uint32_t destPtr = readLe32(object + 0x1c);
     if (rows > 0 && rowBytes > 0)
     {
-        uint8_t* dest = (uint8_t*)toHostPtr(destPtr);
-        const uint8_t* source = (const uint8_t*)toHostPtr(sourcePtr);
+        uint64_t sourceBytes = (uint64_t)(rows - 1) * sourceStrideBytes + rowBytes;
+        uint64_t destBytes = (uint64_t)(rows - 1) * destStrideBytes + rowBytes;
+        uint8_t* dest = destBytes <= UINT32_MAX ?
+            (uint8_t*)toHostPtrRange(destPtr, (uint32_t)destBytes) : NULL;
+        const uint8_t* source = sourceBytes <= UINT32_MAX ?
+            (const uint8_t*)toHostPtrRange(sourcePtr, (uint32_t)sourceBytes) : NULL;
         if (!dest || !source)
         {
             return;
@@ -1631,7 +1647,7 @@ static void hookCompactTransparentBlit16(NativeRuntime* runtime, uint64_t addres
     CompactTransparentBlit16Kind kind = (CompactTransparentBlit16Kind)(uintptr_t)userData;
 
     uint32_t objectPtr = readRegister32(runtime, RUNTIME_REG_A0);
-    uint8_t* object = (uint8_t*)toHostPtr(objectPtr);
+    uint8_t* object = (uint8_t*)toHostPtrRange(objectPtr, 0x38);
     if (!object)
     {
         return;
@@ -1656,7 +1672,7 @@ static void hookCompactTransparentBlit16(NativeRuntime* runtime, uint64_t addres
     uint32_t sourceHeaderPtr = readLe32(object + 0x04);
     uint32_t sourcePtr = readLe32(object + 0x18);
     uint32_t destPtr = readLe32(object + 0x1c);
-    const uint8_t* sourceHeader = (const uint8_t*)toHostPtr(sourceHeaderPtr);
+    const uint8_t* sourceHeader = (const uint8_t*)toHostPtrRange(sourceHeaderPtr, sizeof(uint16_t));
     if (!sourceHeader)
     {
         return;
@@ -1678,8 +1694,12 @@ static void hookCompactTransparentBlit16(NativeRuntime* runtime, uint64_t addres
     uint16_t* dest = NULL;
     if (columns > 0 && rows > 0)
     {
-        source = (const uint16_t*)toHostPtr(sourcePtr);
-        dest = (uint16_t*)toHostPtr(destPtr);
+        uint64_t sourceBytes = ((uint64_t)(rows - 1) * sourceStridePixels + columns) * sizeof(uint16_t);
+        uint64_t destBytes = ((uint64_t)(rows - 1) * destStridePixels + columns) * sizeof(uint16_t);
+        source = sourceBytes <= UINT32_MAX ?
+            (const uint16_t*)toHostPtrRange(sourcePtr, (uint32_t)sourceBytes) : NULL;
+        dest = destBytes <= UINT32_MAX ?
+            (uint16_t*)toHostPtrRange(destPtr, (uint32_t)destBytes) : NULL;
         if (!source || !dest)
         {
             return;
@@ -1739,7 +1759,7 @@ static void hookIndexedBlit8ToRgb565(NativeRuntime* runtime, uint64_t address, u
     (void)userData;
 
     uint32_t objectPtr = readRegister32(runtime, RUNTIME_REG_A0);
-    uint8_t* object = (uint8_t*)toHostPtr(objectPtr);
+    uint8_t* object = (uint8_t*)toHostPtrRange(objectPtr, 0x38);
     if (!object)
     {
         return;
@@ -1767,11 +1787,9 @@ static void hookIndexedBlit8ToRgb565(NativeRuntime* runtime, uint64_t address, u
     uint32_t sourceHeaderPtr = readLe32(object + 0x04);
     uint16_t transparent = (uint16_t)(object[0x0e] | ((uint16_t)object[0x0f] << 8));
 
-    uint16_t* palette = (uint16_t*)toHostPtr(palettePtr);
-    uint16_t* dest = (uint16_t*)toHostPtr(destPtr);
-    const uint8_t* source = (const uint8_t*)toHostPtr(sourcePtr);
-    const uint8_t* sourceHeader = (const uint8_t*)toHostPtr(sourceHeaderPtr);
-    if (!palette || !dest || !source || !sourceHeader)
+    uint16_t* palette = (uint16_t*)toHostPtrRange(palettePtr, 256u * sizeof(uint16_t));
+    const uint8_t* sourceHeader = (const uint8_t*)toHostPtrRange(sourceHeaderPtr, sizeof(uint16_t));
+    if (!palette || !sourceHeader)
     {
         return;
     }
@@ -1784,6 +1802,16 @@ static void hookIndexedBlit8ToRgb565(NativeRuntime* runtime, uint64_t address, u
         destStride = readGuestLe32(strideAddr);
     }
     if (sourceStride == 0 || destStride == 0 || sourceStride > 16384 || destStride > 16384)
+    {
+        return;
+    }
+    uint64_t sourceBytes = (uint64_t)(rows - 1) * sourceStride + columns;
+    uint64_t destBytes = ((uint64_t)(rows - 1) * destStride + columns) * sizeof(uint16_t);
+    const uint8_t* source = sourceBytes <= UINT32_MAX ?
+        (const uint8_t*)toHostPtrRange(sourcePtr, (uint32_t)sourceBytes) : NULL;
+    uint16_t* dest = destBytes <= UINT32_MAX ?
+        (uint16_t*)toHostPtrRange(destPtr, (uint32_t)destBytes) : NULL;
+    if (!source || !dest)
     {
         return;
     }
@@ -1836,7 +1864,7 @@ static void hookIndexedTransformBlit16(NativeRuntime* runtime, uint64_t address,
     static const uint32_t kRows = 240u;
     static const uint32_t kSourceBytes = kColumns * kRows * sizeof(uint32_t);
     static const uint32_t kDestBytes = kColumns * kRows * sizeof(uint16_t);
-    uint8_t* object = (uint8_t*)toHostPtr(objectPtr);
+    uint8_t* object = (uint8_t*)toHostPtrRange(objectPtr, 0x2a);
     const uint8_t* source = nativeRuntimeHostPointer(runtime, sourcePtr, kSourceBytes);
     uint16_t* dest = (uint16_t*)nativeRuntimeHostPointer(runtime, destPtr, kDestBytes);
     if (!object || !source || !dest)
@@ -1947,15 +1975,16 @@ static void hookPixelLoop16(NativeRuntime* runtime, uint64_t address, uint32_t s
         }
 
         uint32_t count = total - index;
-        uint16_t* dst = (uint16_t*)toHostPtr(dstPtr);
-        const uint16_t* src = (const uint16_t*)toHostPtr(srcPtr);
+        uint32_t copyBytes = count * sizeof(uint16_t);
+        uint16_t* dst = (uint16_t*)toHostPtrRange(dstPtr, copyBytes);
+        const uint16_t* src = (const uint16_t*)toHostPtrRange(srcPtr, copyBytes);
         if (!dst || !src)
         {
             return;
         }
 
-        memmove(dst, src, (size_t)count * sizeof(uint16_t));
-        trackFramebufferWrite(dstPtr, count * sizeof(uint16_t));
+        memmove(dst, src, copyBytes);
+        trackFramebufferWrite(dstPtr, copyBytes);
         uint32_t updatedDst = dstPtr + count * 2u;
         uint32_t updatedSrc = srcPtr + count * 2u;
         nativeRuntimeWriteRegister(runtime, RUNTIME_REG_A0, &updatedDst);
@@ -1988,7 +2017,8 @@ static void hookPixelLoop16(NativeRuntime* runtime, uint64_t address, uint32_t s
             return;
         }
 
-        uint16_t* dst = (uint16_t*)toHostPtr(basePtr);
+        uint32_t fillBytes = count * sizeof(uint16_t);
+        uint16_t* dst = (uint16_t*)toHostPtrRange(basePtr, fillBytes);
         if (!dst)
         {
             return;
@@ -2176,9 +2206,21 @@ RuntimeError runtimeCompatInstallHooks(NativeRuntime* runtime, GuestPackage* app
 
     if (runtimeLogProfileEnabled())
     {
-        printf("profile:compat precise_hooks=%u blit16_hooks=%u indexed8_hooks=%u indexed_transform_hooks=%u pixel16_hooks=%u mem_hooks=%u rowcopy_hooks=%u tiny_hooks=%u object_predicate_hooks=%u scan_size=0x%x\n",
-            hookCount, blitHookCount, indexedBlitHookCount, indexedTransformBlitHookCount, pixelLoopHookCount, memoryRoutineHookCount,
-            rowCopyHookCount, tinyPredicateHookCount, objectPredicateAggregateHookCount, scanSize);
+        printf(
+            "profile:compat precise_hooks=%u blit16_hooks=%u indexed8_hooks=%u "
+            "indexed_transform_hooks=%u pixel16_hooks=%u mem_hooks=%u "
+            "rowcopy_hooks=%u tiny_hooks=%u object_predicate_hooks=%u "
+            "scan_size=0x%x\n",
+            hookCount,
+            blitHookCount,
+            indexedBlitHookCount,
+            indexedTransformBlitHookCount,
+            pixelLoopHookCount,
+            memoryRoutineHookCount,
+            rowCopyHookCount,
+            tinyPredicateHookCount,
+            objectPredicateAggregateHookCount,
+            scanSize);
     }
     return RUNTIME_OK;
 }

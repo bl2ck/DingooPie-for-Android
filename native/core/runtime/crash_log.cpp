@@ -1,6 +1,5 @@
 #include "runtime/crash_log.h"
 
-#include "game/game_paths.h"
 #include "platform_services.h"
 
 #include <capstone/capstone.h>
@@ -33,8 +32,7 @@ static unsigned long crashLogProcessId(void)
 }
 
 static FILE* crashLogOpenForGame(const std::string& timestamp,
-    const char* gamePath, const std::string& saveDirectory,
-    std::string* outFileName)
+    const std::string& saveDirectory, std::string* outFileName)
 {
     char fileName[96] = {};
     snprintf(fileName, sizeof(fileName), "DingooPie-crash-%s-%lu.log",
@@ -45,20 +43,18 @@ static FILE* crashLogOpenForGame(const std::string& timestamp,
         *outFileName = fileName;
     }
 
-    if (!saveDirectory.empty())
+    if (!saveDirectory.empty() &&
+        !platformAndroidIsPrivateSaveDirectory(saveDirectory))
     {
         return platformAndroidOpenSaveFile(saveDirectory, fileName, "wb");
     }
 
-    std::string appPath = gamePath ? gamePath : "";
-    if (appPath.compare(0, strlen("android-content://"), "android-content://") == 0)
+    std::string logDirectory = platformAndroidGetLogDirectory();
+    if (logDirectory.empty())
     {
         return NULL;
     }
-
-    size_t separator = appPath.find_last_of("/\\");
-    std::string crashPath = separator == std::string::npos ? fileName :
-        appPath.substr(0, separator + 1) + fileName;
+    std::string crashPath = logDirectory + "/" + fileName;
     return fopen(crashPath.c_str(), "w");
 }
 
@@ -66,8 +62,9 @@ static FILE* crashLogOpen(const std::string& timestamp, const CrashLogContext& c
     std::string* outFileName)
 {
     std::string saveDirectory = platformAndroidGetSaveDirectory(
-        context.appPath ? context.appPath : "");
-    return crashLogOpenForGame(timestamp, context.appPath, saveDirectory, outFileName);
+        context.appPath ? context.appPath : "",
+        context.appSha256 ? context.appSha256 : "");
+    return crashLogOpenForGame(timestamp, saveDirectory, outFileName);
 }
 
 static std::string crashLogAndroidProperty(const char* name)
@@ -110,12 +107,14 @@ static void crashLogWriteUnderline(FILE* fp, char ch, size_t length)
     fputc('\n', fp);
 }
 
-static const size_t kCrashLogSeparatorWidth = 62;
+static const size_t kCrashLogSeparatorWidth = 72;
 
 static void crashLogWriteSection(FILE* fp, const char* title)
 {
-    fprintf(fp, "\n%s\n", title);
-    crashLogWriteUnderline(fp, '-', strlen(title));
+    fputc('\n', fp);
+    crashLogWriteUnderline(fp, '-', kCrashLogSeparatorWidth);
+    fprintf(fp, "[%s]\n", title);
+    crashLogWriteUnderline(fp, '-', kCrashLogSeparatorWidth);
 }
 
 static void crashLogWriteField(FILE* fp, const char* key, const char* format, ...)
@@ -426,7 +425,7 @@ bool crashLogWriteCcFailure(
     std::string* outFileName)
 {
     std::string timestamp = crashLogTimestamp();
-    FILE* fp = crashLogOpenForGame(timestamp, context.gamePath,
+    FILE* fp = crashLogOpenForGame(timestamp,
         context.saveDirectory ? context.saveDirectory : "", outFileName);
     if (!fp)
     {
@@ -456,6 +455,11 @@ bool crashLogWriteCcFailure(
     crashLogWriteField(fp, "cpsr", "0x%08x", context.cpsr);
     crashLogWriteField(fp, "unsupported_instruction", "0x%08x",
         context.unsupportedInstruction);
+    crashLogWriteField(fp, "unsupported_pc", "0x%08x", context.unsupportedPc);
+    crashLogWriteField(fp, "fault_address", "0x%08x", context.faultAddress);
+    crashLogWriteField(fp, "fault_size", "%u", context.faultSize);
+    crashLogWriteField(fp, "fault_access", "%s", context.faultFetch ? "fetch" :
+        (context.faultWrite ? "write" : "read"));
 
     crashLogWriteSection(fp, "ARM Registers");
     for (uint32_t row = 0; row < 4; ++row)
@@ -479,6 +483,13 @@ bool crashLogWriteCcFailure(
     crashLogWriteField(fp, "frames_submitted", "%u", context.framesSubmitted);
     crashLogWriteField(fp, "tasks_created", "%u", context.tasksCreated);
     crashLogWriteField(fp, "last_import", "%s", context.lastImport ? context.lastImport : "");
+    crashLogWriteField(fp, "last_import_pc", "0x%08x", context.lastImportPc);
+    crashLogWriteField(fp, "last_import_return", "0x%08x", context.lastImportReturnAddress);
+    crashLogWriteField(fp, "failed_task_index", "%u", context.failedTaskIndex);
+    crashLogWriteField(fp, "failed_task_entry", "0x%08x", context.failedTaskEntry);
+    crashLogWriteField(fp, "failed_task_stack", "0x%08x", context.failedTaskStack);
+    crashLogWriteField(fp, "failed_task_priority", "%u", context.failedTaskPriority);
+    crashLogWriteField(fp, "failed_task_delay_ticks", "%u", context.failedTaskDelayTicks);
 
     fclose(fp);
     return true;

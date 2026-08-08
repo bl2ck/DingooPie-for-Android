@@ -19,6 +19,9 @@
 #include "guest/guest_text_format.h"
 #include "config/compat_profile.h"
 #include "runtime/runtime_log.h"
+#include "runtime/profile_counter.h"
+#include "runtime/runtime_shared_text.h"
+#include "runtime/runtime_tick_clock.h"
 #include <chrono>
 #include <atomic>
 #include <pthread.h>
@@ -27,12 +30,16 @@
 #include <vector>
 #include <locale.h>
 #include <cstdlib>
+#include <mutex>
+#include <new>
 
 static void returnToRa(NativeRuntime* runtime);
 static GuestPackage* s_bridgeApp = NULL;
 static std::string s_bridgeAppSha256;
-static char s_lastTaskStopSummary[192] = "";
-static char s_lastHleSummary[192] = "";
+static RuntimeSharedText<192> s_lastTaskStopSummary;
+static RuntimeSharedText<192> s_lastStoppedHleSummary;
+static thread_local char s_threadLastHleSummary[192] = "";
+static RuntimeTickClock s_osTickClock;
 static std::atomic<bool> s_bridgeProfileEnabled(false);
 static std::atomic<double> s_runtimeSpeedScale(1.0);
 static std::atomic<bool> s_runtimeSpeedScaleForced(false);
@@ -49,45 +56,62 @@ struct RuntimeBridgeContext
 
 static std::vector<RuntimeBridgeContext> s_runtimeContexts;
 static pthread_mutex_t s_runtimeContextsMutex = PTHREAD_MUTEX_INITIALIZER;
+static std::mutex s_profileReportMutex;
 static void profilePrintAndReset(uint64_t now);
 
-struct HleProfileCounters
+enum HleProfileCounterId
 {
-    uint64_t lcdSetFrame;
-    uint64_t lcdFlip;
-    uint64_t osTimeGet;
-    uint64_t getTickCount;
-    uint64_t delayMs;
-    uint64_t delayMsTotal;
-    uint64_t udelay;
-    uint64_t udelayTotal;
-    uint64_t osTimeDly;
-    uint64_t osTimeDlyTotal;
-    uint64_t waveCanWrite;
-    uint64_t waveWrite;
-    uint64_t waveWriteBytes;
-    uint64_t semPend;
-    uint64_t semPost;
-    uint64_t semCreate;
-    uint64_t taskCreate;
-    uint64_t sysJudgeEvent;
-    uint64_t kbdStatus;
-    uint64_t dlResOpen;
-    uint64_t dlResRead;
-    uint64_t dlResReadBytes;
+    HLE_PROFILE_LCD_SET_FRAME = 0,
+    HLE_PROFILE_LCD_FLIP,
+    HLE_PROFILE_OS_TIME_GET,
+    HLE_PROFILE_GET_TICK_COUNT,
+    HLE_PROFILE_DELAY_MS,
+    HLE_PROFILE_DELAY_MS_TOTAL,
+    HLE_PROFILE_UDELAY,
+    HLE_PROFILE_UDELAY_TOTAL,
+    HLE_PROFILE_OS_TIME_DLY,
+    HLE_PROFILE_OS_TIME_DLY_TOTAL,
+    HLE_PROFILE_WAVE_CAN_WRITE,
+    HLE_PROFILE_WAVE_WRITE,
+    HLE_PROFILE_WAVE_WRITE_BYTES,
+    HLE_PROFILE_SEM_PEND,
+    HLE_PROFILE_SEM_POST,
+    HLE_PROFILE_SEM_CREATE,
+    HLE_PROFILE_TASK_CREATE,
+    HLE_PROFILE_SYS_JUDGE_EVENT,
+    HLE_PROFILE_KBD_STATUS,
+    HLE_PROFILE_DL_RES_OPEN,
+    HLE_PROFILE_DL_RES_READ,
+    HLE_PROFILE_DL_RES_READ_BYTES,
+    HLE_PROFILE_COUNTER_COUNT
 };
 
-static HleProfileCounters s_hleProfile = {};
+static RuntimeProfileCounter s_hleProfile[HLE_PROFILE_COUNTER_COUNT];
+static RuntimeProfileCounter s_bridgeProfileCalls;
 
-static bool hleProfileHasActivity(const HleProfileCounters& profile, uint64_t fbWrites, uint64_t fbWriteBytes)
+static void hleProfileAdd(HleProfileCounterId counter, uint64_t value = 1)
 {
-    return profile.lcdSetFrame || profile.lcdFlip || fbWrites || fbWriteBytes ||
-        profile.osTimeGet || profile.getTickCount || profile.delayMs || profile.delayMsTotal ||
-        profile.udelay || profile.udelayTotal || profile.osTimeDly || profile.osTimeDlyTotal ||
-        profile.waveCanWrite || profile.waveWrite || profile.waveWriteBytes ||
-        profile.semPend || profile.semPost || profile.semCreate || profile.taskCreate ||
-        profile.sysJudgeEvent || profile.kbdStatus || profile.dlResOpen ||
-        profile.dlResRead || profile.dlResReadBytes;
+    if (s_bridgeProfileEnabled.load(std::memory_order_relaxed))
+    {
+        s_hleProfile[counter].add(value);
+    }
+}
+
+static bool hleProfileHasActivity(
+    const uint64_t* profile, uint64_t fbWrites, uint64_t fbWriteBytes)
+{
+    if (fbWrites || fbWriteBytes)
+    {
+        return true;
+    }
+    for (int index = 0; index < HLE_PROFILE_COUNTER_COUNT; ++index)
+    {
+        if (profile[index])
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void bridge_set_game_identity(const char* sha256Hex)
@@ -101,14 +125,19 @@ const char* bridge_get_game_identity(void)
     return s_bridgeAppSha256.c_str();
 }
 
-const char* bridge_get_last_task_stop_summary(void)
+void bridge_copy_last_task_stop_summary(char* output, size_t outputSize)
 {
-    return s_lastTaskStopSummary;
+    s_lastTaskStopSummary.copy(output, outputSize);
 }
 
-const char* bridge_get_last_hle_summary(void)
+void bridge_copy_last_hle_summary(char* output, size_t outputSize)
 {
-    return s_lastHleSummary;
+    if (s_threadLastHleSummary[0])
+    {
+        snprintf(output, outputSize, "%s", s_threadLastHleSummary);
+        return;
+    }
+    s_lastStoppedHleSummary.copy(output, outputSize);
 }
 
 bool bridge_try_fast_return_hook(uint32_t address, uint32_t* returnValue);
@@ -121,29 +150,18 @@ void bridge_profile_tick(void)
     }
 }
 
-static void profilePrintAndReset(uint64_t now)
+static void profilePrintHleAndReset(void)
 {
-    static uint64_t lastTicks = 0;
-    if (!runtimeLogProfileEnabled() || !s_bridgeProfileEnabled.load())
-    {
-        return;
-    }
-    if (!lastTicks)
-    {
-        lastTicks = now;
-        return;
-    }
-    if (now - lastTicks < runtimeLogProfileIntervalMs())
-    {
-        return;
-    }
-
     uint64_t fbWrites = consumeFramebufferWriteCount();
     uint64_t fbWriteBytes = consumeFramebufferWriteBytes();
-    if (!hleProfileHasActivity(s_hleProfile, fbWrites, fbWriteBytes) &&
+    uint64_t profile[HLE_PROFILE_COUNTER_COUNT] = {};
+    for (int index = 0; index < HLE_PROFILE_COUNTER_COUNT; ++index)
+    {
+        profile[index] = s_hleProfile[index].take();
+    }
+    if (!hleProfileHasActivity(profile, fbWrites, fbWriteBytes) &&
         !runtimeLogShouldPrintEmptyProfile())
     {
-        lastTicks = now;
         return;
     }
 
@@ -152,33 +170,31 @@ static void profilePrintAndReset(uint64_t now)
         "ostimedly=%llu/%lluticks wave_can=%llu wave_write=%llu/%llub "
         "sem=%llu/%llu/%llu task=%llu sys_event=%llu kbd=%llu "
         "dl_res=%llu/%llu/%llub\n",
-        (unsigned long long)s_hleProfile.lcdSetFrame,
-        (unsigned long long)s_hleProfile.lcdFlip,
+        (unsigned long long)profile[HLE_PROFILE_LCD_SET_FRAME],
+        (unsigned long long)profile[HLE_PROFILE_LCD_FLIP],
         (unsigned long long)fbWrites,
         (unsigned long long)fbWriteBytes,
-        (unsigned long long)s_hleProfile.osTimeGet,
-        (unsigned long long)s_hleProfile.getTickCount,
-        (unsigned long long)s_hleProfile.delayMs,
-        (unsigned long long)s_hleProfile.delayMsTotal,
-        (unsigned long long)s_hleProfile.udelay,
-        (unsigned long long)s_hleProfile.udelayTotal,
-        (unsigned long long)s_hleProfile.osTimeDly,
-        (unsigned long long)s_hleProfile.osTimeDlyTotal,
-        (unsigned long long)s_hleProfile.waveCanWrite,
-        (unsigned long long)s_hleProfile.waveWrite,
-        (unsigned long long)s_hleProfile.waveWriteBytes,
-        (unsigned long long)s_hleProfile.semCreate,
-        (unsigned long long)s_hleProfile.semPend,
-        (unsigned long long)s_hleProfile.semPost,
-        (unsigned long long)s_hleProfile.taskCreate,
-        (unsigned long long)s_hleProfile.sysJudgeEvent,
-        (unsigned long long)s_hleProfile.kbdStatus,
-        (unsigned long long)s_hleProfile.dlResOpen,
-        (unsigned long long)s_hleProfile.dlResRead,
-        (unsigned long long)s_hleProfile.dlResReadBytes);
+        (unsigned long long)profile[HLE_PROFILE_OS_TIME_GET],
+        (unsigned long long)profile[HLE_PROFILE_GET_TICK_COUNT],
+        (unsigned long long)profile[HLE_PROFILE_DELAY_MS],
+        (unsigned long long)profile[HLE_PROFILE_DELAY_MS_TOTAL],
+        (unsigned long long)profile[HLE_PROFILE_UDELAY],
+        (unsigned long long)profile[HLE_PROFILE_UDELAY_TOTAL],
+        (unsigned long long)profile[HLE_PROFILE_OS_TIME_DLY],
+        (unsigned long long)profile[HLE_PROFILE_OS_TIME_DLY_TOTAL],
+        (unsigned long long)profile[HLE_PROFILE_WAVE_CAN_WRITE],
+        (unsigned long long)profile[HLE_PROFILE_WAVE_WRITE],
+        (unsigned long long)profile[HLE_PROFILE_WAVE_WRITE_BYTES],
+        (unsigned long long)profile[HLE_PROFILE_SEM_CREATE],
+        (unsigned long long)profile[HLE_PROFILE_SEM_PEND],
+        (unsigned long long)profile[HLE_PROFILE_SEM_POST],
+        (unsigned long long)profile[HLE_PROFILE_TASK_CREATE],
+        (unsigned long long)profile[HLE_PROFILE_SYS_JUDGE_EVENT],
+        (unsigned long long)profile[HLE_PROFILE_KBD_STATUS],
+        (unsigned long long)profile[HLE_PROFILE_DL_RES_OPEN],
+        (unsigned long long)profile[HLE_PROFILE_DL_RES_READ],
+        (unsigned long long)profile[HLE_PROFILE_DL_RES_READ_BYTES]);
 
-    memset(&s_hleProfile, 0, sizeof(s_hleProfile));
-    lastTicks = now;
 }
 
 static bool envTraceEnabled(const char* name)
@@ -199,25 +215,24 @@ static uint32_t parseTraceHex(const char* name)
 
 static bool traceRangeOverlaps(uint32_t address, uint32_t size)
 {
-    static bool initialized = false;
-    static uint32_t traceStart = 0;
-    static uint32_t traceEnd = 0;
-
-    if (!initialized)
+    struct TraceRange
     {
-        traceStart = parseTraceHex("DINGOO_PIE_TRACE_MEM_START");
-        traceEnd = parseTraceHex("DINGOO_PIE_TRACE_MEM_END");
-        initialized = true;
-    }
+        uint32_t start;
+        uint32_t end;
+    };
+    static const TraceRange trace = {
+        parseTraceHex("DINGOO_PIE_TRACE_MEM_START"),
+        parseTraceHex("DINGOO_PIE_TRACE_MEM_END")
+    };
 
-    if (!traceStart || !traceEnd)
+    if (!trace.start || !trace.end)
     {
         return true;
     }
 
     uint64_t begin = address;
     uint64_t end = begin + size;
-    return begin < traceEnd && end > traceStart;
+    return begin < trace.end && end > trace.start;
 }
 
 static bool shouldTraceCopy(uint32_t address, uint32_t size)
@@ -347,13 +362,11 @@ static uint64_t scaledHostDelayMicros(uint64_t originalUs)
 
 static bool adaptiveHostDelayEnabled(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_ADAPTIVE_DELAY");
-        enabled = (!value || !value[0] || strcmp(value, "0") != 0) ? 1 : 0;
-    }
-    return enabled != 0;
+        return !value || !value[0] || strcmp(value, "0") != 0;
+    }();
+    return enabled;
 }
 
 static uint64_t hostNowMicros(void)
@@ -494,11 +507,10 @@ static bool isMainRuntimeContext(NativeRuntime* runtime)
     return isMainRuntime;
 }
 
-static CompatGuestExitDecision taskStopGuestExitDecision(uint32_t ra, uint32_t a0)
+static CompatGuestExitDecision taskStopGuestExitDecision(uint32_t ra)
 {
     CompatTaskStopExitContext context;
     context.returnAddress = ra;
-    context.argument0 = a0;
     context.frontendQuitRequested = frontendQuitRequested();
     context.sawSuspiciousFileOpenFailure = fsys_saw_suspicious_open_failure();
     return compatTaskStopGuestExitDecision(s_bridgeAppSha256.c_str(), &context);
@@ -510,11 +522,28 @@ static void requestGuestExit(NativeRuntime* runtime, const char* reason)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_RA, &ra);
     printf("hle: guest exit requested by %s ra=0x%08x\n",
         reason ? reason : "<unknown>", ra);
+    nativeRuntimeRequestStop(runtime);
     taskSchedulerRequestShutdown(reason);
     uint32_t ret = 0;
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_PC, &kGuestExitPc);
     frontendRequestGameExit();
+}
+
+static bool requestCompatFileOpenExit(NativeRuntime* runtime, uint32_t filePointer)
+{
+    uint32_t returnAddress = 0;
+    nativeRuntimeReadRegister(runtime, RUNTIME_REG_RA, &returnAddress);
+    CompatGuestExitDecision decision = compatFileOpenFailureGuestExitDecision(
+        s_bridgeAppSha256.c_str(), returnAddress, filePointer == 0,
+        fsys_saw_successful_save_write());
+    if (!decision.shouldExit)
+    {
+        return false;
+    }
+
+    requestGuestExit(runtime, decision.label);
+    return true;
 }
 
 static void stopCurrentGuestRuntime(NativeRuntime* runtime, const char* reason)
@@ -527,11 +556,17 @@ static void stopCurrentGuestRuntime(NativeRuntime* runtime, const char* reason)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &a0);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_PC, &pc);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_SP, &sp);
-    snprintf(s_lastTaskStopSummary, sizeof(s_lastTaskStopSummary),
+    char summary[192];
+    snprintf(summary, sizeof(summary),
         "%s pc=0x%08x ra=0x%08x a0=0x%08x sp=0x%08x main=%u",
         reason ? reason : "<unknown>", pc, ra, a0, sp,
         isMainRuntimeContext(runtime) ? 1u : 0u);
-    CompatGuestExitDecision exitDecision = taskStopGuestExitDecision(ra, a0);
+    s_lastTaskStopSummary.set(summary);
+    if (s_threadLastHleSummary[0])
+    {
+        s_lastStoppedHleSummary.set(s_threadLastHleSummary);
+    }
+    CompatGuestExitDecision exitDecision = taskStopGuestExitDecision(ra);
     printf("hle: task stop reason=%s app_sha256=%s pc=0x%08x ra=0x%08x a0=0x%08x main=%u promoted=%u",
         reason ? reason : "<unknown>",
         s_bridgeAppSha256.c_str(),
@@ -712,16 +747,10 @@ static void br__to_locale_ansi(NativeRuntime* runtime)
     br_common(runtime);
 }
 
-static uint64_t s_tempTicks = 0;
 // Returns guest OS ticks elapsed since the current app runtime started.
 uint32_t OSTimeGet(void)
 {
-    if (s_tempTicks == 0)
-    {
-        s_tempTicks = SDL_GetTicks64();
-    }
-
-    uint64_t tempTicks = SDL_GetTicks64() - s_tempTicks;
+    uint64_t tempTicks = s_osTickClock.elapsed(SDL_GetTicks64());
     double speedScale = runtimeSpeedScale();
     if (speedScale > 0.0 && speedScale < 1.0)
     {
@@ -734,9 +763,23 @@ uint32_t OSTimeGet(void)
     return (uint32_t)tempTicks;
 }
 
+uint32_t bridge_capture_os_ticks(void)
+{
+    return OSTimeGet();
+}
+
+void bridge_restore_os_ticks(uint32_t ticks)
+{
+    double speedScale = runtimeSpeedScale();
+    double effectiveScale = (speedScale > 0.0 && speedScale < 1.0) ? speedScale : 1.0;
+    uint64_t elapsedMs = ((uint64_t)ticks * 1000ull) / OS_TICKS_PER_SEC;
+    uint64_t hostElapsedMs = (uint64_t)((double)elapsedMs / effectiveScale);
+    s_osTickClock.restoreElapsed(SDL_GetTicks64(), hostElapsedMs);
+}
+
 static void br_GetTickCount(NativeRuntime* runtime)
 {
-    s_hleProfile.getTickCount++;
+    hleProfileAdd(HLE_PROFILE_GET_TICK_COUNT);
     uint64_t ticks = OSTimeGet();
     uint64_t value = (ticks * 1000000ull) / OS_TICKS_PER_SEC;
     uint32_t ret = value & 0xFFFFFFFF;
@@ -749,7 +792,7 @@ static void br_GetTickCount(NativeRuntime* runtime)
 
 static void br_OSTimeGet(NativeRuntime* runtime)
 {
-    s_hleProfile.osTimeGet++;
+    hleProfileAdd(HLE_PROFILE_OS_TIME_GET);
     uint32_t tick_time_10ms = OSTimeGet();
 
     uint32_t ret = tick_time_10ms;
@@ -762,7 +805,7 @@ static void br_OSTimeGet(NativeRuntime* runtime)
 
 static void br__kbd_get_status(NativeRuntime* runtime)
 {
-    s_hleProfile.kbdStatus++;
+    hleProfileAdd(HLE_PROFILE_KBD_STATUS);
 
     uint32_t ksPtr;
     uint32_t pc = 0;
@@ -773,7 +816,7 @@ static void br__kbd_get_status(NativeRuntime* runtime)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_RA, &ra);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_SP, &sp);
 
-    GuestKeyStatus* ks = (GuestKeyStatus*)toHostPtr(ksPtr);
+    GuestKeyStatus* ks = (GuestKeyStatus*)toHostPtrRange(ksPtr, sizeof(GuestKeyStatus));
     if (ks)
     {
         _kbd_get_status(ks);
@@ -803,6 +846,144 @@ struct DingooSemaphore
 };
 
 static DingooSemaphore* s_semaphore_map[128] = { NULL };
+static pthread_mutex_t s_semaphore_map_mutex = PTHREAD_MUTEX_INITIALIZER;
+static const uint8_t kOsInvalidEventError = 1;
+static const uint8_t kOsTimeoutError = 10;
+
+uint32_t bridge_semaphore_state_count(void)
+{
+    return (uint32_t)(sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0]));
+}
+
+void bridge_capture_semaphore_counts(uint32_t* out, uint32_t count)
+{
+    if (!out || count == 0)
+    {
+        return;
+    }
+    uint32_t capacity = bridge_semaphore_state_count();
+    for (uint32_t index = 0; index < count; ++index)
+    {
+        uint32_t value = 0;
+        if (index < capacity && s_semaphore_map[index])
+        {
+            DingooSemaphore* semaphore = s_semaphore_map[index];
+            pthread_mutex_lock(&semaphore->mutex);
+            value = semaphore->count.load(std::memory_order_acquire);
+            pthread_mutex_unlock(&semaphore->mutex);
+        }
+        out[index] = value;
+    }
+}
+
+bool bridge_restore_semaphore_counts(const uint32_t* counts, uint32_t count)
+{
+    if (!counts || count != bridge_semaphore_state_count())
+    {
+        return false;
+    }
+    for (uint32_t index = 0; index < count; ++index)
+    {
+        DingooSemaphore* semaphore = s_semaphore_map[index];
+        if (!semaphore)
+        {
+            if (counts[index] != 0)
+            {
+                return false;
+            }
+            continue;
+        }
+        pthread_mutex_lock(&semaphore->mutex);
+        semaphore->count.store(counts[index], std::memory_order_release);
+        pthread_cond_broadcast(&semaphore->cond);
+        pthread_mutex_unlock(&semaphore->mutex);
+    }
+    return true;
+}
+
+enum DingooSemaphorePendResult
+{
+    DINGOO_SEMAPHORE_ACQUIRED,
+    DINGOO_SEMAPHORE_INVALID,
+    DINGOO_SEMAPHORE_TIMEOUT,
+    DINGOO_SEMAPHORE_INTERRUPTED
+};
+
+static DingooSemaphore* findDingooSemaphore(uint32_t eventVal)
+{
+    if (eventVal == 0 ||
+        eventVal >= sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0]))
+    {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&s_semaphore_map_mutex);
+    DingooSemaphore* sem = s_semaphore_map[eventVal];
+    pthread_mutex_unlock(&s_semaphore_map_mutex);
+    return sem;
+}
+
+static void releaseDingooSemaphores(void)
+{
+    DingooSemaphore* semaphores[sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0])] = {};
+    pthread_mutex_lock(&s_semaphore_map_mutex);
+    memcpy(semaphores, s_semaphore_map, sizeof(s_semaphore_map));
+    memset(s_semaphore_map, 0, sizeof(s_semaphore_map));
+    pthread_mutex_unlock(&s_semaphore_map_mutex);
+
+    for (size_t index = 1; index < sizeof(semaphores) / sizeof(semaphores[0]); ++index)
+    {
+        DingooSemaphore* sem = semaphores[index];
+        if (!sem)
+        {
+            continue;
+        }
+        pthread_cond_destroy(&sem->cond);
+        pthread_mutex_destroy(&sem->mutex);
+        delete sem;
+    }
+}
+
+static uint32_t createDingooSemaphore(uint32_t count)
+{
+    DingooSemaphore* sem = new (std::nothrow) DingooSemaphore();
+    if (!sem)
+    {
+        return 0;
+    }
+    int mutexRet = pthread_mutex_init(&sem->mutex, NULL);
+    int condRet = mutexRet ? -1 : pthread_cond_init(&sem->cond, NULL);
+    if (mutexRet || condRet)
+    {
+        if (!mutexRet)
+        {
+            pthread_mutex_destroy(&sem->mutex);
+        }
+        delete sem;
+        return 0;
+    }
+    sem->count.store(count, std::memory_order_release);
+
+    uint32_t index = 1;
+    pthread_mutex_lock(&s_semaphore_map_mutex);
+    for (; index < sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0]); ++index)
+    {
+        if (!s_semaphore_map[index])
+        {
+            s_semaphore_map[index] = sem;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_semaphore_map_mutex);
+    if (index >= sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0]))
+    {
+        pthread_cond_destroy(&sem->cond);
+        pthread_mutex_destroy(&sem->mutex);
+        delete sem;
+        return 0;
+    }
+    return index;
+}
 
 static void waitHlePauseResume(void)
 {
@@ -823,15 +1004,12 @@ static timespec hostTimespecAfterMillis(uint32_t millis)
     return ts;
 }
 
-static bool dingooSemaphorePend(DingooSemaphore* sem, NativeRuntime* runtime, bool* interrupted)
+static DingooSemaphorePendResult dingooSemaphorePend(DingooSemaphore* sem,
+    NativeRuntime* runtime, uint32_t timeoutTicks)
 {
     if (!sem)
     {
-        return false;
-    }
-    if (interrupted)
-    {
-        *interrupted = false;
+        return DINGOO_SEMAPHORE_INVALID;
     }
 
     uint32_t current = sem->count.load(std::memory_order_acquire);
@@ -842,20 +1020,45 @@ static bool dingooSemaphorePend(DingooSemaphore* sem, NativeRuntime* runtime, bo
                 std::memory_order_acq_rel,
                 std::memory_order_acquire))
         {
-            return true;
+            return DINGOO_SEMAPHORE_ACQUIRED;
         }
     }
+
+    using namespace std::chrono;
+    const bool hasTimeout = timeoutTicks != 0;
+    const uint64_t timeoutMicros = hasTimeout ?
+        ((uint64_t)timeoutTicks * 1000000ull) / OS_TICKS_PER_SEC : 0;
+    steady_clock::time_point deadline = steady_clock::now() +
+        microseconds(timeoutMicros);
 
     pthread_mutex_lock(&sem->mutex);
     while ((current = sem->count.load(std::memory_order_acquire)) == 0)
     {
-        waitHlePauseResume();
-        timespec deadline = hostTimespecAfterMillis(10);
-        pthread_cond_timedwait(&sem->cond, &sem->mutex, &deadline);
+        if (nativeRuntimeStopRequested(runtime))
+        {
+            pthread_mutex_unlock(&sem->mutex);
+            return DINGOO_SEMAPHORE_INTERRUPTED;
+        }
+        if (hasTimeout && steady_clock::now() >= deadline)
+        {
+            pthread_mutex_unlock(&sem->mutex);
+            return DINGOO_SEMAPHORE_TIMEOUT;
+        }
+
+        pthread_mutex_unlock(&sem->mutex);
+        steady_clock::time_point pauseBegin = steady_clock::now();
+        bool paused = pauseGateWaitForResume();
+        if (paused && hasTimeout)
+        {
+            deadline += steady_clock::now() - pauseBegin;
+        }
+        pthread_mutex_lock(&sem->mutex);
+        timespec waitDeadline = hostTimespecAfterMillis(10);
+        pthread_cond_timedwait(&sem->cond, &sem->mutex, &waitDeadline);
     }
     sem->count.store(current - 1, std::memory_order_release);
     pthread_mutex_unlock(&sem->mutex);
-    return true;
+    return DINGOO_SEMAPHORE_ACQUIRED;
 }
 
 static bool dingooSemaphorePost(DingooSemaphore* sem)
@@ -875,41 +1078,15 @@ static bool dingooSemaphorePost(DingooSemaphore* sem)
 //OS_EVENT* OSSemCreate(uint16_t cnt);
 static void br_OSSemCreate(NativeRuntime* runtime)
 {
-    s_hleProfile.semCreate++;
+    hleProfileAdd(HLE_PROFILE_SEM_CREATE);
 
-    uint32_t index = 1;
     uint32_t cnt;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &cnt);
-
-    DingooSemaphore* sem = (DingooSemaphore*)malloc(sizeof(DingooSemaphore));
-    if (!sem)
+    uint32_t ret = createDingooSemaphore(cnt);
+    if (!ret)
     {
-        printf("hle: failed to allocate semaphore\n");
-        assert(0);
+        printf("hle: semaphore slot allocation failed\n");
     }
-    int mutexRet = pthread_mutex_init(&sem->mutex, NULL);
-    int condRet = pthread_cond_init(&sem->cond, NULL);
-    if (mutexRet || condRet)
-    {
-        printf("hle: semaphore init failed mutex=%d cond=%d\n", mutexRet, condRet);
-        assert(0);
-    }
-    sem->count.store(cnt, std::memory_order_release);
-    for (; index < sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0]); ++index)
-    {
-        if (s_semaphore_map[index] == NULL)
-        {
-            break;
-        }
-    }
-    if (index >= sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0]))
-    {
-        printf("hle: semaphore slot allocation failed errno=%u index=%d\n", errno, index);
-        assert(0);
-    }
-    s_semaphore_map[index] = sem;
-
-    uint32_t ret = index;
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
 
     uint32_t pc;
@@ -925,7 +1102,7 @@ extern uint8_t   OSSemPost(OS_EVENT* event);
 
 static void br_OSSemPend(NativeRuntime* runtime)
 {
-    s_hleProfile.semPend++;
+    hleProfileAdd(HLE_PROFILE_SEM_PEND);
 
     uint32_t eventVal;
     uint32_t timeout;
@@ -934,16 +1111,23 @@ static void br_OSSemPend(NativeRuntime* runtime)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A1, &timeout);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A2, &errorPtr);
 
-    DingooSemaphore* sem = s_semaphore_map[eventVal];
-    bool interrupted = false;
-    if (!dingooSemaphorePend(sem, runtime, &interrupted))
+    DingooSemaphore* sem = findDingooSemaphore(eventVal);
+    DingooSemaphorePendResult result = dingooSemaphorePend(sem, runtime, timeout);
+    if (result != DINGOO_SEMAPHORE_ACQUIRED)
     {
-        if (interrupted)
+        if (result == DINGOO_SEMAPHORE_INTERRUPTED)
         {
             return;
         }
         printf("hle: semaphore pend failed index=%u timeout=%u\n", eventVal, timeout);
-        assert(0);
+        uint8_t* error = (uint8_t*)toHostPtr(errorPtr);
+        if (error)
+        {
+            *error = result == DINGOO_SEMAPHORE_TIMEOUT ?
+                kOsTimeoutError : kOsInvalidEventError;
+        }
+        returnToRa(runtime);
+        return;
     }
 
     uint8_t* error = (uint8_t*)toHostPtr(errorPtr);
@@ -959,16 +1143,19 @@ static void br_OSSemPend(NativeRuntime* runtime)
 
 static void br_OSSemPost(NativeRuntime* runtime)
 {
-    s_hleProfile.semPost++;
+    hleProfileAdd(HLE_PROFILE_SEM_POST);
 
     uint32_t eventVal;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &eventVal);
 
-    DingooSemaphore* sem = s_semaphore_map[eventVal];
+    DingooSemaphore* sem = findDingooSemaphore(eventVal);
     if (!dingooSemaphorePost(sem))
     {
         printf("hle: semaphore post failed index=%u\n", eventVal);
-        assert(0);
+        uint32_t retVal = kOsInvalidEventError;
+        nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &retVal);
+        returnToRa(runtime);
+        return;
     }
 
     uint32_t retVal = OS_NO_ERR;
@@ -982,39 +1169,56 @@ static void br_OSSemPost(NativeRuntime* runtime)
 bool bridge_fast_os_sem_pend(uint32_t eventVal, uint32_t timeout, uint32_t errorPtr,
     NativeRuntime* runtime, bool* interrupted)
 {
-    (void)timeout;
     if (interrupted)
     {
         *interrupted = false;
     }
-    if (eventVal >= sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0]) || !s_semaphore_map[eventVal])
+    DingooSemaphore* sem = findDingooSemaphore(eventVal);
+    if (!sem)
     {
-        return false;
+        uint8_t* error = (uint8_t*)toHostPtr(errorPtr);
+        if (error)
+        {
+            *error = kOsInvalidEventError;
+        }
+        return true;
     }
 
-    s_hleProfile.semPend++;
-    if (!dingooSemaphorePend(s_semaphore_map[eventVal], runtime, interrupted))
+    hleProfileAdd(HLE_PROFILE_SEM_PEND);
+    DingooSemaphorePendResult result = dingooSemaphorePend(sem, runtime, timeout);
+    if (result == DINGOO_SEMAPHORE_INTERRUPTED)
     {
+        if (interrupted)
+        {
+            *interrupted = true;
+        }
         return false;
     }
 
     uint8_t* error = (uint8_t*)toHostPtr(errorPtr);
     if (error)
     {
-        *error = OS_NO_ERR;
+        *error = result == DINGOO_SEMAPHORE_ACQUIRED ? OS_NO_ERR :
+            (result == DINGOO_SEMAPHORE_TIMEOUT ?
+                kOsTimeoutError : kOsInvalidEventError);
     }
     return true;
 }
 
 bool bridge_fast_os_sem_post(uint32_t eventVal, uint32_t* returnValue)
 {
-    if (eventVal >= sizeof(s_semaphore_map) / sizeof(s_semaphore_map[0]) || !s_semaphore_map[eventVal])
+    DingooSemaphore* sem = findDingooSemaphore(eventVal);
+    if (!sem)
     {
-        return false;
+        if (returnValue)
+        {
+            *returnValue = kOsInvalidEventError;
+        }
+        return true;
     }
 
-    s_hleProfile.semPost++;
-    if (!dingooSemaphorePost(s_semaphore_map[eventVal]))
+    hleProfileAdd(HLE_PROFILE_SEM_POST);
+    if (!dingooSemaphorePost(sem))
     {
         return false;
     }
@@ -1028,7 +1232,7 @@ bool bridge_fast_os_sem_post(uint32_t eventVal, uint32_t* returnValue)
 
 static void br_OSTaskCreate(NativeRuntime* runtime)
 {
-    s_hleProfile.taskCreate++;
+    hleProfileAdd(HLE_PROFILE_TASK_CREATE);
 
     uint32_t taskFuncAddr;
     uint32_t dataPtr;
@@ -1063,7 +1267,7 @@ static void br_waveout_open(NativeRuntime* runtime)
     uint32_t ret = 0;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &argsPtr);
 
-    waveout_args* args = (waveout_args*)toHostPtr(argsPtr);
+    waveout_args* args = (waveout_args*)toHostPtrRange(argsPtr, sizeof(waveout_args));
     waveout_args* argsCpy = (waveout_args*)malloc(sizeof(waveout_args));
     if (args != NULL && argsCpy != NULL)
     {
@@ -1086,13 +1290,13 @@ static void br_waveout_write(NativeRuntime* runtime)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &instPtr);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A1, &bufferPtr);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A2, &count);
-    s_hleProfile.waveWrite++;
-    s_hleProfile.waveWriteBytes += count;
+    hleProfileAdd(HLE_PROFILE_WAVE_WRITE);
+    hleProfileAdd(HLE_PROFILE_WAVE_WRITE_BYTES, count);
 
     uint32_t ret = 1;
     if (!waveout_skips_audio_output())
     {
-        void* src = toHostPtr(bufferPtr);
+        void* src = toHostPtrRange(bufferPtr, count);
         if (src && count > 0)
         {
             char* buff = (char*)malloc(count);
@@ -1138,7 +1342,7 @@ static void br_HP_Mute_sw(NativeRuntime* runtime)
 
 static void br_waveout_can_write(NativeRuntime* runtime)
 {
-    s_hleProfile.waveCanWrite++;
+    hleProfileAdd(HLE_PROFILE_WAVE_CAN_WRITE);
     uint32_t ret = waveout_can_write();
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
 
@@ -1149,13 +1353,13 @@ static void br_waveout_can_write(NativeRuntime* runtime)
 
 bool bridge_fast_waveout_write(uint32_t instPtr, uint32_t bufferPtr, uint32_t count, uint32_t* returnValue)
 {
-    s_hleProfile.waveWrite++;
-    s_hleProfile.waveWriteBytes += count;
+    hleProfileAdd(HLE_PROFILE_WAVE_WRITE);
+    hleProfileAdd(HLE_PROFILE_WAVE_WRITE_BYTES, count);
 
     uint32_t ret = 1;
     if (!waveout_skips_audio_output())
     {
-        void* src = toHostPtr(bufferPtr);
+        void* src = toHostPtrRange(bufferPtr, count);
         if (!src || count == 0)
         {
             ret = 0;
@@ -1181,7 +1385,7 @@ bool bridge_fast_waveout_write(uint32_t instPtr, uint32_t bufferPtr, uint32_t co
 
 uint32_t bridge_fast_waveout_can_write(void)
 {
-    s_hleProfile.waveCanWrite++;
+    hleProfileAdd(HLE_PROFILE_WAVE_CAN_WRITE);
     return waveout_can_write();
 }
 
@@ -1216,7 +1420,7 @@ extern void updateFb(void);
 
 static void br__lcd_set_frame(NativeRuntime* runtime)
 {
-    s_hleProfile.lcdSetFrame++;
+    hleProfileAdd(HLE_PROFILE_LCD_SET_FRAME);
     updateFb();
 
     br_common(runtime);
@@ -1239,7 +1443,7 @@ static void br_lcd_get_cframe(NativeRuntime* runtime)
 
 static void br_lcd_flip(NativeRuntime* runtime)
 {
-    s_hleProfile.lcdFlip++;
+    hleProfileAdd(HLE_PROFILE_LCD_FLIP);
     framebufferRequestUpdate();
     returnToRa(runtime);
 }
@@ -1291,8 +1495,8 @@ static void br_delay_ms(NativeRuntime* runtime)
 {
     uint32_t ms;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &ms);
-    s_hleProfile.delayMs++;
-    s_hleProfile.delayMsTotal += ms;
+    hleProfileAdd(HLE_PROFILE_DELAY_MS);
+    hleProfileAdd(HLE_PROFILE_DELAY_MS_TOTAL, ms);
     sleepScaledHostDelayMicros((uint64_t)ms * 1000ull);
     returnToRa(runtime);
 }
@@ -1301,8 +1505,8 @@ static void br_udelay(NativeRuntime* runtime)
 {
     uint32_t us;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &us);
-    s_hleProfile.udelay++;
-    s_hleProfile.udelayTotal += us;
+    hleProfileAdd(HLE_PROFILE_UDELAY);
+    hleProfileAdd(HLE_PROFILE_UDELAY_TOTAL, us);
     sleepScaledHostDelayMicros(us);
     returnToRa(runtime);
 }
@@ -1329,7 +1533,7 @@ static void br_fread(NativeRuntime* runtime)
         read_size = size * count;
     }
 
-    GuestFile *guestFile = (GuestFile*)toHostPtr(stream);
+    GuestFile *guestFile = (GuestFile*)toHostPtrRange(stream, sizeof(GuestFile));
     if (!guestFile)
     {
         read_ret =  -1;
@@ -1338,7 +1542,8 @@ static void br_fread(NativeRuntime* runtime)
     {
         if (guestFile->type == GUEST_FILE_TYPE_MEMORY)
         {
-            GuestMemoryFile* memoryFile = (GuestMemoryFile*)toHostPtr(guestFile->data);
+            GuestMemoryFile* memoryFile = (GuestMemoryFile*)toHostPtrRange(
+                guestFile->data, sizeof(GuestMemoryFile));
             if (!memoryFile)
             {
                 read_ret = -1;
@@ -1348,8 +1553,10 @@ static void br_fread(NativeRuntime* runtime)
                 uint32_t available = (memoryFile->offset < memoryFile->size) ?
                     (memoryFile->size - memoryFile->offset) : 0;
                 uint32_t bytesToRead = read_size < available ? read_size : available;
-                void* buff = toHostPtr(memoryFile->base + memoryFile->offset);
-                void* distPtr = toHostPtr(ptr);
+                uint64_t sourceAddress = (uint64_t)memoryFile->base + memoryFile->offset;
+                void* buff = sourceAddress <= UINT32_MAX ?
+                    toHostPtrRange((uint32_t)sourceAddress, bytesToRead) : NULL;
+                void* distPtr = toHostPtrRange(ptr, bytesToRead);
                 if (!buff || !distPtr)
                 {
                     read_ret = -1;
@@ -1369,7 +1576,7 @@ static void br_fread(NativeRuntime* runtime)
         }
         else if (guestFile->type == GUEST_FILE_TYPE_FILE)
         {
-            void* buff = toHostPtr(ptr);
+            void* buff = toHostPtrRange(ptr, read_size);
             if (buff)
             {
                 read_ret = vm_fread(buff, size, count, guestFile->data);
@@ -1396,21 +1603,28 @@ static void br_fread(NativeRuntime* runtime)
 
 uint32_t vm_sprintf(NativeRuntime* runtime, uint32_t buffPtr, uint32_t fmtPtr, uint32_t val1Ptr, uint32_t val2Ptr)
 {
-    char* buff = (char*)toHostPtr(buffPtr);
-    char* fmt = (char*)toHostPtr(fmtPtr);
-    char* val1 = (char*)toHostPtr(val1Ptr);
-    char* val2 = (char*)toHostPtr(val2Ptr);
+    (void)runtime;
+    void* buffHost = NULL;
+    uint32_t buffSize = toHostPtrRemaining(buffPtr, &buffHost);
+    char* buff = (char*)buffHost;
+    const char* fmt = toHostString(fmtPtr);
+    const char* val1 = toHostString(val1Ptr);
+    const char* val2 = toHostString(val2Ptr);
+    if (!buff || !buffSize || !fmt)
+    {
+        return 0;
+    }
 
     if (NULL == val1 && NULL != val2)
     {
-        return sprintf(buff, fmt, val1Ptr, val2);
+        return snprintf(buff, buffSize, fmt, val1Ptr, val2);
     }
     else if (NULL == val1 && NULL == val2)
     {
-        return sprintf(buff, fmt, val1Ptr, val2Ptr);
+        return snprintf(buff, buffSize, fmt, val1Ptr, val2Ptr);
     }
 
-    return sprintf(buff, fmt, val1, val2);
+    return snprintf(buff, buffSize, fmt, val1, val2);
 }
 
 static void br_sprintf(NativeRuntime* runtime)
@@ -1425,8 +1639,8 @@ static void br_fsys_fopen(NativeRuntime* runtime)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &namePtr);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A1, &modePtr);
 
-    char* name = (char*)toHostPtr(namePtr);
-    char* mode = (char*)toHostPtr(modePtr);
+    const char* name = toHostString(namePtr);
+    const char* mode = toHostString(modePtr);
     uint32_t fpPtr = fsys_fopen(name, mode);
     uint32_t ret = fpPtr;
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
@@ -1488,10 +1702,15 @@ static void br_fsys_fwrite(NativeRuntime* runtime)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A2, &count);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A3, &stream);
 
-    void* buff = toHostPtr(ptr);
-    if (buff)
+    uint32_t byteCount = 0;
+    if ((size == 0 || count <= UINT32_MAX / size))
     {
-        ret = fsys_fwrite(buff, size, count, stream);
+        byteCount = size * count;
+        void* buff = toHostPtrRange(ptr, byteCount);
+        if (buff)
+        {
+            ret = fsys_fwrite(buff, size, count, stream);
+        }
     }
 
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
@@ -1510,14 +1729,15 @@ static void br_fsys_fread(NativeRuntime* runtime)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A2, &count);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A3, &stream);
 
-    void* buff = toHostPtr(ptr);
-    if (buff)
+    uint32_t byteCount = 0;
+    if ((size == 0 || count <= UINT32_MAX / size))
     {
-        read_ret = vm_fread(buff, size, count, stream);
-    }
-    else
-    {
-        read_ret = -1;
+        byteCount = size * count;
+        void* buff = toHostPtrRange(ptr, byteCount);
+        if (buff)
+        {
+            read_ret = vm_fread(buff, size, count, stream);
+        }
     }
 
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &read_ret);
@@ -1544,7 +1764,7 @@ static void br_fsys_feof(NativeRuntime* runtime)
 // Reports whether there is a pending input/system event.
 static void br__sys_judge_event(NativeRuntime* runtime)
 {
-    s_hleProfile.sysJudgeEvent++;
+    hleProfileAdd(HLE_PROFILE_SYS_JUDGE_EVENT);
 
     uint32_t inPtr;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &inPtr);
@@ -1568,8 +1788,8 @@ static void br_OSTimeDly(NativeRuntime* runtime)
 {
     uint32_t ticks;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &ticks);
-    s_hleProfile.osTimeDly++;
-    s_hleProfile.osTimeDlyTotal += ticks;
+    hleProfileAdd(HLE_PROFILE_OS_TIME_DLY);
+    hleProfileAdd(HLE_PROFILE_OS_TIME_DLY_TOTAL, ticks);
 
     uint64_t delayUs = ((uint64_t)ticks * 1000000ull) / OS_TICKS_PER_SEC;
     sleepScaledHostDelayMicros(delayUs);
@@ -1600,7 +1820,7 @@ static void br_memset(NativeRuntime* runtime)
         return;
     }
 
-    void* in = toHostPtr(outDestPtr);
+    void* in = toHostPtrRange(outDestPtr, inLength);
     if (in)
     {
         void* out = memset(in, inValue, inLength);
@@ -1639,8 +1859,8 @@ static void br_memcpy(NativeRuntime* runtime)
         return;
     }
 
-    void* outDest = toHostPtr(outDestPtr);
-    void* inSrc = toHostPtr(inSrcPtr);
+    void* outDest = toHostPtrRange(outDestPtr, inLength);
+    void* inSrc = toHostPtrRange(inSrcPtr, inLength);
     if (outDest && inSrc)
     {
         if (shouldTraceCopy(outDestPtr, inLength) || shouldTraceCopy(inSrcPtr, inLength))
@@ -1672,7 +1892,7 @@ static void br_strlen(NativeRuntime* runtime)
     uint32_t strPtr;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &strPtr);
 
-    char* str = (char*)toHostPtr(strPtr);
+    const char* str = toHostString(strPtr);
     uint32_t ret = str ? (uint32_t)strlen(str) : 0;
 
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
@@ -1692,12 +1912,13 @@ static void br_fseek(NativeRuntime* runtime)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A1, &offset);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &stream);
 
-    GuestFile* guestFile = (GuestFile*)toHostPtr(stream);
+    GuestFile* guestFile = (GuestFile*)toHostPtrRange(stream, sizeof(GuestFile));
     if (guestFile)
     {
         if (guestFile->type == GUEST_FILE_TYPE_MEMORY)
         {
-            GuestMemoryFile* memoryFile = (GuestMemoryFile*)toHostPtr(guestFile->data);
+            GuestMemoryFile* memoryFile = (GuestMemoryFile*)toHostPtrRange(
+                guestFile->data, sizeof(GuestMemoryFile));
             if (!memoryFile)
             {
                 read_ret = -1;
@@ -1788,7 +2009,7 @@ static void br__to_unicode_le(NativeRuntime* runtime)
     uint32_t inPtr;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &inPtr);
 
-    char* in = (char*)toHostPtr(inPtr);
+    const char* in = toHostString(inPtr);
     if (!in)
     {
         br_return_zero(runtime);
@@ -1804,7 +2025,7 @@ static void br__to_unicode_le(NativeRuntime* runtime)
         return;
     }
 
-    uint16_t* out = (uint16_t*)toHostPtr(outPtr);
+    uint16_t* out = (uint16_t*)toHostPtrRange(outPtr, outBytes);
     for (size_t i = 0; i <= inLen; ++i)
     {
         out[i] = (uint8_t)in[i];
@@ -1840,7 +2061,7 @@ static void appendUtf8CodePoint(std::string* out, uint32_t codePoint)
     }
 }
 
-static std::string guestUtf16ToUtf8(const uint16_t* text)
+static std::string guestUtf16ToUtf8(const uint16_t* text, size_t unitCount)
 {
     std::string result;
     if (!text)
@@ -1848,12 +2069,15 @@ static std::string guestUtf16ToUtf8(const uint16_t* text)
         return result;
     }
 
-    if (text[0] != 0 && text[1] == 0 && text[2] != 0 && text[3] == 0)
+    if (unitCount >= 4 && text[0] != 0 && text[1] == 0 && text[2] != 0 && text[3] == 0)
     {
-        const uint32_t* utf32 = (const uint32_t*)text;
-        for (size_t i = 0; utf32[i] != 0; ++i)
+        for (size_t i = 0; i * 2 + 1 < unitCount; ++i)
         {
-            uint32_t codePoint = utf32[i];
+            uint32_t codePoint = text[i * 2] | ((uint32_t)text[i * 2 + 1] << 16);
+            if (codePoint == 0)
+            {
+                break;
+            }
             if (codePoint > 0x10ffffu || (codePoint >= 0xd800u && codePoint <= 0xdfffu))
             {
                 codePoint = 0xfffdu;
@@ -1863,12 +2087,12 @@ static std::string guestUtf16ToUtf8(const uint16_t* text)
         return result;
     }
 
-    for (size_t i = 0; text[i] != 0; ++i)
+    for (size_t i = 0; i < unitCount && text[i] != 0; ++i)
     {
         uint32_t codePoint = text[i];
         if (codePoint >= 0xd800u && codePoint <= 0xdbffu)
         {
-            uint32_t low = text[i + 1];
+            uint32_t low = i + 1 < unitCount ? text[i + 1] : 0;
             if (low >= 0xdc00u && low <= 0xdfffu)
             {
                 codePoint = 0x10000u + ((codePoint - 0xd800u) << 10) + (low - 0xdc00u);
@@ -1895,13 +2119,21 @@ static void br_fsys_fopenW(NativeRuntime* runtime)
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &namePtr);
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A1, &modePtr);
 
-    const uint16_t* name = (const uint16_t*)toHostPtr(namePtr);
-    const uint16_t* mode = (const uint16_t*)toHostPtr(modePtr);
+    void* nameHost = NULL;
+    void* modeHost = NULL;
+    uint32_t nameBytes = (namePtr & 1u) ? 0 : toHostPtrRemaining(namePtr, &nameHost);
+    uint32_t modeBytes = (modePtr & 1u) ? 0 : toHostPtrRemaining(modePtr, &modeHost);
+    const uint16_t* name = (const uint16_t*)nameHost;
+    const uint16_t* mode = (const uint16_t*)modeHost;
 
-    std::string namestr = guestUtf16ToUtf8(name);
-    std::string modestr = guestUtf16ToUtf8(mode);
+    std::string namestr = guestUtf16ToUtf8(name, nameBytes / sizeof(uint16_t));
+    std::string modestr = guestUtf16ToUtf8(mode, modeBytes / sizeof(uint16_t));
 
     uint32_t fpPtr = fsys_fopen(namestr.c_str(), modestr.c_str());
+    if (requestCompatFileOpenExit(runtime, fpPtr))
+    {
+        return;
+    }
     uint32_t ret = fpPtr;
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
     uint32_t pc;
@@ -1917,6 +2149,22 @@ struct DlResHandle
 };
 
 static DlResHandle s_dl_res_handles[128];
+static std::mutex s_dlResMutex;
+
+static void releaseDlResHandles(void)
+{
+    std::lock_guard<std::mutex> lock(s_dlResMutex);
+    for (uint32_t i = 1; i < sizeof(s_dl_res_handles) / sizeof(s_dl_res_handles[0]); ++i)
+    {
+        if (s_dl_res_handles[i].dataPtr)
+        {
+            vm_free(s_dl_res_handles[i].dataPtr);
+        }
+        s_dl_res_handles[i].entry = NULL;
+        s_dl_res_handles[i].dataPtr = 0;
+        s_dl_res_handles[i].offset = 0;
+    }
+}
 
 static char* hostStringIfVmPtr(uint32_t ptr)
 {
@@ -1924,11 +2172,12 @@ static char* hostStringIfVmPtr(uint32_t ptr)
     {
         return NULL;
     }
-    return (char*)toHostPtr(ptr);
+    return (char*)toHostString(ptr);
 }
 
 static void br_get_dl_handle(NativeRuntime* runtime)
 {
+    std::lock_guard<std::mutex> lock(s_dlResMutex);
     uint32_t ret = s_bridgeApp ? 1 : 0;
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
     returnToRa(runtime);
@@ -1936,6 +2185,7 @@ static void br_get_dl_handle(NativeRuntime* runtime)
 
 static void br_dl_res_open(NativeRuntime* runtime)
 {
+    std::lock_guard<std::mutex> lock(s_dlResMutex);
     uint32_t a0;
     uint32_t a1;
     uint32_t a2;
@@ -1987,6 +2237,7 @@ static void br_dl_res_open(NativeRuntime* runtime)
 
 static void br_dl_res_get_size(NativeRuntime* runtime)
 {
+    std::lock_guard<std::mutex> lock(s_dlResMutex);
     uint32_t handle;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &handle);
     uint32_t ret = 0;
@@ -2004,6 +2255,7 @@ static void br_dl_res_get_size(NativeRuntime* runtime)
 
 static void br_dl_res_get_data(NativeRuntime* runtime)
 {
+    std::lock_guard<std::mutex> lock(s_dlResMutex);
     uint32_t handle;
     uint32_t bufferPtr;
     uint32_t buffLen;
@@ -2025,24 +2277,24 @@ static void br_dl_res_get_data(NativeRuntime* runtime)
         }
         if (bufferPtr)
         {
-            void* dst = toHostPtr(bufferPtr);
+            uint32_t remaining = (h->offset < h->entry->size) ? (h->entry->size - h->offset) : 0;
+            uint32_t copySize = readLen ? readLen : buffLen;
+            if (readLen && buffLen > 1 && readLen <= UINT32_MAX / buffLen)
+            {
+                copySize = readLen * buffLen;
+            }
+            if (copySize == 0 || copySize > remaining)
+            {
+                copySize = remaining;
+            }
+            void* dst = toHostPtrRange(bufferPtr, copySize);
             if (dst)
             {
-                uint32_t remaining = (h->offset < h->entry->size) ? (h->entry->size - h->offset) : 0;
-                uint32_t copySize = readLen ? readLen : buffLen;
-                if (readLen && buffLen > 1 && readLen <= UINT32_MAX / buffLen)
-                {
-                    copySize = readLen * buffLen;
-                }
-                if (copySize == 0 || copySize > remaining)
-                {
-                    copySize = remaining;
-                }
                 memcpy(dst, resourceData + h->offset, copySize);
                 h->offset += copySize;
                 ret = readLen ? (copySize / readLen) : copySize;
-                s_hleProfile.dlResRead++;
-                s_hleProfile.dlResReadBytes += copySize;
+                hleProfileAdd(HLE_PROFILE_DL_RES_READ);
+                hleProfileAdd(HLE_PROFILE_DL_RES_READ_BYTES, copySize);
                 if (shouldTraceHle() || shouldTraceCopy(bufferPtr, copySize))
                 {
                     printf("trace-hle: dl_res_get_data handle=%u buffer=0x%08x buffLen=%u readLen=%u copy=%u ret=%u offset=0x%08x\n",
@@ -2057,7 +2309,7 @@ static void br_dl_res_get_data(NativeRuntime* runtime)
                 h->dataPtr = vm_malloc(h->entry->size);
                 if (h->dataPtr)
                 {
-                    void* dst = toHostPtr(h->dataPtr);
+                    void* dst = toHostPtrRange(h->dataPtr, h->entry->size);
                     if (dst)
                     {
                         memcpy(dst, resourceData, h->entry->size);
@@ -2067,8 +2319,8 @@ static void br_dl_res_get_data(NativeRuntime* runtime)
             ret = h->dataPtr;
             if (ret)
             {
-                s_hleProfile.dlResRead++;
-                s_hleProfile.dlResReadBytes += h->entry->size;
+                hleProfileAdd(HLE_PROFILE_DL_RES_READ);
+                hleProfileAdd(HLE_PROFILE_DL_RES_READ_BYTES, h->entry->size);
             }
             if (shouldTraceHle())
             {
@@ -2077,13 +2329,14 @@ static void br_dl_res_get_data(NativeRuntime* runtime)
             }
         }
     }
-    s_hleProfile.dlResOpen++;
+    hleProfileAdd(HLE_PROFILE_DL_RES_OPEN);
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &ret);
     returnToRa(runtime);
 }
 
 static void br_dl_res_close(NativeRuntime* runtime)
 {
+    std::lock_guard<std::mutex> lock(s_dlResMutex);
     uint32_t handle;
     nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &handle);
     if (handle < sizeof(s_dl_res_handles) / sizeof(s_dl_res_handles[0]))
@@ -2114,17 +2367,15 @@ static void returnToRa(NativeRuntime* runtime)
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_PC, &pc);
 }
 
-struct _hook_code_func_
+struct HookCodeFunction
 {
     uint32_t offset;
     const char* name;
     br_func func;
     uint32_t lock;
-    uint32_t trigger_times;
-    uint32_t profile_times;
     uint32_t fast_return_enabled;
     uint32_t fast_return_value;
-}_hook_code_func_map[] =
+}s_hookCodeFunctions[] =
 {
     {0,"OSTimeGet",br_OSTimeGet , 1},
     {0,"fread",br_fread, 1},
@@ -2174,8 +2425,8 @@ struct _hook_code_func_
     {0,"fsys_fopen_flash",br_none, 1},
     {0,"fsys_fclose_flash",br_none, 1},
     {0,"get_dl_handle",br_get_dl_handle, 1},
-    {0,"get_game_vol",br_get_game_vol, 0, 0, 0, 1, 31},
-    {0,"get_current_language",br_get_current_language, 0, 0, 0, 1, 0},
+    {0,"get_game_vol",br_get_game_vol, 0, 1, 31},
+    {0,"get_current_language",br_get_current_language, 0, 1, 0},
     {0,"fsys_fopen",br_fsys_fopen, 1},
     {0,"fsys_fclose",br_fsys_fclose, 1},
     {0,"fsys_fread",br_fsys_fread, 1},
@@ -2301,18 +2552,24 @@ struct _hook_code_func_
     {0,"udc_attached",br_none, 1},
 };
 
+static const int kHookCodeFunctionCount =
+    sizeof(s_hookCodeFunctions) / sizeof(s_hookCodeFunctions[0]);
+static RuntimeProfileCounter s_hookProfileCounters[kHookCodeFunctionCount];
+
 bool bridge_try_fast_return_hook(uint32_t address, uint32_t* returnValue)
 {
-    for (int i = 0; i < sizeof(_hook_code_func_map) / sizeof(_hook_code_func_map[0]); ++i)
+    for (int i = 0; i < kHookCodeFunctionCount; ++i)
     {
-        if (_hook_code_func_map[i].fast_return_enabled && _hook_code_func_map[i].offset == address)
+        if (s_hookCodeFunctions[i].fast_return_enabled && s_hookCodeFunctions[i].offset == address)
         {
             pauseGateWaitForResume();
-            _hook_code_func_map[i].trigger_times++;
-            _hook_code_func_map[i].profile_times++;
+            if (s_bridgeProfileEnabled.load(std::memory_order_relaxed))
+            {
+                s_hookProfileCounters[i].increment();
+            }
             if (returnValue)
             {
-                *returnValue = _hook_code_func_map[i].fast_return_value;
+                *returnValue = s_hookCodeFunctions[i].fast_return_value;
             }
             return true;
         }
@@ -2327,11 +2584,11 @@ bool bridge_lookup_hook_address(const char* name, uint32_t* address)
         return false;
     }
 
-    for (int i = 0; i < sizeof(_hook_code_func_map) / sizeof(_hook_code_func_map[0]); ++i)
+    for (int i = 0; i < sizeof(s_hookCodeFunctions) / sizeof(s_hookCodeFunctions[0]); ++i)
     {
-        if (_hook_code_func_map[i].offset && strcmp(_hook_code_func_map[i].name, name) == 0)
+        if (s_hookCodeFunctions[i].offset && strcmp(s_hookCodeFunctions[i].name, name) == 0)
         {
-            *address = _hook_code_func_map[i].offset;
+            *address = s_hookCodeFunctions[i].offset;
             return true;
         }
     }
@@ -2350,13 +2607,11 @@ static void storeGuestLe32(NativeRuntime* runtime, uint32_t address, uint32_t va
 
 static bool fastReturnPatchEnabled(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_PATCH_FAST_RETURNS");
-        enabled = (!value || !value[0] || strcmp(value, "0") != 0) ? 1 : 0;
-    }
-    return enabled != 0;
+        return !value || !value[0] || strcmp(value, "0") != 0;
+    }();
+    return enabled;
 }
 
 static bool installFastReturnStub(NativeRuntime* runtime, uint32_t address, uint32_t value)
@@ -2393,9 +2648,9 @@ static void profilePrintHookTopAndReset(void)
     };
 
     TopHook top[5] = {};
-    for (int i = 0; i < sizeof(_hook_code_func_map) / sizeof(_hook_code_func_map[0]); ++i)
+    for (int i = 0; i < kHookCodeFunctionCount; ++i)
     {
-        uint32_t count = _hook_code_func_map[i].profile_times;
+        uint32_t count = (uint32_t)s_hookProfileCounters[i].take();
         if (!count)
         {
             continue;
@@ -2409,7 +2664,7 @@ static void profilePrintHookTopAndReset(void)
                 {
                     top[move] = top[move - 1];
                 }
-                top[slot].name = _hook_code_func_map[i].name;
+                top[slot].name = s_hookCodeFunctions[i].name;
                 top[slot].count = count;
                 break;
             }
@@ -2418,10 +2673,6 @@ static void profilePrintHookTopAndReset(void)
 
     if (!top[0].count && !runtimeLogShouldPrintEmptyProfile())
     {
-        for (int i = 0; i < sizeof(_hook_code_func_map) / sizeof(_hook_code_func_map[0]); ++i)
-        {
-            _hook_code_func_map[i].profile_times = 0;
-        }
         return;
     }
 
@@ -2431,11 +2682,38 @@ static void profilePrintHookTopAndReset(void)
         printf(" %s=%u", top[i].name ? top[i].name : "<unnamed>", top[i].count);
     }
     printf("\n");
+}
 
-    for (int i = 0; i < sizeof(_hook_code_func_map) / sizeof(_hook_code_func_map[0]); ++i)
+static void profilePrintAndReset(uint64_t now)
+{
+    std::lock_guard<std::mutex> reportLock(s_profileReportMutex);
+    static uint64_t lastTicks = 0;
+    if (!runtimeLogProfileEnabled() ||
+        !s_bridgeProfileEnabled.load(std::memory_order_relaxed))
     {
-        _hook_code_func_map[i].profile_times = 0;
+        return;
     }
+    if (!lastTicks)
+    {
+        lastTicks = now;
+        return;
+    }
+
+    uint64_t elapsedMs = now - lastTicks;
+    if (elapsedMs < runtimeLogProfileIntervalMs())
+    {
+        return;
+    }
+
+    uint64_t bridgeCalls = s_bridgeProfileCalls.take();
+    if (bridgeCalls || runtimeLogShouldPrintEmptyProfile())
+    {
+        printf("profile:bridge calls=%llu/s\n",
+            (unsigned long long)runtimeLogRatePerSecond(bridgeCalls, elapsedMs));
+    }
+    profilePrintHleAndReset();
+    profilePrintHookTopAndReset();
+    lastTicks = now;
 }
 
 pthread_mutex_t hook_code_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -2443,29 +2721,25 @@ pthread_mutex_t hook_code_mutex = PTHREAD_MUTEX_INITIALIZER;
 static void hook_code(NativeRuntime* runtime, uint64_t address, uint32_t size, void* user_data)
 {
     (void)size;
-    static uint64_t lastTicks = 0;
-    static uint64_t bridgeCalls = 0;
-    if (runtimeLogProfileEnabled() && s_bridgeProfileEnabled.load())
+    static thread_local uint64_t lastTicks = 0;
+    if (runtimeLogProfileEnabled() &&
+        s_bridgeProfileEnabled.load(std::memory_order_relaxed))
     {
+        s_bridgeProfileCalls.increment();
         uint64_t now = SDL_GetTicks64();
         if (!lastTicks)
         {
             lastTicks = now;
         }
-        bridgeCalls++;
         uint64_t elapsedMs = now - lastTicks;
         if (elapsedMs >= runtimeLogProfileIntervalMs())
         {
-            printf("profile:bridge calls=%llu/s\n",
-                (unsigned long long)runtimeLogRatePerSecond(bridgeCalls, elapsedMs));
             profilePrintAndReset(now);
-            profilePrintHookTopAndReset();
-            bridgeCalls = 0;
             lastTicks = now;
         }
     }
 
-    struct _hook_code_func_* hookFunc = (struct _hook_code_func_*)user_data;
+    struct HookCodeFunction* hookFunc = (struct HookCodeFunction*)user_data;
     if (!hookFunc || hookFunc->offset != address)
     {
         return;
@@ -2537,8 +2811,12 @@ static void hook_code(NativeRuntime* runtime, uint64_t address, uint32_t size, v
 
     if (hookFunc->func)
     {
-        hookFunc->trigger_times++;
-        hookFunc->profile_times++;
+        ptrdiff_t hookIndex = hookFunc - s_hookCodeFunctions;
+        if (hookIndex >= 0 && hookIndex < kHookCodeFunctionCount &&
+            s_bridgeProfileEnabled.load(std::memory_order_relaxed))
+        {
+            s_hookProfileCounters[hookIndex].increment();
+        }
         if (hookFunc->fast_return_enabled)
         {
             nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &hookFunc->fast_return_value);
@@ -2552,7 +2830,7 @@ static void hook_code(NativeRuntime* runtime, uint64_t address, uint32_t size, v
         nativeRuntimeReadRegister(runtime, RUNTIME_REG_RA, &ra);
         nativeRuntimeReadRegister(runtime, RUNTIME_REG_PC, &pc);
         nativeRuntimeReadRegister(runtime, RUNTIME_REG_A0, &a0);
-        snprintf(s_lastHleSummary, sizeof(s_lastHleSummary),
+        snprintf(s_threadLastHleSummary, sizeof(s_threadLastHleSummary),
             "%s pc=0x%08x hook=0x%08x ra=0x%08x a0=0x%08x",
             hookFunc->name ? hookFunc->name : "<unnamed>",
             pc, (uint32_t)address, ra, a0);
@@ -2586,7 +2864,7 @@ void nativeRuntimeInterruptHook(NativeRuntime* runtime, uint32_t intno, void* us
     (void)user_data;
 }
 
-static void hooks_init(NativeRuntime* runtime, GuestPackage* _app)
+static void hooks_init(NativeRuntime* runtime, GuestPackage* app)
 {
     bridge_apply_runtime_settings();
     RuntimeError err;
@@ -2594,26 +2872,25 @@ static void hooks_init(NativeRuntime* runtime, GuestPackage* _app)
     uint32_t hookCount = 0;
     uint32_t unknownCount = 0;
 
-    for (int i = 0; i < _app->import_count; ++i)
+    for (int i = 0; i < app->import_count; ++i)
     {
-        GuestImportEntry* entry = _app->import_data[i];
+        GuestImportEntry* entry = app->import_data[i];
         const char* name = entry->name;
         bool matched = false;
-        for (int j = 0; j < sizeof(_hook_code_func_map) / sizeof(_hook_code_func_map[0]); ++j)
+        for (int j = 0; j < kHookCodeFunctionCount; ++j)
         {
-            if (strcmp(name, _hook_code_func_map[j].name) == 0)
+            if (strcmp(name, s_hookCodeFunctions[j].name) == 0)
             {
-                _hook_code_func_map[j].offset = entry->offset;
-                _hook_code_func_map[j].trigger_times = 0;
-                if (_hook_code_func_map[j].fast_return_enabled &&
-                    installFastReturnStub(runtime, entry->offset, _hook_code_func_map[j].fast_return_value))
+                s_hookCodeFunctions[j].offset = entry->offset;
+                if (s_hookCodeFunctions[j].fast_return_enabled &&
+                    installFastReturnStub(runtime, entry->offset, s_hookCodeFunctions[j].fast_return_value))
                 {
                     hookCount++;
                     matched = true;
                     break;
                 }
                 err = nativeRuntimeAddHook(runtime, &trace, RUNTIME_HOOK_CODE, (void*)hook_code,
-                    (void*)&_hook_code_func_map[j], entry->offset, entry->offset, 0);
+                    (void*)&s_hookCodeFunctions[j], entry->offset, entry->offset, 0);
                 if (err != RUNTIME_OK)
                 {
                     printf("add hook err %u (%s)\n", err, nativeRuntimeErrorString(err));
@@ -2636,21 +2913,129 @@ static void hooks_init(NativeRuntime* runtime, GuestPackage* _app)
     }
 }
 
-RuntimeError bridge_init(NativeRuntime* runtime, GuestPackage* _app)
+RuntimeError bridge_init(NativeRuntime* runtime, GuestPackage* app)
 {
-    return bridge_init_task(runtime, _app, true);
+    return bridge_init_task(runtime, app, true);
 }
 
-RuntimeError bridge_init_task(NativeRuntime* runtime, GuestPackage* _app, bool isMainRuntime)
+void bridge_release_game_resources(void)
 {
-    s_bridgeApp = _app;
+    releaseDlResHandles();
+    releaseDingooSemaphores();
+    fsys_reset_guest_package(NULL);
+    fsys_set_game_identity(NULL);
+    fsys_set_game_name(NULL);
+    fsys_set_save_directory(NULL);
+    pthread_mutex_lock(&s_runtimeContextsMutex);
+    s_runtimeContexts.clear();
+    pthread_mutex_unlock(&s_runtimeContextsMutex);
+    std::lock_guard<std::mutex> lock(s_dlResMutex);
+    s_bridgeApp = NULL;
+    s_bridgeAppSha256.clear();
+}
+
+bool bridge_run_semaphore_regression(void)
+{
+    releaseDingooSemaphores();
+    uint32_t handles[127] = {};
+    bool capacity = true;
+    for (size_t index = 0; index < sizeof(handles) / sizeof(handles[0]); ++index)
+    {
+        handles[index] = createDingooSemaphore((uint32_t)index);
+        if (!handles[index] || !findDingooSemaphore(handles[index]))
+        {
+            capacity = false;
+            break;
+        }
+    }
+    bool exhaustedSafely = createDingooSemaphore(0) == 0 &&
+        findDingooSemaphore(128) == NULL && findDingooSemaphore(UINT32_MAX) == NULL;
+    releaseDingooSemaphores();
+    uint32_t reused = createDingooSemaphore(1);
+    bool reusable = reused == 1 && findDingooSemaphore(reused) != NULL;
+
+    NativeRuntime* runtime = NULL;
+    bool runtimeCreated = nativeRuntimeCreate(&runtime) == RUNTIME_OK;
+    DingooSemaphorePendResult acquiredResult = runtimeCreated && reusable ?
+        dingooSemaphorePend(findDingooSemaphore(reused), runtime, 0) :
+        DINGOO_SEMAPHORE_INVALID;
+    releaseDingooSemaphores();
+
+    uint32_t timeoutHandle = createDingooSemaphore(0);
+    std::chrono::steady_clock::time_point timeoutBegin =
+        std::chrono::steady_clock::now();
+    DingooSemaphorePendResult timeoutResult = runtimeCreated && timeoutHandle ?
+        dingooSemaphorePend(findDingooSemaphore(timeoutHandle), runtime, 2) :
+        DINGOO_SEMAPHORE_INVALID;
+    uint64_t timeoutElapsedMs = (uint64_t)std::chrono::duration_cast<
+        std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - timeoutBegin).count();
+    bool timeoutWorks = timeoutResult == DINGOO_SEMAPHORE_TIMEOUT &&
+        timeoutElapsedMs >= 10 && timeoutElapsedMs < 500;
+    releaseDingooSemaphores();
+
+    uint32_t stopHandle = createDingooSemaphore(0);
+    std::atomic<DingooSemaphorePendResult> stopResult(DINGOO_SEMAPHORE_INVALID);
+    std::chrono::steady_clock::time_point stopBegin =
+        std::chrono::steady_clock::now();
+    std::thread stopWaiter;
+    if (runtimeCreated && stopHandle)
+    {
+        stopWaiter = std::thread([&]() {
+            stopResult.store(dingooSemaphorePend(
+                findDingooSemaphore(stopHandle), runtime, 0),
+                std::memory_order_release);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        nativeRuntimeRequestStop(runtime);
+        stopWaiter.join();
+    }
+    uint64_t stopElapsedMs = (uint64_t)std::chrono::duration_cast<
+        std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - stopBegin).count();
+    bool stopWorks = stopResult.load(std::memory_order_acquire) ==
+        DINGOO_SEMAPHORE_INTERRUPTED && stopElapsedMs < 500;
+    releaseDingooSemaphores();
+    if (runtime)
+    {
+        nativeRuntimeDestroy(runtime);
+    }
+
+    bool acquired = acquiredResult == DINGOO_SEMAPHORE_ACQUIRED;
+    printf("hle: semaphore regression capacity=%u exhausted_safely=%u reusable=%u "
+        "acquired=%u timeout=%u timeout_ms=%llu stop=%u stop_ms=%llu\n",
+        capacity ? 1u : 0u,
+        exhaustedSafely ? 1u : 0u,
+        reusable ? 1u : 0u,
+        acquired ? 1u : 0u,
+        timeoutWorks ? 1u : 0u,
+        (unsigned long long)timeoutElapsedMs,
+        stopWorks ? 1u : 0u,
+        (unsigned long long)stopElapsedMs);
+    return capacity && exhaustedSafely && reusable && acquired &&
+        timeoutWorks && stopWorks;
+}
+
+RuntimeError bridge_init_task(NativeRuntime* runtime, GuestPackage* app, bool isMainRuntime)
+{
+    {
+        std::lock_guard<std::mutex> lock(s_dlResMutex);
+        s_bridgeApp = app;
+    }
     if (isMainRuntime)
     {
-        s_tempTicks = 0;
+        s_osTickClock.reset();
     }
-    fsys_set_guest_package(_app);
+    if (isMainRuntime)
+    {
+        fsys_reset_guest_package(app);
+    }
+    else
+    {
+        fsys_set_guest_package(app);
+    }
     registerRuntimeContext(runtime, isMainRuntime);
-	hooks_init(runtime, _app);
+	hooks_init(runtime, app);
 
 	return RUNTIME_OK;
 }

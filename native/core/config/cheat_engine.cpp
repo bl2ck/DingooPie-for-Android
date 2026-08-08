@@ -6,8 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
-
 static std::string trimText(const std::string& text)
 {
     size_t begin = 0;

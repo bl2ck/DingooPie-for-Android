@@ -1,13 +1,12 @@
 #include "game/game_runtime.h"
 
-#include "app/app_runtime.h"
+#include "app/app_mips_runtime.h"
 #include "cc/cc_arm_runtime.h"
-#include "game/game_history.h"
 #include "game/game_paths.h"
 #include "frontend/sdl_audio.h"
 #include "frontend/sdl_frontend.h"
+#include "runtime/thread_join.h"
 
-#include <atomic>
 #include <pthread.h>
 #include <stdio.h>
 #include <string>
@@ -19,19 +18,25 @@ static bool g_ccRuntimeThreadStarted = false;
 static GameFormat g_activeGameFormat = GAME_FORMAT_UNKNOWN;
 static std::string g_ccGamePath;
 static std::vector<std::string> g_ccCheatFeatureKeys;
-static bool g_clearRecentOnCcStartupFailure = false;
-static std::atomic<bool> g_ccRunExitedNormally(false);
+static RuntimeThreadCompletion g_ccRuntimeThreadCompletion =
+    RUNTIME_THREAD_COMPLETION_INITIALIZER;
+
+static const uint32_t kRuntimeStopTimeoutMs = 5000;
 
 static void* runCcGame(void*)
 {
+    struct RuntimeThreadCompletionGuard
+    {
+        ~RuntimeThreadCompletionGuard()
+        {
+            runtimeThreadCompletionSignal(&g_ccRuntimeThreadCompletion);
+        }
+    } completionGuard;
     CcArmRuntimeStats stats = {};
     bool ok = ccArmRuntimeRunFile(g_ccGamePath.c_str(), g_ccCheatFeatureKeys, &stats);
     const bool guestCompleted = ok && stats.guestCompleted;
-    g_ccRunExitedNormally.store(guestCompleted, std::memory_order_release);
     if (!ok)
     {
-        gameHistoryClearRecentIfCurrent(
-            g_ccGamePath, g_clearRecentOnCcStartupFailure, "CC startup failure");
         printf("cc-runtime: execution failed: %s\n", stats.error[0] ? stats.error : "unknown error");
         frontendRequestQuit();
     }
@@ -40,18 +45,12 @@ static void* runCcGame(void*)
         printf("cc-runtime: guest completed; returning to library\n");
         frontendRequestGameExit();
     }
-    else
-    {
-        printf("cc-runtime: stopped by frontend request\n");
-    }
-    printf("cc-runtime: thread exited ok=%u\n", ok ? 1u : 0u);
     return NULL;
 }
 
 bool gameRuntimeStart(
     const char* gamePath,
     const EmulatorOptions& options,
-    bool clearRecentOnStartupFailure,
     const std::vector<std::string>& enabledCheatFeatureKeys)
 {
     const std::string normalizedPath = gamePathNormalize(gamePath);
@@ -59,9 +58,7 @@ bool gameRuntimeStart(
 
     if (format == GAME_FORMAT_APP)
     {
-        MixerSetRuntimeAudioProfile(MIXER_RUNTIME_AUDIO_NATIVE_GUEST);
-        if (!appRuntimeStart(normalizedPath.c_str(), options,
-                clearRecentOnStartupFailure, enabledCheatFeatureKeys))
+        if (!appRuntimeStart(normalizedPath.c_str(), options, enabledCheatFeatureKeys))
         {
             return false;
         }
@@ -73,11 +70,9 @@ bool gameRuntimeStart(
 
     if (format == GAME_FORMAT_CC)
     {
-        MixerSetRuntimeAudioProfile(MIXER_RUNTIME_AUDIO_CC_STABLE_HOST);
         g_ccGamePath = normalizedPath;
         g_ccCheatFeatureKeys = enabledCheatFeatureKeys;
-        g_clearRecentOnCcStartupFailure = clearRecentOnStartupFailure;
-        g_ccRunExitedNormally.store(false, std::memory_order_release);
+        runtimeThreadCompletionReset(&g_ccRuntimeThreadCompletion);
         ccArmRuntimePrepareRun();
 
         printf("game-runtime: starting CC game: %s\n", g_ccGamePath.c_str());
@@ -128,45 +123,60 @@ void gameRuntimeApplySettings(void)
     }
 }
 
-void gameRuntimeStop(void)
+bool gameRuntimeStop(void)
 {
     pthread_t ccThread = {};
     bool joinCcThread = false;
 
     pthread_mutex_lock(&g_gameRuntimeMutex);
     const GameFormat format = g_activeGameFormat;
-    g_activeGameFormat = GAME_FORMAT_UNKNOWN;
     if (format == GAME_FORMAT_CC && g_ccRuntimeThreadStarted)
     {
         ccThread = g_ccRuntimeThread;
         joinCcThread = true;
-        g_ccRuntimeThreadStarted = false;
     }
     pthread_mutex_unlock(&g_gameRuntimeMutex);
 
     if (format == GAME_FORMAT_APP)
     {
-        appRuntimeStop();
-        return;
+        const bool stopped = appRuntimeStop();
+        if (stopped)
+        {
+            pthread_mutex_lock(&g_gameRuntimeMutex);
+            g_activeGameFormat = GAME_FORMAT_UNKNOWN;
+            pthread_mutex_unlock(&g_gameRuntimeMutex);
+        }
+        return stopped;
     }
 
     if (!joinCcThread)
     {
-        return;
+        return true;
     }
 
-    printf("game-runtime: stop requested for CC runtime\n");
     ccArmRuntimeRequestStop();
-    pthread_join(ccThread, NULL);
-    MixerResetAfterRuntimeStop();
-    printf("game-runtime: CC runtime thread joined\n");
+    int joinError = 0;
+    const RuntimeThreadJoinResult joinResult = runtimeThreadJoinWithTimeout(
+        ccThread, &g_ccRuntimeThreadCompletion, kRuntimeStopTimeoutMs, &joinError);
+    if (joinResult != RUNTIME_THREAD_JOINED)
+    {
+        if (joinResult == RUNTIME_THREAD_JOIN_TIMEOUT)
+        {
+            printf("game-runtime: CC runtime thread did not stop within %u ms\n",
+                kRuntimeStopTimeoutMs);
+        }
+        else
+        {
+            printf("game-runtime: CC runtime thread join failed: %d\n", joinError);
+        }
+        return false;
+    }
 
-    if (g_ccRunExitedNormally.load(std::memory_order_acquire))
-    {
-        gameHistorySaveRecent(g_ccGamePath, "normal CC runtime exit");
-    }
-    else
-    {
-        printf("game-runtime: recent game not saved because CC runtime did not exit normally\n");
-    }
+    pthread_mutex_lock(&g_gameRuntimeMutex);
+    g_ccRuntimeThreadStarted = false;
+    g_activeGameFormat = GAME_FORMAT_UNKNOWN;
+    pthread_mutex_unlock(&g_gameRuntimeMutex);
+    mixerResetAfterRuntimeStop();
+
+    return true;
 }

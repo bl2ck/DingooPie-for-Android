@@ -25,8 +25,10 @@ LOCAL_CPP_FEATURES := exceptions rtti
 LOCAL_CPPFLAGS := -std=c++17 -Wno-format-security
 LOCAL_SRC_FILES := \
     $(SDL_PATH)/src/main/android/SDL_android_main.c \
-    $(PROJECT_ROOT)/native/core/app/app_runtime.cpp \
+    $(PROJECT_ROOT)/native/core/app/app_mips_runtime.cpp \
+    $(PROJECT_ROOT)/native/core/app/save_state.cpp \
     $(PROJECT_ROOT)/native/core/cc/arm32_interpreter.cpp \
+    $(PROJECT_ROOT)/native/core/cc/cc_save_state.cpp \
     $(PROJECT_ROOT)/native/core/frontend/audio_validation_capture.cpp \
     $(PROJECT_ROOT)/native/core/cc/cc_arm_runtime.cpp \
     $(PROJECT_ROOT)/native/core/config/cheat_engine.cpp \
@@ -39,11 +41,11 @@ LOCAL_SRC_FILES := \
     $(PROJECT_ROOT)/native/core/config/emulator_settings.cpp \
     $(PROJECT_ROOT)/native/core/runtime/execution_backend.cpp \
     $(PROJECT_ROOT)/native/core/frontend/framebuffer.cpp \
-    $(PROJECT_ROOT)/native/core/game/game_history.cpp \
     $(PROJECT_ROOT)/native/core/game/game_paths.cpp \
     $(PROJECT_ROOT)/native/core/game/game_runtime.cpp \
     $(PROJECT_ROOT)/native/core/guest/guest_audio.cpp \
     $(PROJECT_ROOT)/native/core/guest/guest_filesystem.cpp \
+    $(PROJECT_ROOT)/native/core/guest/guest_save_transaction.cpp \
     $(PROJECT_ROOT)/native/core/guest/guest_text_format.cpp \
     $(PROJECT_ROOT)/native/core/guest/guest_package.cpp \
     $(PROJECT_ROOT)/native/core/frontend/input_controls.cpp \
@@ -51,6 +53,7 @@ LOCAL_SRC_FILES := \
     $(PROJECT_ROOT)/native/core/main.cpp \
     $(PROJECT_ROOT)/native/core/frontend/menu_strings.cpp \
     $(PROJECT_ROOT)/native/core/runtime/native_runtime.cpp \
+    $(PROJECT_ROOT)/native/core/runtime/thread_join.cpp \
     $(PROJECT_ROOT)/native/core/runtime/pause_gate.cpp \
     $(PROJECT_ROOT)/native/core/app/ppsspp_irjit_backend.cpp \
     $(PROJECT_ROOT)/native/core/app/ppsspp_shim.cpp \
@@ -59,6 +62,7 @@ LOCAL_SRC_FILES := \
     $(PROJECT_ROOT)/native/core/app/sdk_hle.cpp \
     $(PROJECT_ROOT)/native/core/frontend/sdl_audio.cpp \
     $(PROJECT_ROOT)/native/core/frontend/sdl_frontend.cpp \
+    $(PROJECT_ROOT)/native/core/app/task_thread_lifecycle.cpp \
     $(PROJECT_ROOT)/native/core/app/task_scheduler.cpp \
     $(PROJECT_ROOT)/native/android/Common/Crypto/sha256.cpp \
     $(PROJECT_ROOT)/native/android/platform_android.cpp \

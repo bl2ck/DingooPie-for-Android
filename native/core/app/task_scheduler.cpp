@@ -1,4 +1,5 @@
 #include "app/task_scheduler.h"
+#include "app/task_thread_lifecycle.h"
 #include <assert.h>
 #include "app/emulated_memory.h"
 #include <pthread.h>
@@ -13,9 +14,9 @@
 #include <cstring>
 #include <vector>
 
-extern uint32_t s_AppDataAddr;
-extern uint32_t s_AppDataBuffSize;
-extern void* s_AppDataBuff;
+extern uint32_t g_appDataAddress;
+extern uint32_t g_appDataSize;
+extern void* g_appDataBuffer;
 extern GuestPackage* s_guestPackage;
 
 static SDL_atomic_t s_taskShutdownRequested;
@@ -29,17 +30,17 @@ struct TaskStruct
     uint32_t dataPtr;
     uint32_t stackPtr;
     uint32_t priority;
+    uint64_t profileLastTicks;
+    uint64_t profileInstructionCount;
 };
 
 static bool taskProfileEnabled()
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_TASK_PROFILE");
-        enabled = value && value[0] && strcmp(value, "0") != 0 ? 1 : 0;
-    }
-    return enabled != 0;
+        return value && value[0] && strcmp(value, "0") != 0;
+    }();
+    return enabled;
 }
 
 static ExecutionBackend subtaskBackendFromEnv()
@@ -77,16 +78,17 @@ void taskSchedulerRequestShutdown(const char* reason)
         printf("task: shutdown requested by %s\n", reason ? reason : "<unknown>");
     }
 
-    std::vector<NativeRuntime*> runtimes;
-    taskSchedulerSnapshotRuntimes(&runtimes);
-    for (size_t i = 0; i < runtimes.size(); ++i)
+    pthread_mutex_lock(&s_taskRuntimeMutex);
+    const size_t runtimeCount = s_taskRuntimes.size();
+    for (size_t i = 0; i < runtimeCount; ++i)
     {
-        nativeRuntimeRequestStop(runtimes[i]);
+        nativeRuntimeRequestStop(s_taskRuntimes[i]);
     }
-    if (!runtimes.empty())
+    pthread_mutex_unlock(&s_taskRuntimeMutex);
+    if (runtimeCount != 0)
     {
         printf("task: shutdown stop requested for %u subtask runtime(s)\n",
-            (unsigned int)runtimes.size());
+            (unsigned int)runtimeCount);
     }
 }
 
@@ -111,6 +113,10 @@ void taskSchedulerRegisterRuntime(NativeRuntime* runtime)
         }
     }
     s_taskRuntimes.push_back(runtime);
+    if (taskSchedulerIsShutdownRequested())
+    {
+        nativeRuntimeRequestStop(runtime);
+    }
     pthread_mutex_unlock(&s_taskRuntimeMutex);
 }
 
@@ -143,7 +149,6 @@ void taskSchedulerSnapshotRuntimes(std::vector<NativeRuntime*>* out)
     {
         return;
     }
-    out->clear();
     pthread_mutex_lock(&s_taskRuntimeMutex);
     *out = s_taskRuntimes;
     pthread_mutex_unlock(&s_taskRuntimeMutex);
@@ -156,25 +161,28 @@ static void hookTaskProfile(NativeRuntime* runtime, uint64_t address, uint32_t s
     (void)size;
 
     TaskStruct* taskStruct = (TaskStruct*)userData;
-    static uint64_t lastTicks = 0;
-    static uint64_t instructionCount = 0;
-
-    if (!lastTicks)
+    if (!taskStruct)
     {
-        lastTicks = SDL_GetTicks64();
+        return;
     }
 
-    instructionCount++;
+    if (!taskStruct->profileLastTicks)
+    {
+        taskStruct->profileLastTicks = SDL_GetTicks64();
+    }
+
+    taskStruct->profileInstructionCount++;
     uint64_t now = SDL_GetTicks64();
-    uint64_t elapsedMs = now - lastTicks;
+    uint64_t elapsedMs = now - taskStruct->profileLastTicks;
     if (elapsedMs >= runtimeLogProfileIntervalMs())
     {
         printf("profile:task entry=0x%08x priority=%u instr=%llu/s\n",
-            taskStruct ? taskStruct->taskFuncAddr : 0,
-            taskStruct ? taskStruct->priority : 0,
-            (unsigned long long)runtimeLogRatePerSecond(instructionCount, elapsedMs));
-        instructionCount = 0;
-        lastTicks = now;
+            taskStruct->taskFuncAddr,
+            taskStruct->priority,
+            (unsigned long long)runtimeLogRatePerSecond(
+                taskStruct->profileInstructionCount, elapsedMs));
+        taskStruct->profileInstructionCount = 0;
+        taskStruct->profileLastTicks = now;
     }
 }
 
@@ -190,11 +198,35 @@ static bool hookInvalidMemory(NativeRuntime* runtime, RuntimeMemoryAccess type, 
 
 void* subTaskRun(void* data)
 {
-    struct TaskStruct* taskStruct = (struct TaskStruct*)data;
+    taskThreadLifecycleDetachCurrent();
+    struct TaskCompletionGuard
+    {
+        ~TaskCompletionGuard()
+        {
+            taskThreadLifecycleFinish();
+        }
+    } completionGuard;
+    TaskStruct* taskStruct = (TaskStruct*)data;
+
+    NativeRuntime* runtime = NULL;
+    struct TaskResourceGuard
+    {
+        TaskStruct* task;
+        NativeRuntime* runtime;
+
+        ~TaskResourceGuard()
+        {
+            if (runtime)
+            {
+                taskSchedulerUnregisterRuntime(runtime);
+                nativeRuntimeDestroy(runtime);
+            }
+            free(task);
+        }
+    } resourceGuard = { taskStruct, NULL };
 
     uint32_t entry = taskStruct->taskFuncAddr;
 
-    NativeRuntime* runtime;
     RuntimeError err;
     RuntimeHook trace;
 
@@ -203,7 +235,6 @@ void* subTaskRun(void* data)
     {
         printf("task: subTaskRun ignored during shutdown entry=0x%08x priority=%d\n",
             entry, taskStruct->priority);
-        free(taskStruct);
         return NULL;
     }
 
@@ -213,6 +244,7 @@ void* subTaskRun(void* data)
         printf("task: nativeRuntimeCreate failed: %u (%s)\n", err, nativeRuntimeErrorString(err));
         return NULL;
     }
+    resourceGuard.runtime = runtime;
     taskSchedulerRegisterRuntime(runtime);
 
     ExecutionBackend backend = subtaskBackendFromEnv();
@@ -220,45 +252,42 @@ void* subTaskRun(void* data)
     if (err)
     {
         printf("task: nativeRuntimeSetBackend failed: %u (%s)\n", err, nativeRuntimeErrorString(err));
-        taskSchedulerUnregisterRuntime(runtime);
-        nativeRuntimeDestroy(runtime);
-        free(taskStruct);
         return NULL;
     }
     printf("task: subTaskRun backend=%s\n", executionBackendName(backend));
 
-    err = nativeRuntimeMapMemory(runtime, s_AppDataAddr, s_AppDataBuffSize, RUNTIME_PROT_ALL, s_AppDataBuff);
+    err = nativeRuntimeMapMemory(runtime, g_appDataAddress, g_appDataSize, RUNTIME_PROT_ALL, g_appDataBuffer);
     if (err)
     {
         printf("task: failed to map app memory: %u (%s)\n", err, nativeRuntimeErrorString(err));
-        exit(1);
+        return NULL;
     }
 
-    uint32_t appAliasAddr = s_AppDataAddr & 0x1fffffff;
-    err = nativeRuntimeMapMemory(runtime, appAliasAddr, s_AppDataBuffSize, RUNTIME_PROT_ALL, s_AppDataBuff);
+    uint32_t appAliasAddr = g_appDataAddress & 0x1fffffff;
+    err = nativeRuntimeMapMemory(runtime, appAliasAddr, g_appDataSize, RUNTIME_PROT_ALL, g_appDataBuffer);
     if (err)
     {
         printf("task: failed to map app alias: %u (%s)\n", err, nativeRuntimeErrorString(err));
-        exit(1);
+        return NULL;
     }
 
-    if (InitVmMemSubTask(runtime))
+    if (mapVmMemoryForSubTask(runtime))
     {
-        printf("task: InitVmMemSubTask failed\n");
-        exit(1);
+        printf("task: mapVmMemoryForSubTask failed\n");
+        return NULL;
     }
 
     if (framebufferInitialize(runtime))
     {
         printf("task: framebuffer initialization failed\n");
-        exit(1);
+        return NULL;
     }
 
     err = bridge_init_task(runtime, s_guestPackage, false);
     if (err)
     {
         printf("task: bridge_init failed: %u (%s)\n", err, nativeRuntimeErrorString(err));
-        exit(1);
+        return NULL;
     }
 
     nativeRuntimeAddHook(runtime, &trace, RUNTIME_HOOK_MEM_INVALID, (void*)hookInvalidMemory, NULL, 1, 0);
@@ -288,15 +317,9 @@ void* subTaskRun(void* data)
         {
             printf("task: nativeRuntimeStart failed: %u (%s)\n", err, nativeRuntimeErrorString(err));
         }
-        taskSchedulerUnregisterRuntime(runtime);
-        nativeRuntimeDestroy(runtime);
-        free(taskStruct);
         return NULL;
     }
 
-    taskSchedulerUnregisterRuntime(runtime);
-    nativeRuntimeDestroy(runtime);
-    free(taskStruct);
     return 0;
 }
 
@@ -309,25 +332,36 @@ uint32_t OSTaskCreate(uint32_t taskFuncAddr, uint32_t dataPtr, uint32_t stackPtr
         return OS_NO_ERR;
     }
 
-    struct TaskStruct* taskStruct =(struct TaskStruct*)malloc(sizeof(struct TaskStruct));
+    taskThreadLifecycleBegin();
+
+    TaskStruct* taskStruct = (TaskStruct*)malloc(sizeof(TaskStruct));
     if (taskStruct == NULL)
     {
         printf("task: OSTaskCreate malloc failed\n");
+        taskThreadLifecycleCancelBegin();
         return -1;
     }
     taskStruct->dataPtr = dataPtr;
     taskStruct->taskFuncAddr = taskFuncAddr;
     taskStruct->stackPtr = stackPtr;
     taskStruct->priority = priority;
+    taskStruct->profileLastTicks = 0;
+    taskStruct->profileInstructionCount = 0;
 
     int ret = pthread_create(&taskStruct->tid, NULL, subTaskRun, taskStruct);
     if (ret)
     {
         printf("task: pthread_create subTaskRun failed: %d\n", ret);
         free(taskStruct);
+        taskThreadLifecycleCancelBegin();
         assert(0);
         return (uint32_t)-1;
     }
 
     return OS_NO_ERR;
+}
+
+void taskSchedulerWaitForTasks(void)
+{
+    taskThreadLifecycleWaitForAll();
 }

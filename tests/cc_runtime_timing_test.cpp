@@ -30,6 +30,7 @@ int main()
         return 3;
     }
     if (ccCpuClockToTargetIps(200000000u, 336000000u, 15000000u) != 8928571u ||
+        ccCpuClockToTargetIps(360000000u, 336000000u, 15000000u) != 16071428u ||
         ccCpuClockToTargetIps(430000000u, 336000000u, 15000000u) != 19196428u ||
         ccCpuClockToTargetIps(0u, 336000000u, 15000000u) != 0u)
     {
@@ -39,8 +40,8 @@ int main()
     struct InputMapping
     {
         uint32_t source;
-        uint32_t cc1800;
-        uint32_t cc1600;
+        uint32_t retailLayout;
+        uint32_t homebrewLayout;
     };
     static const InputMapping mappings[] = {
         { CC_INPUT_SOURCE_UP, 0x00100000u, 0x00100000u },
@@ -59,19 +60,25 @@ int main()
     };
     for (size_t i = 0; i < sizeof(mappings) / sizeof(mappings[0]); ++i)
     {
-        if (mapInputToCc1800(mappings[i].source) != mappings[i].cc1800 ||
-            mapInputToCc1600(mappings[i].source) != mappings[i].cc1600)
+        if (mapInputToRetailLayout(mappings[i].source) !=
+                mappings[i].retailLayout ||
+            mapInputToHomebrewLayout(mappings[i].source) !=
+                mappings[i].homebrewLayout)
         {
             fprintf(stderr, "CC input mapping regression failed at index %u.\n",
                 (unsigned)i);
             return 5;
         }
     }
-    if (!ccUses1800InputMapping(0x10100000u) ||
-        ccUses1800InputMapping(0x13800000u) ||
-        mapInputToCc1800(CC_INPUT_SOURCE_Y | CC_INPUT_SOURCE_R) != 0x60000000u)
+    if (!ccUsesRetailInputMapping(kCcRetailProgramOrigin) ||
+        ccUsesRetailInputMapping(kCcHomebrewProgramOrigin) ||
+        ccPackageUsesRetailLayout(0x13000000u) ||
+        ccPackageUsesHomebrewLayout(0x13000000u) ||
+        mapInputToRetailLayout(CC_INPUT_SOURCE_Y | CC_INPUT_SOURCE_R) !=
+            0x60000000u ||
+        mapInputToRetailLayout(CC_INPUT_SOURCE_X) != 0x00010000u)
     {
-        fprintf(stderr, "CC input family mapping regression failed.\n");
+        fprintf(stderr, "CC input layout mapping regression failed.\n");
         return 6;
     }
     printf("CC runtime timing regression passed.\n");

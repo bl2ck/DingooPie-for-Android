@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <assert.h>
 #include <strings.h>
+#include <mutex>
 #include "runtime/runtime_debug.h"
 
 static const uint32_t kPackedRecordSize = 36;
@@ -18,9 +19,10 @@ static const uint32_t kPackedMinKnownExtensions = 8;
 static const uint32_t kLegacyRecordSize = 0x408;
 static const uint32_t kLegacyNameSize = 0x400;
 static const uint32_t kMaxLegacyRecords = 256;
+static std::mutex s_resourceDecodeMutex;
 
 // Dingoo Technology APP/CC package containers are fixed-size little-endian chunks
-// followed by raw MIPS code and optional resource tables. Several header words
+// followed by executable code and optional resource tables. Several header words
 // are still known only by observation, so they stay reserved instead of being
 // guessed into public structure names.
 struct __attribute__((__packed__)) PackageCcdlHeader
@@ -207,6 +209,7 @@ static bool hasKnownResourceExtension(const char* name)
 		".sst",
 		".stx",
 		".txt",
+		".wad",
 		".war",
 		".wav",
 	};
@@ -823,6 +826,7 @@ bool guestPackageProbeFileHeader(FILE* file, uint32_t fileSize)
 
 void guestPackageDestroy(GuestPackage* inApp)
 {
+	std::lock_guard<std::mutex> lock(s_resourceDecodeMutex);
 	if (inApp == NULL)
 	{
 		return;
@@ -936,6 +940,7 @@ void guestPackageTraceResourceCandidates(GuestPackage* inApp, const char* inName
 
 const uint8_t* guestPackageResourceData(GuestPackage* inApp, GuestResourceEntry* inEntry)
 {
+	std::lock_guard<std::mutex> lock(s_resourceDecodeMutex);
 	if (!inApp || !inEntry || inEntry->offset > inApp->file_size || inEntry->size > inApp->file_size - inEntry->offset)
 	{
 		return NULL;

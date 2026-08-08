@@ -1,6 +1,8 @@
 #include "runtime/debug_log.h"
+#include "platform_services.h"
 
 #include <stdio.h>
+#include <string>
 #include <time.h>
 #include <unistd.h>
 
@@ -28,9 +30,14 @@ bool debugLogOpen(void)
         char timestamp[32] = {};
         debugLogTimestamp(timestamp, sizeof(timestamp));
 
+        std::string logDirectory = platformAndroidGetLogDirectory();
+        if (logDirectory.empty())
+        {
+            return false;
+        }
         char logPath[256] = {};
         snprintf(logPath, sizeof(logPath),
-            "/data/user/0/com.dingoopie.android/files/DingooPie-debug-%s-%lu.log",
+            "%s/DingooPie-debug-%s-%lu.log", logDirectory.c_str(),
             timestamp, (unsigned long)getpid());
         logPath[sizeof(logPath) - 1] = '\0';
 

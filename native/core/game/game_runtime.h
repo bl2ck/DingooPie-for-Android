@@ -9,9 +9,8 @@
 bool gameRuntimeStart(
     const char* gamePath,
     const EmulatorOptions& options,
-    bool clearRecentOnStartupFailure,
     const std::vector<std::string>& enabledCheatFeatureKeys);
-void gameRuntimeStop(void);
+bool gameRuntimeStop(void);
 void gameRuntimeNotifyPauseRequested(void);
 void gameRuntimeApplySettings(void);
 

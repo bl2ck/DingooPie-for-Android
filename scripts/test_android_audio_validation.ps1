@@ -96,9 +96,15 @@ $extension = [System.IO.Path]::GetExtension($GamePath).ToLowerInvariant()
 if ($extension -notin @('.app', '.cc')) {
     throw 'Audio validation supports APP and CC games.'
 }
-$deviceGamePath = "/sdcard/Download/dingoopie-audio-validation$extension"
+$deviceGameName = [System.IO.Path]::GetFileName($GamePath)
+$deviceGamePath = "/sdcard/Download/$deviceGameName"
 Invoke-Adb -Arguments @('push', (Resolve-Path -LiteralPath $GamePath).Path, $deviceGamePath) | Out-Null
 Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.dingoopie.android') | Out-Null
+Invoke-Adb -Arguments @(
+    'shell', 'run-as', 'com.dingoopie.android', 'rm', '-f',
+    'logs/dingoopie-audio-validation.wav',
+    'logs/dingoopie-audio-validation.csv',
+    'logs/dingoopie-native.log') | Out-Null
 Invoke-Adb -Arguments @(
     'shell', 'am', 'start', '-W',
     '-n', 'com.dingoopie.android/.DingooPieActivity',
@@ -107,6 +113,10 @@ Invoke-Adb -Arguments @(
 $captureStart = Get-Date
 if ($InputSequence) {
     $points = @{
+        UP = @(60, 234)
+        DOWN = @(60, 307)
+        LEFT = @(24, 270)
+        RIGHT = @(96, 270)
         A = @(936, 270)
         B = @(900, 307)
         X = @(900, 234)
@@ -137,10 +147,28 @@ Start-Sleep -Seconds 2
 $wavePath = Join-Path $OutputDirectory 'audio-validation.wav'
 $eventsPath = Join-Path $OutputDirectory 'audio-validation.csv'
 $logPath = Join-Path $OutputDirectory 'native.log'
-Save-RunAsFile -DeviceRelativePath 'files/dingoopie-audio-validation.wav' -HostPath $wavePath
-Save-RunAsFile -DeviceRelativePath 'files/dingoopie-audio-validation.csv' -HostPath $eventsPath
-Save-RunAsFile -DeviceRelativePath 'files/dingoopie-native.log' -HostPath $logPath
+Save-RunAsFile -DeviceRelativePath 'logs/dingoopie-audio-validation.wav' -HostPath $wavePath
+Save-RunAsFile -DeviceRelativePath 'logs/dingoopie-audio-validation.csv' -HostPath $eventsPath
+$nativeLogOutput = & $AdbPath -s $Serial shell run-as com.dingoopie.android `
+    cat 'logs/dingoopie-native.log' 2>&1
+if ($LASTEXITCODE -eq 0) {
+    $nativeLogOutput | Set-Content -LiteralPath $logPath -Encoding utf8
+}
+else {
+    [System.IO.File]::WriteAllText($logPath, "", [System.Text.UTF8Encoding]::new($false))
+}
 Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.dingoopie.android') | Out-Null
+
+$waveBytes = [System.IO.File]::ReadAllBytes($wavePath)
+if ($waveBytes.Length -lt 12 -or
+    [System.Text.Encoding]::ASCII.GetString($waveBytes, 0, 4) -ne 'RIFF' -or
+    [System.Text.Encoding]::ASCII.GetString($waveBytes, 8, 4) -ne 'WAVE') {
+    throw "Audio validation WAV was not created. See $logPath"
+}
+$eventHeader = Get-Content -LiteralPath $eventsPath -TotalCount 1
+if ($eventHeader -notmatch '^elapsed_ms,event,bytes,queued_bytes,pending_bytes,wait_ms') {
+    throw "Audio validation event log was not created. See $logPath"
+}
 
 & python (Join-Path $PSScriptRoot 'analyze_audio_validation.py') `
     --wav $wavePath --events $eventsPath --output $OutputDirectory

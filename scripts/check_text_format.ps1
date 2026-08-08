@@ -5,6 +5,14 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $binaryExtensions = @(
     '.aab', '.apk', '.jar', '.pdf', '.png', '.zip'
 )
+$sourceExtensions = @(
+    '.bat', '.c', '.cc', '.cmake', '.cmd', '.cpp', '.cxx', '.gradle',
+    '.h', '.hh', '.hpp', '.inl', '.java', '.kt', '.mk', '.properties',
+    '.ps1', '.py', '.xml'
+)
+$sourcePrefixes = @('app/src/', 'native/', 'scripts/', 'tests/')
+$sourceFileNames = @('CMakeLists.txt')
+$directCjkPattern = '[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]'
 $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
 
 Push-Location $projectRoot
@@ -42,6 +50,28 @@ try {
         } catch {
             $invalidFiles.Add("$relativePath`: not valid UTF-8")
             continue
+        }
+
+        $normalizedRelativePath = $relativePath.Replace('\', '/')
+        $isSourceFile = $sourceExtensions -contains $extension -or
+            $sourceFileNames -contains [System.IO.Path]::GetFileName($relativePath)
+        $isSimulatorSource = $false
+        foreach ($prefix in $sourcePrefixes) {
+            if ($normalizedRelativePath.StartsWith(
+                    $prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $isSimulatorSource = $true
+                break
+            }
+        }
+        if ($isSourceFile -and $isSimulatorSource -and $text -match $directCjkPattern) {
+            $lineNumber = 1
+            $matchIndex = $text.IndexOf($Matches[0], [System.StringComparison]::Ordinal)
+            if ($matchIndex -gt 0) {
+                $lineNumber += [regex]::Matches(
+                    $text.Substring(0, $matchIndex), "`n").Count
+            }
+            $invalidFiles.Add(
+                "$relativePath`:$lineNumber`: direct CJK characters are not allowed; use Unicode escapes")
         }
 
         $hasInvalidLineEnding = $text -match '(?<!\r)\n|\r(?!\n)'

@@ -1,9 +1,16 @@
 package com.dingoopie.android;
 
+import android.annotation.SuppressLint;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.UriPermission;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -14,6 +21,8 @@ import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.provider.OpenableColumns;
@@ -21,6 +30,7 @@ import android.provider.DocumentsContract;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
+import android.system.StructStat;
 import android.util.Base64;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -29,6 +39,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.widget.TextView;
 
 import org.libsdl.app.SDLActivity;
 
@@ -48,8 +59,10 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class DingooPieActivity extends SDLActivity {
     private enum GameImportOption {
@@ -68,6 +81,8 @@ public final class DingooPieActivity extends SDLActivity {
     private static final String GAME_LIBRARY_EXCLUDED_IDENTITIES = "excluded_identities";
     private static final String GAME_LIBRARY_DIRECTORIES = "library_directories";
     private static final String GAME_PATH_PREFIX = "android-content://";
+    private static final String PRIVATE_SAVE_ROOT = "saves";
+    private static final String PRIVATE_LOG_ROOT = "logs";
     private static final String SCREEN_ORIENTATION_PREFERENCES = "screen_orientation";
     private static final String SCREEN_ORIENTATION_MODE = "mode";
     private static final String EXTRA_IME_AUTOMATION = "dingoopie.ime_automation";
@@ -82,6 +97,8 @@ public final class DingooPieActivity extends SDLActivity {
             "dingoopie.audio_validation";
     private static final String STATE_PENDING_GAME_FILE_URI =
             "dingoopie.pending_game_file_uri";
+    private static final String STATE_GAME_SELECTION_CHINESE =
+            "dingoopie.game_selection_chinese";
     private static final long IME_AUTOMATION_START_DELAY_MS = 500;
     private static final long IME_AUTOMATION_RESULT_DELAY_MS = 1200;
     private static final long APPLICATION_EXIT_NATIVE_CLEANUP_DELAY_MS = 500;
@@ -91,11 +108,15 @@ public final class DingooPieActivity extends SDLActivity {
     public static final int SCREEN_ORIENTATION_PORTRAIT = 2;
     private String selectedGamePath;
     private Uri pendingGameFileUri;
+    private boolean gameSelectionChinese = true;
     private boolean gameAutomationPathConsumed;
     private boolean audioValidationAutomationConsumed;
     private boolean cheatManagerAutomationGameConsumed;
     private boolean gameLibraryInitializationStarted;
+    private HandlerThread backgroundSignalThread;
+    private BroadcastReceiver systemDialogsReceiver;
     private volatile boolean activityDestroyed;
+    private LanFileManagerServer lanFileManagerServer;
     private volatile boolean gameLibraryScanning;
     private volatile int gameLibraryScanProcessedEntries;
     private volatile int gameLibraryScanTotalEntries;
@@ -108,6 +129,7 @@ public final class DingooPieActivity extends SDLActivity {
 
     static native boolean nativeRunSaveAutomation(
             String appDirectory, String ccDirectory);
+    private static native void nativeSetAppBackgrounded(boolean backgrounded);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -117,7 +139,10 @@ public final class DingooPieActivity extends SDLActivity {
             if (!pendingUriText.isEmpty()) {
                 pendingGameFileUri = Uri.parse(pendingUriText);
             }
+            gameSelectionChinese = savedInstanceState.getBoolean(
+                    STATE_GAME_SELECTION_CHINESE, true);
         }
+        registerBackgroundSignalReceiver();
         applySavedScreenOrientation();
         getWindow().getDecorView().postDelayed(initializeGameLibraryTask, 800);
         scheduleImmersiveMode();
@@ -130,6 +155,7 @@ public final class DingooPieActivity extends SDLActivity {
         if (pendingGameFileUri != null) {
             outState.putString(STATE_PENDING_GAME_FILE_URI, pendingGameFileUri.toString());
         }
+        outState.putBoolean(STATE_GAME_SELECTION_CHINESE, gameSelectionChinese);
         super.onSaveInstanceState(outState);
     }
 
@@ -144,11 +170,50 @@ public final class DingooPieActivity extends SDLActivity {
     @Override
     protected void onDestroy() {
         activityDestroyed = true;
+        if (lanFileManagerServer != null) {
+            lanFileManagerServer.close();
+            lanFileManagerServer = null;
+        }
+        unregisterBackgroundSignalReceiver();
         getWindow().getDecorView().removeCallbacks(initializeGameLibraryTask);
         gameLibraryScanExecutor.shutdownNow();
         gameLibraryScanTaskCount.set(0);
         gameLibraryScanning = false;
         super.onDestroy();
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private void registerBackgroundSignalReceiver() {
+        backgroundSignalThread = new HandlerThread("DingooPieBackgroundSignal");
+        backgroundSignalThread.start();
+        Handler handler = new Handler(backgroundSignalThread.getLooper());
+        systemDialogsReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String reason = intent.getStringExtra("reason");
+                if ("homekey".equals(reason) || "recentapps".equals(reason)) {
+                    nativeSetAppBackgrounded(true);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(systemDialogsReceiver, filter, null, handler,
+                    Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(systemDialogsReceiver, filter, null, handler);
+        }
+    }
+
+    private void unregisterBackgroundSignalReceiver() {
+        if (systemDialogsReceiver != null) {
+            unregisterReceiver(systemDialogsReceiver);
+            systemDialogsReceiver = null;
+        }
+        if (backgroundSignalThread != null) {
+            backgroundSignalThread.quitSafely();
+            backgroundSignalThread = null;
+        }
     }
 
     @Override
@@ -162,11 +227,7 @@ public final class DingooPieActivity extends SDLActivity {
             android.os.Handler handler = new android.os.Handler(getMainLooper());
             handler.postDelayed(() -> {
                 Log.i(TAG, "Removing application task after native shutdown");
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    finishAndRemoveTask();
-                } else {
-                    finishAffinity();
-                }
+                finishAndRemoveTask();
                 handler.postDelayed(() -> {
                     Log.i(TAG, "Ending process after explicit application exit");
                     android.os.Process.killProcess(android.os.Process.myPid());
@@ -257,6 +318,29 @@ public final class DingooPieActivity extends SDLActivity {
     protected void onResume() {
         super.onResume();
         scheduleImmersiveMode();
+    }
+
+    @Override
+    protected void onNativeStateChanged(NativeState state) {
+        nativeSetAppBackgrounded(state != NativeState.RESUMED);
+    }
+
+    @Override
+    protected void onPause() {
+        nativeSetAppBackgrounded(true);
+        super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        nativeSetAppBackgrounded(true);
+        super.onStop();
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        nativeSetAppBackgrounded(true);
+        super.onUserLeaveHint();
     }
 
     @Override
@@ -354,19 +438,22 @@ public final class DingooPieActivity extends SDLActivity {
         return result;
     }
 
-    // JNI entry point used by the native Android menu.
-    public boolean requestGameSelection() {
+    public boolean requestGameSelection(boolean chinese) {
         if (gameLibraryScanning) {
             return false;
         }
+        gameSelectionChinese = chinese;
         runOnUiThread(() -> {
             if (gameLibraryScanning || isFinishing()) {
                 completeGameSelection("");
                 return;
             }
             new AlertDialog.Builder(this)
-                    .setTitle("\u6DFB\u52A0\u6E38\u620F")
-                    .setItems(new String[]{"\u6DFB\u52A0\u6587\u4EF6", "\u6DFB\u52A0\u6587\u4EF6\u5939"}, (dialog, which) -> {
+                    .setTitle(gameSelectionText("\u6DFB\u52A0\u6E38\u620F", "Add Game"))
+                    .setItems(new String[]{
+                            gameSelectionText("\u6DFB\u52A0\u6587\u4EF6", "Add File"),
+                            gameSelectionText("\u6DFB\u52A0\u6587\u4EF6\u5939", "Add Folder")
+                    }, (dialog, which) -> {
                         GameImportOption option = GameImportOption.values()[which];
                         if (option == GameImportOption.FILE) {
                             requestGameFile();
@@ -389,35 +476,138 @@ public final class DingooPieActivity extends SDLActivity {
         }
     }
 
-    public void showMessageDialog(String title, String body) {
+    public void showMessageDialog(String title, String body, String positiveButton) {
         runOnUiThread(() -> new AlertDialog.Builder(this)
                 .setTitle(title)
                 .setMessage(body)
-                .setPositiveButton(android.R.string.ok, null)
+                .setPositiveButton(positiveButton, null)
                 .show());
+    }
+
+    public void showLanFileManager(boolean chinese) {
+        runOnUiThread(() -> {
+            if (activityDestroyed || isFinishing()) {
+                return;
+            }
+            try {
+                if (lanFileManagerServer == null) {
+                    lanFileManagerServer = new LanFileManagerServer(this, chinese);
+                    lanFileManagerServer.start();
+                }
+                List<String> urls = lanFileManagerServer.getAccessUrls();
+                StringBuilder message = new StringBuilder();
+                message.append(chinese ? "\u8bf7\u5728\u540c\u4e00\u5185\u7f51\u8bbe\u5907\u7684\u6d4f\u89c8\u5668\u4e2d\u6253\u5f00\uff1a\n\n" :
+                        "Open one of these addresses in a browser on the same network:\n\n");
+                if (urls.isEmpty()) {
+                    message.append(chinese ?
+                            "\u672a\u627e\u5230\u53ef\u7528\u7684\u5185\u7f51 IPv4 \u5730\u5740\u3002\n\u8bf7\u786e\u4fdd\u8bbe\u5907\u4e0e\u8bbf\u95ee\u7aef\u8fde\u63a5\u540c\u4e00\u7f51\u7edc\u3002" :
+                            "No LAN IPv4 address was found.\nConnect the device and client to the same network.");
+                } else {
+                    for (String url : urls) {
+                        message.append(url).append('\n');
+                    }
+                }
+                message.append('\n').append(chinese ?
+                        "\u5173\u95ed\u7a97\u53e3\u540e\uff0c\u6587\u4ef6\u670d\u52a1\u5c06\u7ee7\u7eed\u5728\u540e\u53f0\u8fd0\u884c\u3002" :
+                        "Closing this dialog keeps the file service running in the background.");
+                TextView textView = new TextView(this);
+                textView.setText(message.toString());
+                textView.setTextIsSelectable(true);
+                int padding = (int)(24 * getResources().getDisplayMetrics().density + 0.5f);
+                textView.setPadding(padding, padding / 2, padding, padding / 2);
+                new AlertDialog.Builder(this)
+                        .setTitle(chinese ? "\u6587\u4ef6\u7ba1\u7406\u670d\u52a1" : "File Manager Service")
+                        .setView(textView)
+                        .setPositiveButton(chinese ? "\u590d\u5236\u5730\u5740" : "Copy Address", (dialog, which) -> {
+                            if (!urls.isEmpty()) {
+                                ClipboardManager clipboard = (ClipboardManager)getSystemService(
+                                        CLIPBOARD_SERVICE);
+                                clipboard.setPrimaryClip(ClipData.newPlainText("DingooPie", urls.get(0)));
+                            }
+                        })
+                        .setNeutralButton(chinese ? "\u505c\u6b62\u670d\u52a1" : "Stop Service",
+                                (dialog, which) -> stopLanFileManager())
+                        .setNegativeButton(chinese ? "\u540e\u53f0\u8fd0\u884c" : "Keep Running", null)
+                        .show();
+            } catch (IOException exception) {
+                Log.e(TAG, "Unable to start LAN file manager", exception);
+                if (lanFileManagerServer != null) {
+                    lanFileManagerServer.close();
+                    lanFileManagerServer = null;
+                }
+                showMessageDialog(chinese ? "\u65e0\u6cd5\u542f\u52a8\u6587\u4ef6\u670d\u52a1" :
+                                "Cannot Start File Service",
+                        exception.getMessage() == null ? exception.toString() : exception.getMessage(),
+                        chinese ? "\u786e\u5b9a" : "OK");
+            }
+        });
+    }
+
+    private void stopLanFileManager() {
+        if (lanFileManagerServer != null) {
+            lanFileManagerServer.close();
+            lanFileManagerServer = null;
+        }
     }
 
     public boolean showConfirmationDialog(
             String title, String body, String positiveButton, String negativeButton) {
-        if (isFinishing()) {
+        if (isFinishing() || activityDestroyed) {
             return false;
         }
         CountDownLatch completed = new CountDownLatch(1);
         AtomicBoolean confirmed = new AtomicBoolean(false);
+        AtomicBoolean abandoned = new AtomicBoolean(false);
+        AtomicReference<AlertDialog> activeDialog = new AtomicReference<>();
         runOnUiThread(() -> {
-            AlertDialog dialog = new AlertDialog.Builder(this)
-                    .setTitle(title)
-                    .setMessage(body)
-                    .setPositiveButton(positiveButton,
-                            (unusedDialog, unusedWhich) -> confirmed.set(true))
-                    .setNegativeButton(negativeButton, null)
-                    .create();
-            dialog.setOnDismissListener(unusedDialog -> completed.countDown());
-            dialog.show();
+            if (isFinishing() || activityDestroyed || abandoned.get()) {
+                completed.countDown();
+                return;
+            }
+            try {
+                AlertDialog dialog = new AlertDialog.Builder(this)
+                        .setTitle(title)
+                        .setMessage(body)
+                        .setPositiveButton(positiveButton,
+                                (unusedDialog, unusedWhich) -> confirmed.set(true))
+                        .setNegativeButton(negativeButton, null)
+                        .create();
+                activeDialog.set(dialog);
+                dialog.setOnDismissListener(unusedDialog -> {
+                    activeDialog.compareAndSet(dialog, null);
+                    completed.countDown();
+                });
+                if (abandoned.get()) {
+                    activeDialog.compareAndSet(dialog, null);
+                    completed.countDown();
+                    return;
+                }
+                dialog.show();
+            } catch (RuntimeException exception) {
+                Log.e(TAG, "Unable to show confirmation dialog", exception);
+                completed.countDown();
+            }
         });
         try {
-            completed.await();
+            if (!completed.await(30, TimeUnit.SECONDS)) {
+                abandoned.set(true);
+                Log.w(TAG, "Confirmation dialog timed out");
+                runOnUiThread(() -> {
+                    AlertDialog dialog = activeDialog.get();
+                    if (dialog != null && dialog.isShowing()) {
+                        dialog.dismiss();
+                    }
+                });
+                return false;
+            }
         } catch (InterruptedException exception) {
+            abandoned.set(true);
+            runOnUiThread(() -> {
+                AlertDialog dialog = activeDialog.get();
+                if (dialog != null && dialog.isShowing()) {
+                    dialog.dismiss();
+                }
+            });
             Thread.currentThread().interrupt();
             return false;
         }
@@ -436,7 +626,6 @@ public final class DingooPieActivity extends SDLActivity {
         return gameLibraryScanTotalEntries;
     }
 
-    // JNI entry point used by the native Android menu.
     public synchronized String consumeSelectedGamePath() {
         String path = selectedGamePath;
         selectedGamePath = null;
@@ -499,8 +688,13 @@ public final class DingooPieActivity extends SDLActivity {
             String displayName = queryDisplayName(fileUri);
             if (!isSupportedGameFileName(displayName)) {
                 releasePersistedUriPermission(fileUri);
-                showMessageDialog("\u65E0\u6CD5\u6DFB\u52A0\u6E38\u620F",
-                        "\u8BF7\u9009\u62E9 .app \u6216 .cc \u683C\u5F0F\u7684\u6E38\u620F\u6587\u4EF6\u3002");
+                showMessageDialog(
+                        gameSelectionText("\u65E0\u6CD5\u6DFB\u52A0\u6E38\u620F",
+                                "Cannot Add Game"),
+                        gameSelectionText(
+                                "\u8BF7\u9009\u62E9 .app \u6216 .cc \u6E38\u620F\u6587\u4EF6\u3002",
+                                "Select an .app or .cc game file."),
+                        gameSelectionText("\u786E\u5B9A", "OK"));
                 completeGameSelection("");
                 return;
             }
@@ -658,6 +852,12 @@ public final class DingooPieActivity extends SDLActivity {
                     }
                     if (activityDestroyed || Thread.currentThread().isInterrupted()) {
                         break;
+                    }
+                    if (shouldIgnoreEmptyAutomaticScan(
+                            directoryUri, paths, notifySelection)) {
+                        Log.w(TAG, "Ignoring empty automatic scan for existing game directory: " +
+                                directoryUri);
+                        continue;
                     }
                     mergeGameLibrary(directoryUri, paths, notifySelection);
                     if (completion.isEmpty()) {
@@ -986,11 +1186,15 @@ public final class DingooPieActivity extends SDLActivity {
 
     private void requestGameFileDirectoryPermission(Uri fileUri) {
         runOnUiThread(() -> new AlertDialog.Builder(this)
-                .setTitle("\u6388\u6743\u6E38\u620F\u76EE\u5F55")
-                .setMessage("\u8BF7\u9009\u62E9\u521A\u624D\u6E38\u620F\u6587\u4EF6\u6240\u5728\u7684\u6587\u4EF6\u5939\uFF0C\u4EE5\u4FBF\u4FDD\u5B58\u5B58\u6863\u548C\u65E5\u5FD7\u3002")
-                .setPositiveButton("\u9009\u62E9\u6587\u4EF6\u5939",
+                .setTitle(gameSelectionText("\u9009\u62E9\u6E38\u620F\u6587\u4EF6\u5939",
+                        "Select Game Folder"))
+                .setMessage(gameSelectionText(
+                        "\u9009\u62E9\u8BE5\u6E38\u620F\u6240\u5728\u7684\u6587\u4EF6\u5939\uFF0C\u4EE5\u4FBF\u4FDD\u5B58\u5B58\u6863\u548C\u65E5\u5FD7\u3002",
+                        "Select the folder containing this game so saves and logs can be stored."))
+                .setPositiveButton(gameSelectionText("\u9009\u62E9\u6587\u4EF6\u5939",
+                                "Select Folder"),
                         (dialog, which) -> launchGameFileDirectoryPicker(fileUri))
-                .setNegativeButton(android.R.string.cancel,
+                .setNegativeButton(gameSelectionText("\u53D6\u6D88", "Cancel"),
                         (dialog, which) -> cancelPendingGameFileSelection())
                 .setOnCancelListener(dialog -> cancelPendingGameFileSelection())
                 .show());
@@ -998,14 +1202,22 @@ public final class DingooPieActivity extends SDLActivity {
 
     private void showGameFileDirectoryMismatchDialog(Uri fileUri) {
         runOnUiThread(() -> new AlertDialog.Builder(this)
-                .setTitle("\u6587\u4EF6\u5939\u4E0D\u5339\u914D")
-                .setMessage("\u6240\u9009\u6587\u4EF6\u5939\u4E0D\u5305\u542B\u521A\u624D\u7684\u6E38\u620F\u6587\u4EF6\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u6B63\u786E\u6587\u4EF6\u5939\u3002")
-                .setPositiveButton("\u91CD\u65B0\u9009\u62E9",
+                .setTitle(gameSelectionText("\u6587\u4EF6\u5939\u4E0D\u5339\u914D",
+                        "Folder Mismatch"))
+                .setMessage(gameSelectionText(
+                        "\u6240\u9009\u6587\u4EF6\u5939\u4E2D\u672A\u627E\u5230\u8BE5\u6E38\u620F\uFF0C\u8BF7\u9009\u62E9\u6B63\u786E\u7684\u6587\u4EF6\u5939\u3002",
+                        "The selected folder does not contain this game. Choose the correct folder."))
+                .setPositiveButton(gameSelectionText("\u91CD\u65B0\u9009\u62E9",
+                                "Choose Again"),
                         (dialog, which) -> launchGameFileDirectoryPicker(fileUri))
-                .setNegativeButton(android.R.string.cancel,
+                .setNegativeButton(gameSelectionText("\u53D6\u6D88", "Cancel"),
                         (dialog, which) -> cancelPendingGameFileSelection())
                 .setOnCancelListener(dialog -> cancelPendingGameFileSelection())
                 .show());
+    }
+
+    private String gameSelectionText(String chineseText, String englishText) {
+        return gameSelectionChinese ? chineseText : englishText;
     }
 
     private void cancelPendingGameFileSelection() {
@@ -1054,26 +1266,54 @@ public final class DingooPieActivity extends SDLActivity {
     }
 
     private boolean directoryContainsDocument(Uri directoryUri, Uri fileUri) {
-        if (directoryUri == null || fileUri == null ||
-                !java.util.Objects.equals(directoryUri.getAuthority(), fileUri.getAuthority())) {
+        if (directoryUri == null || fileUri == null) {
             return false;
         }
         try {
             String fileDocumentId = DocumentsContract.getDocumentId(fileUri);
             String directoryDocumentId = DocumentsContract.getTreeDocumentId(directoryUri);
+            String fileDisplayName = queryDisplayName(fileUri);
+            long fileSize = queryDocumentSize(fileUri);
             Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
                     directoryUri, directoryDocumentId);
             try (Cursor cursor = getContentResolver().query(childrenUri,
-                    new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID},
+                    new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                            DocumentsContract.Document.COLUMN_SIZE},
                     null, null, null)) {
                 if (cursor == null) {
                     return false;
                 }
                 int documentIdIndex = cursor.getColumnIndex(
                         DocumentsContract.Document.COLUMN_DOCUMENT_ID);
+                int displayNameIndex = cursor.getColumnIndex(
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME);
+                int sizeIndex = cursor.getColumnIndex(
+                        DocumentsContract.Document.COLUMN_SIZE);
                 while (cursor.moveToNext()) {
-                    if (documentIdIndex >= 0 && fileDocumentId.equals(
-                            cursor.getString(documentIdIndex))) {
+                    if (documentIdIndex < 0) {
+                        continue;
+                    }
+                    String childDocumentId = cursor.getString(documentIdIndex);
+                    if (java.util.Objects.equals(directoryUri.getAuthority(),
+                            fileUri.getAuthority()) &&
+                            fileDocumentId.equals(childDocumentId)) {
+                        return true;
+                    }
+                    String childDisplayName = displayNameIndex >= 0
+                            ? cursor.getString(displayNameIndex) : null;
+                    if (fileDisplayName == null ||
+                            !fileDisplayName.equals(childDisplayName)) {
+                        continue;
+                    }
+                    Uri childUri = DocumentsContract.buildDocumentUriUsingTree(
+                            directoryUri, childDocumentId);
+                    if (documentsReferToSameFile(fileUri, childUri)) {
+                        return true;
+                    }
+                    long childSize = sizeIndex >= 0 && !cursor.isNull(sizeIndex)
+                            ? cursor.getLong(sizeIndex) : -1L;
+                    if (fileSize >= 0L && fileSize == childSize) {
                         return true;
                     }
                 }
@@ -1082,6 +1322,38 @@ public final class DingooPieActivity extends SDLActivity {
             Log.e(TAG, "Unable to verify selected game directory", exception);
         }
         return false;
+    }
+
+    private boolean documentsReferToSameFile(Uri firstUri, Uri secondUri) {
+        try (ParcelFileDescriptor firstDescriptor =
+                     getContentResolver().openFileDescriptor(firstUri, "r");
+             ParcelFileDescriptor secondDescriptor =
+                     getContentResolver().openFileDescriptor(secondUri, "r")) {
+            if (firstDescriptor == null || secondDescriptor == null) {
+                return false;
+            }
+            StructStat firstStat = Os.fstat(firstDescriptor.getFileDescriptor());
+            StructStat secondStat = Os.fstat(secondDescriptor.getFileDescriptor());
+            return firstStat.st_ino != 0L && firstStat.st_dev == secondStat.st_dev &&
+                    firstStat.st_ino == secondStat.st_ino;
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    private long queryDocumentSize(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri,
+                new String[]{OpenableColumns.SIZE}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.SIZE);
+                if (index >= 0 && !cursor.isNull(index)) {
+                    return cursor.getLong(index);
+                }
+            }
+        } catch (Exception exception) {
+            return -1L;
+        }
+        return -1L;
     }
 
     private void requestGameDirectory() {
@@ -1124,12 +1396,12 @@ public final class DingooPieActivity extends SDLActivity {
                 .apply();
     }
 
-    public String getGameSaveDirectory(String gamePath) {
+    public String getGameSaveDirectory(String gamePath, String gameIdentity) {
         String selectedDirectory = getSelectedGameSaveDirectory(gamePath);
         if (canWriteSaveDirectory(selectedDirectory)) {
             return selectedDirectory;
         }
-        return getPrivateGameSaveDirectory("app-saves", gamePath, "");
+        return getPrivateGameSaveDirectory(gameIdentity);
     }
 
     public String getCcGameSaveDirectory(String gamePath, String gameIdentity) {
@@ -1137,7 +1409,99 @@ public final class DingooPieActivity extends SDLActivity {
         if (canWriteSaveDirectory(selectedDirectory)) {
             return selectedDirectory;
         }
-        return getPrivateGameSaveDirectory("cc-saves", gamePath, gameIdentity);
+        return getPrivateGameSaveDirectory(gameIdentity);
+    }
+
+    public String getPrivateLogDirectory() {
+        File dataDirectory = new File(getApplicationInfo().dataDir);
+        boolean debuggable =
+                (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        return preparePrivateLogDirectory(dataDirectory, getFilesDir(), debuggable);
+    }
+
+    String preparePrivateLogDirectory(
+            File dataDirectory, File filesDirectory, boolean debuggable) {
+        File directory = new File(dataDirectory, PRIVATE_LOG_ROOT);
+        if (!debuggable) {
+            deletePrivateDebugFiles(dataDirectory, filesDirectory, directory);
+            Log.i(TAG, "Private debug file logging is disabled");
+            return "";
+        }
+        if (!directory.exists() && !directory.mkdirs()) {
+            Log.e(TAG, "Unable to create private log directory: " + directory);
+            return "";
+        }
+        return directory.getAbsolutePath();
+    }
+
+    private void deletePrivateDebugFiles(
+            File dataDirectory, File filesDirectory, File logDirectory) {
+        deletePrivateLogTree(logDirectory);
+        File[] files = filesDirectory.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                String name = file.getName();
+                if ("dingoopie-native.log".equals(name) ||
+                        "dingoopie-native.err".equals(name) ||
+                        "dingoopie-audio-validation.wav".equals(name) ||
+                        "dingoopie-audio-validation.csv".equals(name) ||
+                        (name.startsWith("DingooPie-debug-") && name.endsWith(".log"))) {
+                    deletePrivateLogTree(file);
+                }
+            }
+        }
+        File saveRoot = new File(dataDirectory, PRIVATE_SAVE_ROOT);
+        File[] gameDirectories = saveRoot.listFiles();
+        if (gameDirectories != null) {
+            for (File gameDirectory : gameDirectories) {
+                File[] gameFiles = gameDirectory.listFiles();
+                if (gameFiles == null) {
+                    continue;
+                }
+                for (File gameFile : gameFiles) {
+                    String name = gameFile.getName();
+                    if (name.startsWith("DingooPie-crash-") && name.endsWith(".log")) {
+                        deletePrivateLogTree(gameFile);
+                    }
+                }
+            }
+        }
+    }
+
+    private void deletePrivateLogTree(File file) {
+        if (file == null || !file.exists()) {
+            return;
+        }
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                deletePrivateLogTree(child);
+            }
+        }
+        if (!file.delete()) {
+            Log.w(TAG, "Unable to remove private debug log path: " + file);
+        }
+    }
+
+    public boolean isPrivateGameSaveDirectory(String directoryText) {
+        if (directoryText == null || directoryText.isEmpty()) {
+            return false;
+        }
+        try {
+            Uri directoryUri = Uri.parse(directoryText);
+            if (!"file".equalsIgnoreCase(directoryUri.getScheme())) {
+                return false;
+            }
+            File saveRoot = new File(getApplicationInfo().dataDir, PRIVATE_SAVE_ROOT);
+            File directory = new File(directoryUri.getPath());
+            String rootPath = saveRoot.getCanonicalPath();
+            String directoryPath = directory.getCanonicalPath();
+            return !directoryPath.equals(rootPath) &&
+                    directoryPath.startsWith(rootPath + File.separator);
+        } catch (Exception exception) {
+            Log.e(TAG, "Unable to classify game save directory: " + directoryText, exception);
+            return false;
+        }
     }
 
     private String getSelectedGameSaveDirectory(String gamePath) {
@@ -1165,32 +1529,23 @@ public final class DingooPieActivity extends SDLActivity {
         return false;
     }
 
-    private String getPrivateGameSaveDirectory(
-            String rootName, String gamePath, String gameIdentity) {
-        String saveKey = gameIdentity == null || gameIdentity.isEmpty()
-                ? gameSaveKey(gamePath)
-                : gameIdentity.toLowerCase(Locale.ROOT);
-        File directory = new File(new File(getFilesDir(), rootName), saveKey);
+    private String getPrivateGameSaveDirectory(String gameIdentity) {
+        if (gameIdentity == null || gameIdentity.isEmpty()) {
+            Log.e(TAG, "Missing game identity for private save directory");
+            return "";
+        }
+        String saveKey = gameIdentity.toLowerCase(Locale.ROOT);
+        File saveRoot = new File(getApplicationInfo().dataDir, PRIVATE_SAVE_ROOT);
+        if (!saveRoot.exists() && !saveRoot.mkdirs()) {
+            Log.e(TAG, "Unable to create private save root: " + saveRoot);
+            return "";
+        }
+        File directory = new File(saveRoot, saveKey);
         if (!directory.exists() && !directory.mkdirs()) {
             Log.e(TAG, "Unable to create private save directory: " + directory);
             return "";
         }
         return Uri.fromFile(directory).toString();
-    }
-
-    private String gameSaveKey(String gamePath) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] bytes = digest.digest((gamePath == null ? "" : gamePath)
-                    .getBytes(StandardCharsets.UTF_8));
-            StringBuilder result = new StringBuilder(bytes.length * 2);
-            for (byte value : bytes) {
-                result.append(String.format(Locale.ROOT, "%02x", value & 0xff));
-            }
-            return result.toString();
-        } catch (Exception exception) {
-            return Integer.toHexString((gamePath == null ? "" : gamePath).hashCode());
-        }
     }
 
     public int openGameSaveFileDescriptor(String directoryUriText, String fileName, String mode) {
@@ -1265,6 +1620,126 @@ public final class DingooPieActivity extends SDLActivity {
         } catch (Exception exception) {
             Log.e(TAG, "Unable to open game save file: " + fileName, exception);
             return -1;
+        }
+    }
+
+    public long getGameSaveFileModifiedTime(String directoryUriText, String fileName) {
+        if (directoryUriText == null || fileName == null || fileName.isEmpty()) {
+            return 0L;
+        }
+        try {
+            List<String> pathSegments = normalizeSavePath(fileName);
+            if (pathSegments == null || pathSegments.isEmpty()) {
+                return 0L;
+            }
+            Uri directoryUri = Uri.parse(directoryUriText);
+            if ("file".equalsIgnoreCase(directoryUri.getScheme())) {
+                File directory = new File(directoryUri.getPath());
+                File file = directory;
+                for (String pathSegment : pathSegments) {
+                    file = new File(file, pathSegment);
+                }
+                String directoryPath = directory.getCanonicalPath();
+                String filePath = file.getCanonicalPath();
+                if (!filePath.equals(directoryPath) &&
+                        !filePath.startsWith(directoryPath + File.separator)) {
+                    return 0L;
+                }
+                return file.isFile() ? file.lastModified() : 0L;
+            }
+            Uri parentUri = asDocumentDirectoryUri(directoryUri);
+            if (parentUri == null) {
+                return 0L;
+            }
+            for (int index = 0; index + 1 < pathSegments.size(); index++) {
+                parentUri = findChildDocument(parentUri, pathSegments.get(index));
+                if (parentUri == null) {
+                    return 0L;
+                }
+            }
+            Uri fileUri = findChildDocument(parentUri,
+                    pathSegments.get(pathSegments.size() - 1));
+            if (fileUri == null) {
+                return 0L;
+            }
+            try (android.database.Cursor cursor = getContentResolver().query(
+                    fileUri,
+                    new String[]{DocumentsContract.Document.COLUMN_LAST_MODIFIED},
+                    null, null, null)) {
+                if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
+                    return cursor.getLong(0);
+                }
+            }
+        } catch (Exception exception) {
+            Log.e(TAG, "Unable to query game save file time: " + fileName, exception);
+        }
+        return 0L;
+    }
+
+    boolean shouldIgnoreEmptyAutomaticScan(
+            Uri directoryUri, List<String> paths, boolean notifySelection) {
+        return paths != null && paths.isEmpty() && !notifySelection &&
+                hasStoredGamesForDirectory(directoryUri);
+    }
+
+    private boolean hasStoredGamesForDirectory(Uri directoryUri) {
+        if (directoryUri == null) {
+            return false;
+        }
+        SharedPreferences preferences = getSharedPreferences(
+                GAME_LIBRARY_PREFERENCES, MODE_PRIVATE);
+        String directoryText = directoryUri.toString();
+        for (String path : preferences.getStringSet(
+                GAME_LIBRARY_PATHS, Collections.emptySet())) {
+            if (directoryText.equals(preferences.getString(
+                    GAME_SAVE_DIRECTORIES + ":" + path, ""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean deleteGameSaveFile(String directoryUriText, String fileName) {
+        if (directoryUriText == null || fileName == null || fileName.isEmpty()) {
+            return false;
+        }
+        try {
+            List<String> pathSegments = normalizeSavePath(fileName);
+            if (pathSegments == null || pathSegments.isEmpty()) {
+                return false;
+            }
+            Uri directoryUri = Uri.parse(directoryUriText);
+            if ("file".equalsIgnoreCase(directoryUri.getScheme())) {
+                File directory = new File(directoryUri.getPath());
+                File file = directory;
+                for (String pathSegment : pathSegments) {
+                    file = new File(file, pathSegment);
+                }
+                String directoryPath = directory.getCanonicalPath();
+                String filePath = file.getCanonicalPath();
+                if (!filePath.equals(directoryPath) &&
+                        !filePath.startsWith(directoryPath + File.separator)) {
+                    return false;
+                }
+                return !file.exists() || file.delete();
+            }
+            Uri parentUri = asDocumentDirectoryUri(directoryUri);
+            if (parentUri == null) {
+                return false;
+            }
+            for (int index = 0; index + 1 < pathSegments.size(); index++) {
+                parentUri = findChildDocument(parentUri, pathSegments.get(index));
+                if (parentUri == null) {
+                    return true;
+                }
+            }
+            Uri fileUri = findChildDocument(parentUri,
+                    pathSegments.get(pathSegments.size() - 1));
+            return fileUri == null || DocumentsContract.deleteDocument(
+                    getContentResolver(), fileUri);
+        } catch (Exception exception) {
+            Log.e(TAG, "Unable to delete game save file: " + fileName, exception);
+            return false;
         }
     }
 

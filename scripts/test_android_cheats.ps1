@@ -1,5 +1,6 @@
 param(
     [string]$AndroidSdkRoot,
+    [string]$AdbPath,
     [string]$Serial = '127.0.0.1:7555',
     [string]$GameName = [string]::Concat([char]0x5929, [char]0x5730, [char]0x9053),
     [string]$GameDirectory = '/sdcard/Download/DingooSample',
@@ -30,7 +31,12 @@ if (!$AndroidSdkRoot) {
 }
 
 $resolvedSdkRoot = (Resolve-Path -LiteralPath $AndroidSdkRoot).Path
-$adb = Join-Path $resolvedSdkRoot 'platform-tools\adb.exe'
+$adb = if ($AdbPath) {
+    (Resolve-Path -LiteralPath $AdbPath).Path
+}
+else {
+    Join-Path $resolvedSdkRoot 'platform-tools\adb.exe'
+}
 $ndkRoot = Join-Path $resolvedSdkRoot 'ndk\26.3.11579264'
 if (!(Test-Path -LiteralPath $adb)) {
     throw "ADB was not found: $adb"
@@ -142,7 +148,7 @@ try {
         Start-Sleep -Seconds 1
         $nativeLog = Invoke-Adb -Arguments @(
             'exec-out', 'run-as', 'com.dingoopie.android',
-            'cat', 'files/dingoopie-native.log') | Out-String
+            'cat', 'logs/dingoopie-native.log') | Out-String
         $automationLine = $nativeLog -split "`r?`n" |
             Where-Object { $_ -like 'CHEAT_MANAGER_AUTOMATION result=*' } |
             Select-Object -Last 1

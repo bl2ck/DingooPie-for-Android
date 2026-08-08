@@ -9,6 +9,8 @@
 #include "runtime/pause_gate.h"
 #include "platform_services.h"
 #include "app/sdk_hle.h"
+#include "app/app_mips_runtime.h"
+#include "app/save_state.h"
 #include "frontend/sdl_audio.h"
 #include "frontend/menu_model.h"
 #include "frontend/menu_strings.h"
@@ -32,6 +34,7 @@
 static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
 static SDL_Texture* g_frameTexture = NULL;
+static SDL_Texture* g_blurredBackdropTexture = NULL;
 static SDL_Texture* g_fpsOverlayTexture = NULL;
 static SDL_Texture* g_idleTitleTexture = NULL;
 static SDL_Texture* g_idleSymbolTextures[4] = {};
@@ -60,21 +63,31 @@ static bool g_gameRunning = false;
 static bool g_userPauseRequested = false;
 static bool g_minimizedPauseActive = false;
 static bool g_androidBackgroundActive = false;
+static SDL_atomic_t g_androidBackgroundRequested;
+static bool g_androidRendererRestorePending = false;
+static uint32_t g_androidForegroundStablePumps = 0;
 static EmulatorSettings* g_frontendSettings = NULL;
 static std::string g_frontendCurrentGamePath;
 static std::string g_androidCheatManagerGamePath;
 static std::string g_frontendPendingGamePath;
-static uint16_t g_lastDisplayFrame[SCREEN_WIDTH * SCREEN_HEIGHT];
-static int g_lastDisplayFrameWidth = SCREEN_WIDTH;
-static int g_lastDisplayFrameHeight = SCREEN_HEIGHT;
-static bool g_lastDisplayFrameValid = false;
+static int g_androidSaveStateSelectedSlot = 1;
+static bool g_androidSaveStateBusy = false;
+static SaveStateProgress g_androidSaveStateProgress = { SAVE_STATE_PROGRESS_COMPRESS, 0 };
+static std::string g_androidSaveStateStatus;
+static SDL_Texture* g_androidSaveStateThumbnail = NULL;
+static bool g_androidSaveStateSlotExists[kSaveStateSlotCount] = {};
+static uint64_t g_androidSaveStateSlotModifiedTime[kSaveStateSlotCount] = {};
+static std::string g_androidSaveStateSlotCacheGamePath;
 
 static const uint64_t kMinimizedThrottlePresentIntervalMs = 250;
 static const uint32_t kMinimizedThrottleLoopDelayMs = 50;
 static const uint64_t kIdlePresentIntervalUs = 16667;
 static const uint64_t kIdleWakeMarginUs = 2000;
 static const uint32_t kIdleMaxWaitMs = 4;
+static const int kBlurredBackdropWidth = SCREEN_WIDTH / 4;
+static const int kBlurredBackdropHeight = SCREEN_HEIGHT / 4;
 static const double kPi = 3.14159265358979323846;
+static uint32_t g_blurredBackdropUpdateCounter = 0;
 
 static bool inputTraceEnabled(void);
 static void openFirstGameController(void);
@@ -83,7 +96,13 @@ static void releaseVirtualPointerControls(void);
 static void updateVirtualPointerControls(uint32_t newMask);
 static bool drawIdleScreen(uint64_t animationTimeMs);
 static bool createGameFrameTexture(void);
+static bool createBlurredBackdropTexture(void);
+static bool textureLinearSamplingEnabled(const EmulatorSettings& settings);
 static void releaseGameVideoResources(void);
+static void refreshAndroidSaveStateSlots(void);
+static void refreshAndroidSaveStateSlotInfo(int slot);
+static void invalidateAndroidSaveStateThumbnail(void);
+static void refreshAndroidSaveStateThumbnail(void);
 
 static const char* sdlLogCategoryName(int category)
 {
@@ -263,6 +282,9 @@ static uint32_t g_virtualMouseControlMask = 0;
 static bool g_virtualMousePointerHeld = false;
 static int g_virtualDpadOffsetX = 0;
 static int g_virtualDpadOffsetY = 0;
+static double g_virtualDpadVisualOffsetX = 0.0;
+static double g_virtualDpadVisualOffsetY = 0.0;
+static uint64_t g_virtualDpadVisualUpdateTicks = 0;
 struct AndroidVirtualTouchContact
 {
     SDL_FingerID fingerId;
@@ -291,6 +313,11 @@ static uint32_t frontendSyntheticControlMask(void)
 static void applyFrontendSyntheticControlMask(uint32_t oldMask, uint32_t newMask)
 {
     uint32_t changed = oldMask ^ newMask;
+    uint32_t pressed = changed & newMask;
+    if (pressed)
+    {
+        mixerRecordInput(pressed);
+    }
     for (uint32_t bit = 0; bit < 32; ++bit)
     {
         uint32_t mask = 1u << bit;
@@ -321,6 +348,37 @@ static bool frontendPostRestoreInputBlocked(void)
 static bool virtualControlsVisible(void)
 {
     return g_frontendSettings && g_frontendSettings->showVirtualControls;
+}
+
+static int virtualControlScalePercent(void)
+{
+    if (!g_frontendSettings)
+    {
+        return 100;
+    }
+    for (size_t index = 0;
+        index < sizeof(EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES) /
+            sizeof(EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES[0]);
+        ++index)
+    {
+        if (g_frontendSettings->virtualControlScalePercent ==
+            EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES[index])
+        {
+            return g_frontendSettings->virtualControlScalePercent;
+        }
+    }
+    return 100;
+}
+
+static VirtualDpadType virtualDpadType(void)
+{
+    if (!g_frontendSettings ||
+        g_frontendSettings->virtualDpadType < VIRTUAL_DPAD_JOYSTICK ||
+        g_frontendSettings->virtualDpadType >= VIRTUAL_DPAD_TYPE_COUNT)
+    {
+        return VIRTUAL_DPAD_JOYSTICK;
+    }
+    return g_frontendSettings->virtualDpadType;
 }
 
 static bool portraitModeEnabled(void)
@@ -517,6 +575,43 @@ static void renderVirtualDrawCircle(int centerX, int centerY, int radius)
         previousY = y;
     }
 }
+
+static void renderVirtualFillArcBand(int centerX, int centerY,
+    int innerRadius, int outerRadius, int directionX, int directionY)
+{
+    int64_t innerRadiusSquared = (int64_t)innerRadius * innerRadius;
+    int64_t outerRadiusSquared = (int64_t)outerRadius * outerRadius;
+    int tangentX = -directionY;
+    int tangentY = directionX;
+    for (int localY = -outerRadius; localY <= outerRadius; ++localY)
+    {
+        int runStart = 0;
+        bool runActive = false;
+        for (int localX = -outerRadius; localX <= outerRadius; ++localX)
+        {
+            int64_t distanceSquared =
+                (int64_t)localX * localX + (int64_t)localY * localY;
+            int forward = localX * directionX + localY * directionY;
+            int lateral = abs(localX * tangentX + localY * tangentY);
+            bool inside = distanceSquared >= innerRadiusSquared &&
+                distanceSquared <= outerRadiusSquared && forward > 0 &&
+                (int64_t)lateral * 1000 <= (int64_t)forward * 424;
+            if (inside && !runActive)
+            {
+                runStart = localX;
+                runActive = true;
+            }
+            if ((!inside || localX == outerRadius) && runActive)
+            {
+                int runEnd = inside && localX == outerRadius ? localX : localX - 1;
+                renderVirtualDrawLine(centerX + runStart, centerY + localY,
+                    centerX + runEnd, centerY + localY);
+                runActive = false;
+            }
+        }
+    }
+}
+
 static void drawPixelGridOverlay(void)
 {
     int width = 0;
@@ -622,6 +717,7 @@ static const int kAndroidMenuListBottomInset = 16;
 static bool androidMenuScreenUsesOverlay(AndroidMenuScreen menuScreen)
 {
     return menuScreen == ANDROID_MENU_MAIN || menuScreen == ANDROID_MENU_OPTIONS ||
+        menuScreen == ANDROID_MENU_SAVE_STATE ||
         menuScreen == ANDROID_MENU_ABOUT || menuScreen == ANDROID_MENU_SETTINGS ||
         menuScreen == ANDROID_MENU_VIDEO ||
         menuScreen == ANDROID_MENU_AUDIO || menuScreen == ANDROID_MENU_INPUT ||
@@ -859,30 +955,29 @@ static bool androidChineseUi(void)
     return !g_frontendSettings || g_frontendSettings->uiLanguage != UI_LANGUAGE_ENGLISH;
 }
 
-static const char* kZhBack = "\xE8\xBF\x94\xE5\x9B\x9E";
-static const char* kZhAddGame = "\xE6\xB7\xBB\xE5\x8A\xA0\xE6\xB8\xB8\xE6\x88\x8F";
-static const char* kZhGames = "\xE6\xB8\xB8\xE6\x88\x8F";
-static const char* kZhNoGames = "\xE6\x97\xA0\xE6\xB8\xB8\xE6\x88\x8F\xE5\x88\x97\xE8\xA1\xA8";
-static const char* kZhRemove = "\xE7\xA7\xBB\xE9\x99\xA4";
-static const char* kZhRemoveGame = "\xE7\xA7\xBB\xE9\x99\xA4\xE6\xB8\xB8\xE6\x88\x8F";
-static const char* kZhCancel = "\xE5\x8F\x96\xE6\xB6\x88";
-static const char* kZhShowFpsOn = "\xE6\x98\xBE\xE7\xA4\xBA\xE5\xB8\xA7\xE7\x8E\x87\xEF\xBC\x9A\xE5\xBC\x80";
-static const char* kZhShowFpsOff = "\xE6\x98\xBE\xE7\xA4\xBA\xE5\xB8\xA7\xE7\x8E\x87\xEF\xBC\x9A\xE5\x85\xB3";
-static const char* kZhVirtualOn = "\xE8\x99\x9A\xE6\x8B\x9F\xE6\x8C\x89\xE9\x94\xAE\xEF\xBC\x9A\xE5\xBC\x80";
-static const char* kZhVirtualOff = "\xE8\x99\x9A\xE6\x8B\x9F\xE6\x8C\x89\xE9\x94\xAE\xEF\xBC\x9A\xE5\x85\xB3";
-static const char* kZhFilterSharp = "\xE7\x94\xBB\xE9\x9D\xA2\xE6\xBB\xA4\xE9\x95\x9C\xEF\xBC\x9A\xE9\x94\x90\xE5\x8C\x96";
-static const char* kZhFilterNormal = "\xE7\x94\xBB\xE9\x9D\xA2\xE6\xBB\xA4\xE9\x95\x9C\xEF\xBC\x9A\xE6\xAD\xA3\xE5\xB8\xB8";
-static const char* kZhAudioOff = "\xE5\xA3\xB0\xE9\x9F\xB3\xEF\xBC\x9A\xE5\x85\xB3";
-static const char* kZhAudioOn = "\xE5\xA3\xB0\xE9\x9F\xB3\xEF\xBC\x9A\xE5\xBC\x80";
-static const char* kZhScreenOrientationAuto = "\xE5\xB1\x8F\xE5\xB9\x95\xE6\x96\xB9\xE5\x90\x91\xEF\xBC\x9A\xE8\x87\xAA\xE5\x8A\xA8";
-static const char* kZhScreenOrientationLandscape = "\xE5\xB1\x8F\xE5\xB9\x95\xE6\x96\xB9\xE5\x90\x91\xEF\xBC\x9A\xE6\xA8\xAA\xE5\xB1\x8F";
-static const char* kZhScreenOrientationPortrait = "\xE5\xB1\x8F\xE5\xB9\x95\xE6\x96\xB9\xE5\x90\x91\xEF\xBC\x9A\xE7\xAB\x96\xE5\xB1\x8F";
-static const char* kZhLanguageChinese = "\xE8\xAF\xAD\xE8\xA8\x80\xEF\xBC\x9A\xE4\xB8\xAD\xE6\x96\x87";
-static const char* kZhMenu = "\xE8\x8F\x9C\xE5\x8D\x95";
-static const char* kZhGameMenu = "\xE6\xB8\xB8\xE6\x88\x8F\xE8\x8F\x9C\xE5\x8D\x95";
-static const char* kZhResume = "\xE7\xBB\xA7\xE7\xBB\xAD\xE6\xB8\xB8\xE6\x88\x8F";
-static const char* kZhSwitchGame = "\xE5\x88\x87\xE6\x8D\xA2\xE6\xB8\xB8\xE6\x88\x8F";
-static const char* kZhExitApp = "\xE9\x80\x80\xE5\x87\xBA\xE5\xBA\x94\xE7\x94\xA8";
+static const char* kZhBack = u8"\u8fd4\u56de";
+static const char* kZhAddGame = u8"\u6dfb\u52a0\u6e38\u620f";
+static const char* kZhGames = u8"\u6e38\u620f";
+static const char* kZhNoGames = u8"\u6682\u65e0\u6e38\u620f";
+static const char* kZhRemove = u8"\u79fb\u9664";
+static const char* kZhRemoveGame = u8"\u79fb\u9664\u6e38\u620f";
+static const char* kZhCancel = u8"\u53d6\u6d88";
+static const char* kZhShowFpsOn = u8"\u663e\u793a\u5e27\u7387\uff1a\u5f00";
+static const char* kZhShowFpsOff = u8"\u663e\u793a\u5e27\u7387\uff1a\u5173";
+static const char* kZhVirtualOn = u8"\u865a\u62df\u6309\u952e\uff1a\u5f00";
+static const char* kZhVirtualOff = u8"\u865a\u62df\u6309\u952e\uff1a\u5173";
+static const char* kZhFilterSharp = u8"\u753b\u9762\u6ee4\u955c\uff1a\u9510\u5316";
+static const char* kZhFilterNormal = u8"\u753b\u9762\u6ee4\u955c\uff1a\u6b63\u5e38";
+static const char* kZhAudioOff = u8"\u58f0\u97f3\uff1a\u5173";
+static const char* kZhAudioOn = u8"\u58f0\u97f3\uff1a\u5f00";
+static const char* kZhScreenOrientationAuto = u8"\u5c4f\u5e55\u65b9\u5411\uff1a\u81ea\u52a8";
+static const char* kZhScreenOrientationLandscape = u8"\u5c4f\u5e55\u65b9\u5411\uff1a\u6a2a\u5c4f";
+static const char* kZhScreenOrientationPortrait = u8"\u5c4f\u5e55\u65b9\u5411\uff1a\u7ad6\u5c4f";
+static const char* kZhLanguageChinese = u8"\u8bed\u8a00\uff1a\u4e2d\u6587";
+static const char* kZhMenu = u8"\u83dc\u5355";
+static const char* kZhGameMenu = u8"\u6e38\u620f\u83dc\u5355";
+static const char* kZhSwitchGame = u8"\u5207\u6362\u6e38\u620f";
+static const char* kZhExitApp = u8"\u9000\u51fa\u5e94\u7528";
 
 static ScreenOrientationMode normalizeScreenOrientationMode(int mode)
 {
@@ -1000,7 +1095,10 @@ static std::string androidAppVersionName(void)
     return cachedVersion;
 }
 
-static void showAndroidMessageDialog(const std::string& title, const std::string& body)
+static void showAndroidMessageDialog(
+    const std::string& title,
+    const std::string& body,
+    const std::string& positiveButton)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -1011,12 +1109,14 @@ static void showAndroidMessageDialog(const std::string& title, const std::string
 
     jclass activityClass = env->GetObjectClass(activity);
     jmethodID method = activityClass ? env->GetMethodID(activityClass,
-        "showMessageDialog", "(Ljava/lang/String;Ljava/lang/String;)V") : NULL;
+        "showMessageDialog",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V") : NULL;
     jstring javaTitle = method ? env->NewStringUTF(title.c_str()) : NULL;
     jstring javaBody = method ? env->NewStringUTF(body.c_str()) : NULL;
-    if (method && javaTitle && javaBody)
+    jstring javaPositiveButton = method ? env->NewStringUTF(positiveButton.c_str()) : NULL;
+    if (method && javaTitle && javaBody && javaPositiveButton)
     {
-        env->CallVoidMethod(activity, method, javaTitle, javaBody);
+        env->CallVoidMethod(activity, method, javaTitle, javaBody, javaPositiveButton);
     }
     if (env->ExceptionCheck())
     {
@@ -1024,7 +1124,14 @@ static void showAndroidMessageDialog(const std::string& title, const std::string
     }
     if (javaTitle) env->DeleteLocalRef(javaTitle);
     if (javaBody) env->DeleteLocalRef(javaBody);
+    if (javaPositiveButton) env->DeleteLocalRef(javaPositiveButton);
     if (activityClass) env->DeleteLocalRef(activityClass);
+}
+
+static void showAndroidMessageDialog(const std::string& title, const std::string& body)
+{
+    showAndroidMessageDialog(title, body,
+        androidChineseUi() ? u8"\u786e\u5b9a" : "OK");
 }
 
 static bool showAndroidConfirmationDialog(
@@ -1081,11 +1188,12 @@ static void requestAndroidGameImport(void)
     }
     jclass activityClass = env->GetObjectClass(activity);
     jmethodID method = activityClass ?
-        env->GetMethodID(activityClass, "requestGameSelection", "()Z") : NULL;
+        env->GetMethodID(activityClass, "requestGameSelection", "(Z)Z") : NULL;
     if (method)
     {
         g_androidGameImportPending =
-            env->CallBooleanMethod(activity, method) == JNI_TRUE;
+            env->CallBooleanMethod(activity, method,
+                androidChineseUi() ? JNI_TRUE : JNI_FALSE) == JNI_TRUE;
     }
     if (env->ExceptionCheck())
     {
@@ -1093,6 +1201,32 @@ static void requestAndroidGameImport(void)
         g_androidGameImportPending = false;
     }
     if (activityClass) env->DeleteLocalRef(activityClass);
+}
+
+static void showAndroidLanFileManager(void)
+{
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
+    if (!env || !activity)
+    {
+        return;
+    }
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID method = activityClass ? env->GetMethodID(activityClass,
+        "showLanFileManager", "(Z)V") : NULL;
+    if (method)
+    {
+        env->CallVoidMethod(activity, method,
+            androidChineseUi() ? JNI_TRUE : JNI_FALSE);
+    }
+    if (env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+    }
+    if (activityClass)
+    {
+        env->DeleteLocalRef(activityClass);
+    }
 }
 
 static void rememberAndroidGameRun(const std::string& path)
@@ -1305,11 +1439,29 @@ static int androidCompactButtonTextSize(const SDL_Rect& rect)
     return std::max(androidUiMetric(12), std::min(androidUiMetric(18), rect.h / 3));
 }
 
+static int virtualCompactButtonTextSize(const SDL_Rect& rect)
+{
+    const int scalePercent = virtualControlScalePercent();
+    const int minimumSize = std::max(1,
+        (androidUiMetric(12) * scalePercent + 50) / 100);
+    const int maximumSize = std::max(minimumSize,
+        (androidUiMetric(18) * scalePercent + 50) / 100);
+    return std::max(minimumSize, std::min(maximumSize, rect.h / 3));
+}
+
+static int virtualButtonTextSize(const SDL_Rect& rect)
+{
+    const int minimumSize = std::max(1,
+        (16 * virtualControlScalePercent() + 50) / 100);
+    return std::max(minimumSize, rect.h * 2 / 5);
+}
+
 static int androidMenuScreenRowCount(void)
 {
     switch (g_androidMenuScreen)
     {
     case ANDROID_MENU_PAUSE: return ANDROID_PAUSE_ROW_COUNT;
+    case ANDROID_MENU_SAVE_STATE: return 0;
     case ANDROID_MENU_MAIN: return ANDROID_MAIN_ROW_COUNT;
     case ANDROID_MENU_ABOUT: return ANDROID_ABOUT_ROW_COUNT;
     case ANDROID_MENU_OPTIONS: return ANDROID_OPTIONS_ROW_COUNT;
@@ -1336,7 +1488,15 @@ static SDL_Rect androidPanelRect(int width, int height)
     panelWidth = std::min(panelWidth, std::max(1, width - 2 * horizontalMargin));
     int rowCount = androidMenuScreenRowCount();
     int contentHeight = androidUiMetric(kAndroidMenuRowTop + kAndroidMenuListBottomInset);
-    if (rowCount > 0)
+    if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE)
+    {
+        const int rowHeight = kAndroidMenuRowHeight;
+        const int rowGap = kAndroidMenuRowGap;
+        contentHeight = androidUiMetric(kAndroidMenuRowTop +
+            rowHeight + rowGap + 5 * rowHeight + 4 * rowGap +
+            rowGap + rowHeight + kAndroidMenuListBottomInset);
+    }
+    else if (rowCount > 0)
     {
         contentHeight += rowCount * androidUiMetric(kAndroidMenuRowHeight) +
             std::max(0, rowCount - 1) * androidUiMetric(kAndroidMenuRowGap);
@@ -1414,6 +1574,21 @@ struct AndroidLibraryLayout
     int actionWidth;
     bool compact;
 };
+
+struct AndroidThemeColors
+{
+    SDL_Color card;
+    SDL_Color cardBorder;
+    SDL_Color button;
+    SDL_Color buttonBorder;
+    SDL_Color icon;
+    SDL_Color iconBorder;
+    SDL_Color text;
+    SDL_Color buttonText;
+    SDL_Color mutedText;
+};
+
+static AndroidThemeColors androidThemeColors(void);
 
 static const int kAndroidLibraryHeaderTop = 10;
 static const int kAndroidLibraryActionTop = 18;
@@ -1549,6 +1724,16 @@ static SDL_Rect androidLibrarySettingsButtonRect(int width)
     return SDL_Rect{ x, addButton.y, buttonWidth, addButton.h };
 }
 
+static SDL_Rect androidLibraryFileManagerButtonRect(int width)
+{
+    int scale = androidUiScale();
+    SDL_Rect settingsButton = androidLibrarySettingsButtonRect(width);
+    int gap = 12 * scale;
+    int buttonSize = settingsButton.h;
+    return SDL_Rect{ settingsButton.x - gap - buttonSize,
+        settingsButton.y, buttonSize, buttonSize };
+}
+
 static SDL_Rect androidLibraryAddButtonRect(int width)
 {
     int scale = androidUiScale();
@@ -1569,6 +1754,60 @@ static void drawAndroidOutline(const SDL_Rect& rect, SDL_Color color)
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
     SDL_RenderDrawRect(g_renderer, &rect);
+}
+
+static void drawAndroidFolderIcon(const SDL_Rect& button,
+    const AndroidThemeColors& colors)
+{
+    const int scale = androidUiScale();
+    const int inset = std::max(10 * scale, button.w / 4);
+    const int left = button.x + inset;
+    const int top = button.y + inset;
+    const int right = button.x + button.w - inset;
+    const int bottom = button.y + button.h - inset;
+    const int tabHeight = std::max(4 * scale, button.h / 9);
+    const int bodyTop = top + tabHeight;
+    const int bodyWidth = std::max(1, right - left);
+    const int upperWidth = std::max(tabHeight + 1, bodyWidth * 3 / 5);
+    const int tabSlopeEnd = std::min(right, left + upperWidth);
+    const int tabRight = std::max(left + 1, tabSlopeEnd - tabHeight);
+    const int dividerHeight = std::min(3, std::max(1, bottom - bodyTop));
+    const SDL_Color fill = colors.buttonText;
+    const SDL_Color outline = colors.iconBorder;
+    const SDL_Vertex vertices[] = {
+        { SDL_FPoint{ (float)left, (float)top }, fill, SDL_FPoint{ 0.0f, 0.0f } },
+        { SDL_FPoint{ (float)tabRight, (float)top }, fill, SDL_FPoint{ 0.0f, 0.0f } },
+        { SDL_FPoint{ (float)tabSlopeEnd, (float)bodyTop }, fill,
+            SDL_FPoint{ 0.0f, 0.0f } },
+        { SDL_FPoint{ (float)left, (float)bodyTop }, fill, SDL_FPoint{ 0.0f, 0.0f } },
+        { SDL_FPoint{ (float)right, (float)bodyTop }, fill, SDL_FPoint{ 0.0f, 0.0f } },
+        { SDL_FPoint{ (float)right, (float)bottom }, fill, SDL_FPoint{ 0.0f, 0.0f } },
+        { SDL_FPoint{ (float)left, (float)bottom }, fill, SDL_FPoint{ 0.0f, 0.0f } }
+    };
+    const int indices[] = {
+        0, 1, 2, 0, 2, 3,
+        3, 4, 5, 3, 5, 6
+    };
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    SDL_RenderGeometry(g_renderer, NULL, vertices,
+        (int)(sizeof(vertices) / sizeof(vertices[0])), indices,
+        (int)(sizeof(indices) / sizeof(indices[0])));
+
+    const SDL_Rect divider = { left, bodyTop,
+        std::max(1, right - left), dividerHeight };
+    drawAndroidRect(divider, outline);
+    SDL_SetRenderDrawColor(g_renderer, outline.r, outline.g, outline.b, outline.a);
+    SDL_Point points[] = {
+        { left, bodyTop },
+        { left, top },
+        { tabRight, top },
+        { tabSlopeEnd, bodyTop },
+        { right, bodyTop },
+        { right, bottom },
+        { left, bottom },
+        { left, bodyTop }
+    };
+    SDL_RenderDrawLines(g_renderer, points, (int)(sizeof(points) / sizeof(points[0])));
 }
 
 static bool isAndroidPersistedGamePath(const std::string& path)
@@ -1635,36 +1874,6 @@ static void refreshAndroidGameLibrary(void)
     g_androidGamePaths.clear();
     appendAndroidPersistedGamePaths();
 
-    if (g_frontendSettings)
-    {
-        bool settingsChanged = false;
-        std::vector<std::string> validRecentGames;
-        validRecentGames.reserve(g_frontendSettings->recentGamePaths.size());
-        for (size_t i = 0; i < g_frontendSettings->recentGamePaths.size(); ++i)
-        {
-            if (isAndroidPersistedGamePath(g_frontendSettings->recentGamePaths[i]) &&
-                platformFileExists(g_frontendSettings->recentGamePaths[i]))
-            {
-                validRecentGames.push_back(g_frontendSettings->recentGamePaths[i]);
-            }
-            else
-            {
-                settingsChanged = true;
-            }
-        }
-        g_frontendSettings->recentGamePaths.swap(validRecentGames);
-        if (!g_frontendSettings->lastGamePath.empty() &&
-            (!isAndroidPersistedGamePath(g_frontendSettings->lastGamePath) ||
-                !platformFileExists(g_frontendSettings->lastGamePath)))
-        {
-            g_frontendSettings->lastGamePath.clear();
-            settingsChanged = true;
-        }
-        if (settingsChanged)
-        {
-            emulatorSaveSettings(*g_frontendSettings);
-        }
-    }
 }
 
 static std::string androidGameDisplayName(const std::string& path)
@@ -1717,15 +1926,15 @@ static bool confirmAndroidGameRemoval(const std::string& path)
     std::string name = androidGameDisplayName(path);
     if (androidChineseUi())
     {
-        std::string body = "\xE7\xA1\xAE\xE5\xAE\x9A\xE4\xBB\x8E\xE6\xB8\xB8\xE6\x88\x8F\xE5\x88\x97\xE8\xA1\xA8\xE7\xA7\xBB\xE9\x99\xA4\xE2\x80\x9C";
+        std::string body = u8"\u4ece\u6e38\u620f\u5217\u8868\u4e2d\u79fb\u9664\u201c";
         body += name;
-        body += "\xE2\x80\x9D\xEF\xBC\x9F\n\xE4\xB8\x8D\xE4\xBC\x9A\xE5\x88\xA0\xE9\x99\xA4\xE6\xB8\xB8\xE6\x88\x8F\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x82";
+        body += u8"\u201d\uff1f\n\u6e38\u620f\u6587\u4ef6\u4ecd\u4f1a\u4fdd\u7559\u3002";
         return showAndroidConfirmationDialog(kZhRemoveGame, body, kZhRemove, kZhCancel);
     }
 
     std::string body = "Remove \"" + name + "\" from the game list?\n"
-        "The game file will not be deleted.";
-    return showAndroidConfirmationDialog("Remove game", body, "Remove", "Cancel");
+        "The game file will remain on your device.";
+    return showAndroidConfirmationDialog("Remove Game", body, "Remove", "Cancel");
 }
 
 static void requestAndroidGame(const std::string& path,
@@ -1745,7 +1954,7 @@ static void requestAndroidGame(const std::string& path,
         frontendSetGamePaused(false);
         if (path.empty())
         {
-            MixerReleaseGameResources();
+            mixerReleaseGameResources();
             releaseGameVideoResources();
         }
     }
@@ -1783,6 +1992,12 @@ static bool saveAndroidSettings(void)
 
 static void openAndroidMenu(AndroidMenuScreen screen)
 {
+    if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE &&
+        screen != ANDROID_MENU_SAVE_STATE && g_androidSaveStateThumbnail)
+    {
+        SDL_DestroyTexture(g_androidSaveStateThumbnail);
+        g_androidSaveStateThumbnail = NULL;
+    }
     g_androidMenuScreen = screen;
     g_androidMenuScrollOffset = 0;
     g_androidMenuScrollDragging = false;
@@ -1790,6 +2005,15 @@ static void openAndroidMenu(AndroidMenuScreen screen)
     if (frontendGameRunning())
     {
         frontendSetGamePaused(screen != ANDROID_MENU_NONE);
+    }
+    if (screen == ANDROID_MENU_SAVE_STATE)
+    {
+        g_androidSaveStateStatus.clear();
+        if (g_androidSaveStateSlotCacheGamePath != g_frontendCurrentGamePath)
+        {
+            refreshAndroidSaveStateSlots();
+        }
+        refreshAndroidSaveStateThumbnail();
     }
     releaseVirtualPointerControls();
 }
@@ -1799,6 +2023,10 @@ static void navigateBackAndroidMenu(void)
     if (g_androidMenuScreen == ANDROID_MENU_PAUSE)
     {
         openAndroidMenu(ANDROID_MENU_NONE);
+    }
+    else if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE)
+    {
+        openAndroidMenu(ANDROID_MENU_PAUSE);
     }
     else if (g_androidMenuScreen == ANDROID_MENU_MAIN)
     {
@@ -1869,23 +2097,28 @@ static bool drawAndroidLibraryScreen(void)
         refreshAndroidGameLibrary();
     }
     clampAndroidLibraryScroll(width, height);
+    AndroidThemeColors colors = androidThemeColors();
     drawAndroidLibraryBrand("DingooPie", width);
 
     SDL_Rect addButton = androidLibraryAddButtonRect(width);
-    drawAndroidRect(addButton, SDL_Color{ 255, 255, 255, 255 });
-    drawAndroidOutline(addButton, SDL_Color{ 36, 36, 36, 255 });
-    drawAndroidSystemTextCentered(androidChineseUi() ? kZhAddGame : "Add game",
-        addButton, 17 * scale, SDL_Color{ 0, 0, 0, 255 });
+    drawAndroidRect(addButton, colors.button);
+    drawAndroidOutline(addButton, colors.buttonBorder);
+    drawAndroidSystemTextCentered(androidChineseUi() ? kZhAddGame : "Add Game",
+        addButton, 17 * scale, colors.buttonText);
     SDL_Rect settingsButton = androidLibrarySettingsButtonRect(width);
-    drawAndroidRect(settingsButton, SDL_Color{ 36, 36, 36, 230 });
-    drawAndroidOutline(settingsButton, SDL_Color{ 210, 210, 210, 255 });
+    drawAndroidRect(settingsButton, colors.button);
+    drawAndroidOutline(settingsButton, colors.buttonBorder);
     drawAndroidSystemTextCentered(androidChineseUi() ? kZhMenu : "Menu", settingsButton,
-        17 * scale, SDL_Color{ 255, 255, 255, 255 });
+        17 * scale, colors.buttonText);
+    SDL_Rect fileManagerButton = androidLibraryFileManagerButtonRect(width);
+    drawAndroidRect(fileManagerButton, colors.button);
+    drawAndroidOutline(fileManagerButton, colors.buttonBorder);
+    drawAndroidFolderIcon(fileManagerButton, colors);
 
     if (g_androidGamePaths.empty())
     {
         SDL_Rect emptyRect = { 0, height / 2 - 40 * scale, width, 80 * scale };
-        drawAndroidSystemTextCentered(androidChineseUi() ? kZhNoGames : "No game list",
+        drawAndroidSystemTextCentered(androidChineseUi() ? kZhNoGames : "No Games",
             emptyRect, 26 * scale, SDL_Color{ 192, 192, 192, 255 });
     }
     else
@@ -1901,29 +2134,29 @@ static bool drawAndroidLibraryScreen(void)
         for (int i = firstRow; i < lastRow; ++i)
         {
             SDL_Rect card = androidLibraryRowRect(width, height, i);
-            drawAndroidRect(card, SDL_Color{ 42, 42, 42, 245 });
-            drawAndroidOutline(card, SDL_Color{ 112, 112, 112, 255 });
+            drawAndroidRect(card, colors.card);
+            drawAndroidOutline(card, colors.cardBorder);
             int iconSize = std::max(32 * scale, card.h - 16 * scale);
             SDL_Rect icon = { card.x + 10 * scale, card.y + (card.h - iconSize) / 2,
                 iconSize, iconSize };
-            drawAndroidRect(icon, SDL_Color{ 78, 78, 78, 255 });
-            drawAndroidOutline(icon, SDL_Color{ 132, 132, 132, 255 });
+            drawAndroidRect(icon, colors.icon);
+            drawAndroidOutline(icon, colors.iconBorder);
             const char* typeLabel = gamePathHasAppExtension(g_androidGamePaths[(size_t)i]) ?
                 "APP" : "CC";
             drawAndroidSystemTextCentered(typeLabel, icon, 17 * scale,
-                SDL_Color{ 255, 255, 255, 255 });
+                colors.text);
             std::string name = androidGameDisplayName(g_androidGamePaths[(size_t)i]);
             SDL_Rect removeRect = androidLibraryRemoveButtonRect(width, height, i);
             int nameX = icon.x + icon.w + 12 * scale;
             SDL_Rect nameRect = { nameX, card.y,
                 std::max(1, removeRect.x - nameX - 10 * scale), card.h };
             drawAndroidSystemTextLeftCentered(name.c_str(), nameRect, 0, 23 * scale,
-                SDL_Color{ 255, 255, 255, 255 });
-            drawAndroidRect(removeRect, SDL_Color{ 58, 58, 58, 235 });
-            drawAndroidOutline(removeRect, SDL_Color{ 178, 178, 178, 255 });
+                colors.text);
+            drawAndroidRect(removeRect, colors.button);
+            drawAndroidOutline(removeRect, colors.buttonBorder);
             drawAndroidSystemTextCentered(androidChineseUi() ? kZhRemove : "Remove",
                 removeRect, androidLibraryLayout(width, height).compact ? 14 * scale : 17 * scale,
-                SDL_Color{ 255, 255, 255, 255 });
+                colors.buttonText);
         }
         SDL_RenderSetClipRect(g_renderer, NULL);
         if (totalCount > visibleCount)
@@ -1943,7 +2176,7 @@ static bool drawAndroidLibraryScreen(void)
                 thumbY += thumbTravel * g_androidLibraryScrollOffset / maxScroll;
             }
             SDL_Rect thumb = { trackX, thumbY, trackWidth, thumbHeight };
-            drawAndroidRect(thumb, SDL_Color{ 235, 235, 235, 235 });
+            drawAndroidRect(thumb, colors.buttonBorder);
         }
     }
     if (isLibraryScanActive)
@@ -1951,13 +2184,14 @@ static bool drawAndroidLibraryScreen(void)
         SDL_Rect dim = { 0, 0, width, height };
         drawAndroidRect(dim, SDL_Color{ 0, 0, 0, 150 });
         SDL_Rect message = { 0, height / 2 - 70 * scale, width, 42 * scale };
-        drawAndroidSystemTextCentered(androidChineseUi() ? "\xE6\xAD\xA3\xE5\x9C\xA8\xE6\x89\xAB\xE6\x8F\x8F\xE6\xB8\xB8\xE6\x88\x8F..." : "Scanning games...",
+        drawAndroidSystemTextCentered(androidChineseUi() ? u8"\u6b63\u5728\u626b\u63cf\u6e38\u620f\u2026" :
+            u8"Scanning games\u2026",
             message, 24 * scale, SDL_Color{ 255, 255, 255, 255 });
         int barWidth = std::min(width * 3 / 5, 520 * scale);
         int barHeight = std::max(6, 8 * scale);
         SDL_Rect bar = { (width - barWidth) / 2, height / 2,
             barWidth, barHeight };
-        drawAndroidRect(bar, SDL_Color{ 80, 80, 80, 230 });
+        drawAndroidRect(bar, SDL_Color{ 80, 80, 80, 180 });
         if (totalEntryCount > 0)
         {
             int completedWidth = std::max(1,
@@ -1994,6 +2228,7 @@ static int androidSettingsMenuRowCount(void)
     switch (g_androidMenuScreen)
     {
     case ANDROID_MENU_MAIN: return ANDROID_MAIN_ROW_COUNT;
+    case ANDROID_MENU_SAVE_STATE: return 0;
     case ANDROID_MENU_OPTIONS: return ANDROID_OPTIONS_ROW_COUNT;
     case ANDROID_MENU_SETTINGS: return ANDROID_SETTINGS_ROW_COUNT;
     case ANDROID_MENU_VIDEO: return ANDROID_VIDEO_ROW_COUNT;
@@ -2043,6 +2278,8 @@ static std::string nextAndroidStringPreset(const std::string& current,
     }
     return values[0];
 }
+
+static bool drawFrame(uint16_t* pixels, int displayedFps);
 
 #include "frontend/menu_overlay.inl"
 
@@ -2203,23 +2440,31 @@ static double idleSymbolUnit(uint32_t seed)
     return (double)(idleSymbolHash(seed) & 0xffffu) / 65535.0;
 }
 
+static uint32_t g_idleRunSeed = 0;
+static uint32_t g_idleSeedGeneration = 0;
+
+static void reseedIdleVisuals(void)
+{
+    uint64_t counter = SDL_GetPerformanceCounter();
+    g_idleRunSeed = idleSymbolHash(
+        (uint32_t)counter ^
+        (uint32_t)(counter >> 32) ^
+        (uint32_t)time(NULL) ^
+        (uint32_t)(uintptr_t)&g_idleRunSeed ^
+        ++g_idleSeedGeneration);
+    if (!g_idleRunSeed)
+    {
+        g_idleRunSeed = 1;
+    }
+}
+
 static uint32_t idleSymbolRunSeed(void)
 {
-    static uint32_t seed = 0;
-    if (!seed)
+    if (!g_idleRunSeed)
     {
-        uint64_t counter = SDL_GetPerformanceCounter();
-        seed = idleSymbolHash(
-            (uint32_t)counter ^
-            (uint32_t)(counter >> 32) ^
-            (uint32_t)time(NULL) ^
-            (uint32_t)(uintptr_t)&seed);
-        if (!seed)
-        {
-            seed = 1;
-        }
+        reseedIdleVisuals();
     }
-    return seed;
+    return g_idleRunSeed;
 }
 
 static double clampDouble(double value, double minValue, double maxValue)
@@ -2624,18 +2869,75 @@ static IdleBackgroundGradient idleBackgroundGradient(void)
 {
     static const IdleBackgroundGradient kGradients[] =
     {
-        { { 56, 110, 160, 255 }, { 22, 58, 92, 255 } },
-        { { 76, 92, 158, 255 }, { 30, 42, 92, 255 } },
-        { { 42, 124, 118, 255 }, { 18, 66, 76, 255 } },
-        { { 114, 78, 130, 255 }, { 48, 34, 78, 255 } },
-        { { 128, 78, 94, 255 }, { 58, 36, 60, 255 } },
-        { { 54, 116, 90, 255 }, { 24, 64, 62, 255 } },
-        { { 98, 96, 132, 255 }, { 42, 48, 82, 255 } },
-        { { 118, 92, 62, 255 }, { 56, 44, 58, 255 } }
+        { { 152, 87, 87, 255 }, { 76, 39, 53, 255 } },
+        { { 152, 101, 71, 255 }, { 76, 51, 53, 255 } },
+        { { 145, 124, 67, 255 }, { 71, 62, 48, 255 } },
+        { { 115, 133, 71, 255 }, { 55, 71, 51, 255 } },
+        { { 62, 133, 87, 255 }, { 28, 74, 62, 255 } },
+        { { 48, 143, 122, 255 }, { 21, 76, 81, 255 } },
+        { { 48, 133, 152, 255 }, { 21, 69, 94, 255 } },
+        { { 64, 127, 184, 255 }, { 25, 67, 106, 255 } },
+        { { 87, 106, 182, 255 }, { 35, 48, 106, 255 } },
+        { { 115, 94, 168, 255 }, { 48, 44, 101, 255 } },
+        { { 131, 90, 150, 255 }, { 55, 39, 90, 255 } },
+        { { 147, 90, 122, 255 }, { 67, 41, 76, 255 } }
     };
-    uint32_t index = idleSymbolHash(idleSymbolRunSeed() ^ 0x9e3779b9u) %
-        (uint32_t)(sizeof(kGradients) / sizeof(kGradients[0]));
+    static uint32_t selectedSeed = 0;
+    static uint32_t index = 0;
+    uint32_t runSeed = idleSymbolRunSeed();
+    uint32_t count = (uint32_t)(sizeof(kGradients) / sizeof(kGradients[0]));
+    if (selectedSeed != runSeed)
+    {
+        uint32_t nextIndex = idleSymbolHash(runSeed ^ 0x9e3779b9u) % count;
+        if (selectedSeed && count > 1 && nextIndex == index)
+        {
+            uint32_t offset = 1u + idleSymbolHash(runSeed ^ 0x85ebca6bu) % (count - 1u);
+            nextIndex = (index + offset) % count;
+        }
+        selectedSeed = runSeed;
+        index = nextIndex;
+    }
     return kGradients[index];
+}
+
+static SDL_Color androidThemeBlend(SDL_Color first, SDL_Color second, int secondWeight,
+    uint8_t alpha)
+{
+    int weight = std::max(0, std::min(100, secondWeight));
+    SDL_Color result = {
+        (uint8_t)((first.r * (100 - weight) + second.r * weight) / 100),
+        (uint8_t)((first.g * (100 - weight) + second.g * weight) / 100),
+        (uint8_t)((first.b * (100 - weight) + second.b * weight) / 100),
+        alpha
+    };
+    return result;
+}
+
+static SDL_Color androidThemeBrighten(SDL_Color color, int percent)
+{
+    color.r = (uint8_t)std::min(255, (color.r * percent + 50) / 100);
+    color.g = (uint8_t)std::min(255, (color.g * percent + 50) / 100);
+    color.b = (uint8_t)std::min(255, (color.b * percent + 50) / 100);
+    return color;
+}
+
+static AndroidThemeColors androidThemeColors(void)
+{
+    IdleBackgroundGradient background = idleBackgroundGradient();
+    SDL_Color base = androidThemeBlend(background.top, background.bottom, 58, 255);
+    SDL_Color deep = SDL_Color{ 8, 12, 24, 255 };
+    SDL_Color light = SDL_Color{ 238, 246, 255, 255 };
+    AndroidThemeColors colors = {};
+    colors.card = androidThemeBrighten(androidThemeBlend(base, deep, 54, 230), 108);
+    colors.cardBorder = androidThemeBrighten(androidThemeBlend(base, light, 30, 190), 108);
+    colors.button = androidThemeBrighten(androidThemeBlend(base, deep, 34, 227), 108);
+    colors.buttonBorder = androidThemeBrighten(androidThemeBlend(base, light, 44, 220), 108);
+    colors.icon = androidThemeBrighten(androidThemeBlend(base, deep, 20, 238), 108);
+    colors.iconBorder = androidThemeBrighten(androidThemeBlend(base, light, 38, 210), 108);
+    colors.text = androidThemeBlend(base, light, 78, 248);
+    colors.buttonText = androidThemeBlend(base, light, 88, 252);
+    colors.mutedText = androidThemeBlend(base, light, 60, 220);
+    return colors;
 }
 
 static void resetIdleTitleTexture(void)
@@ -2681,7 +2983,6 @@ static bool presentBlackTransitionFrame(void)
         return false;
     }
     SDL_RenderPresent(g_renderer);
-    g_lastDisplayFrameValid = false;
     return true;
 }
 
@@ -2709,7 +3010,6 @@ static bool drawIdleScreen(uint64_t animationTimeMs)
         return false;
     }
     drawVerticalGradientRect(0, 0, width, height, bg.top, bg.bottom);
-    g_lastDisplayFrameValid = false;
 
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     double t = (double)animationTimeMs / 1000.0;
@@ -2798,6 +3098,8 @@ static int buildVirtualControls(VirtualControlButton* outButtons, int maxButtons
         }
     }
 
+    unit = std::max(1, (unit * virtualControlScalePercent() + 50) / 100);
+
     const int gap = std::max(6, unit / 4);
     int margin = std::max(unit / 3, shortSide / 80);
     int bottomMargin = std::max(unit * 2 / 3, shortSide / 45);
@@ -2828,8 +3130,10 @@ static int buildVirtualControls(VirtualControlButton* outButtons, int maxButtons
     {
         int leftBand = gameRect.x;
         int rightBand = width - gameRect.x - gameRect.w;
-        dpadX = (leftBand - unit * 3) / 2;
-        faceX = gameRect.x + gameRect.w + (rightBand - unit * 3) / 2;
+        dpadX = std::max(0, (leftBand - unit * 3) / 2);
+        faceX = std::min(
+            width - unit * 3,
+            gameRect.x + gameRect.w + (rightBand - unit * 3) / 2);
         dpadY = height / 2 - unit * 3 / 2;
         faceY = dpadY;
         leftShoulderX = dpadX + (unit * 3 - shoulderW) / 2;
@@ -3061,6 +3365,23 @@ static bool getVirtualDpadGeometry(const VirtualControlButton* buttons, int coun
     return true;
 }
 
+static void virtualDpadButtonDirection(const VirtualControlButton& button,
+    int centerX, int centerY, int* outDirectionX, int* outDirectionY)
+{
+    int buttonCenterX = button.rect.x + button.rect.w / 2;
+    int buttonCenterY = button.rect.y + button.rect.h / 2;
+    if (outDirectionX)
+    {
+        *outDirectionX = buttonCenterX == centerX ? 0 :
+            (buttonCenterX < centerX ? -1 : 1);
+    }
+    if (outDirectionY)
+    {
+        *outDirectionY = buttonCenterY == centerY ? 0 :
+            (buttonCenterY < centerY ? -1 : 1);
+    }
+}
+
 static void releaseVirtualPointerControls(void)
 {
     g_virtualMousePointerHeld = false;
@@ -3073,7 +3394,24 @@ static void releaseVirtualPointerControls(void)
     g_virtualMouseControlsDpad = false;
     g_virtualDpadOffsetX = 0;
     g_virtualDpadOffsetY = 0;
+    g_virtualDpadVisualOffsetX = 0.0;
+    g_virtualDpadVisualOffsetY = 0.0;
+    g_virtualDpadVisualUpdateTicks = 0;
     updateVirtualPointerControls(0);
+}
+
+static void updateVirtualDpadVisualPosition(void)
+{
+    uint64_t now = SDL_GetTicks64();
+    uint64_t elapsed = g_virtualDpadVisualUpdateTicks ?
+        now - g_virtualDpadVisualUpdateTicks : 16;
+    g_virtualDpadVisualUpdateTicks = now;
+    elapsed = std::min<uint64_t>(elapsed, 32);
+    double follow = 1.0 - exp(-(double)elapsed / 24.0);
+    g_virtualDpadVisualOffsetX +=
+        (g_virtualDpadOffsetX - g_virtualDpadVisualOffsetX) * follow;
+    g_virtualDpadVisualOffsetY +=
+        (g_virtualDpadOffsetY - g_virtualDpadVisualOffsetY) * follow;
 }
 
 static uint32_t hitTestVirtualControls(int x, int y)
@@ -3150,6 +3488,62 @@ static bool hitTestVirtualDpadDrag(int x, int y, bool requireInside,
     if (directionY >= engageThreshold || (downHeld && directionY >= releaseThreshold))
         *outMask |= virtualControlMask(CONTROL_DPAD_DOWN);
     return true;
+}
+
+static bool hitTestVirtualDpadSegmentedRing(int x, int y, uint32_t* outMask)
+{
+    if (!outMask)
+    {
+        return false;
+    }
+    *outMask = 0;
+    mapRendererPointToVirtualControls(&x, &y);
+
+    VirtualControlButton buttons[kVirtualControlButtonCapacity];
+    int count = buildVirtualControls(buttons, kVirtualControlButtonCapacity);
+    int unit = 0;
+    int centerX = 0;
+    int centerY = 0;
+    if (!getVirtualDpadGeometry(buttons, count, &unit, &centerX, &centerY))
+    {
+        return false;
+    }
+
+    int deltaX = x - centerX;
+    int deltaY = y - centerY;
+    int absoluteX = abs(deltaX);
+    int absoluteY = abs(deltaY);
+    int outerRadius = unit * 142 / 100;
+    int innerRadius = std::max(3, unit * 34 / 100);
+    int64_t distanceSquared =
+        (int64_t)deltaX * deltaX + (int64_t)deltaY * deltaY;
+    if (distanceSquared > (int64_t)outerRadius * outerRadius ||
+        distanceSquared < (int64_t)innerRadius * innerRadius)
+    {
+        return false;
+    }
+
+    const int cardinalSectorSlope = 625;
+    bool horizontalOnly =
+        (int64_t)absoluteY * 1000 <= (int64_t)absoluteX * cardinalSectorSlope;
+    bool verticalOnly =
+        (int64_t)absoluteX * 1000 <= (int64_t)absoluteY * cardinalSectorSlope;
+    for (int i = 4; i < 8; ++i)
+    {
+        int directionX = 0;
+        int directionY = 0;
+        virtualDpadButtonDirection(
+            buttons[i], centerX, centerY, &directionX, &directionY);
+        bool horizontalMatch = !verticalOnly &&
+            ((directionX < 0 && deltaX < 0) || (directionX > 0 && deltaX > 0));
+        bool verticalMatch = !horizontalOnly &&
+            ((directionY < 0 && deltaY < 0) || (directionY > 0 && deltaY > 0));
+        if (horizontalMatch || verticalMatch)
+        {
+            *outMask |= buttons[i].controlMask;
+        }
+    }
+    return *outMask != 0;
 }
 
 static void updateVirtualPointerControls(uint32_t newMask)
@@ -3535,6 +3929,11 @@ static bool handleAndroidMenuEvent(const SDL_Event& ev)
             openAndroidMenu(ANDROID_MENU_MAIN);
             return true;
         }
+        if (pointInRect(x, y, androidLibraryFileManagerButtonRect(width)))
+        {
+            showAndroidLanFileManager();
+            return true;
+        }
         if (pointInRect(x, y, androidLibraryAddButtonRect(width)))
         {
             requestAndroidGameImport();
@@ -3562,10 +3961,6 @@ static bool handleAndroidMenuEvent(const SDL_Event& ev)
                 }
                 if (removeAndroidGamePath(path))
                 {
-                    if (g_frontendSettings && emulatorRemoveRecentGame(g_frontendSettings, path))
-                    {
-                        emulatorSaveSettings(*g_frontendSettings);
-                    }
                     refreshAndroidGameLibrary();
                 }
                 return true;
@@ -3605,14 +4000,57 @@ static bool handleAndroidMenuEvent(const SDL_Event& ev)
             {
                 continue;
             }
-            if (row == ANDROID_PAUSE_RESUME) openAndroidMenu(ANDROID_MENU_NONE);
-            else if (row == ANDROID_PAUSE_RESTART_GAME) requestAndroidRestartGame();
+            if (row == ANDROID_PAUSE_SAVE_STATE) openAndroidMenu(ANDROID_MENU_SAVE_STATE);
             else if (row == ANDROID_PAUSE_SWITCH_GAME) requestAndroidSwitchGame();
+            else if (row == ANDROID_PAUSE_RESTART_GAME) requestAndroidRestartGame();
             else if (row == ANDROID_PAUSE_OPTIONS) openAndroidMenu(ANDROID_MENU_OPTIONS);
             else if (row == ANDROID_PAUSE_SETTINGS) openAndroidMenu(ANDROID_MENU_SETTINGS);
             else if (row == ANDROID_PAUSE_EXIT_APPLICATION) requestAndroidExitApplication();
+            else if (row == ANDROID_PAUSE_BACK) openAndroidMenu(ANDROID_MENU_NONE);
             return true;
         }
+    }
+    else if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE)
+    {
+        if (!released || g_androidSaveStateBusy)
+        {
+            return true;
+        }
+        for (int slot = 1; slot <= kSaveStateSlotCount; ++slot)
+        {
+            if (pointInRect(x, y, androidSaveStateSlotRect(panel, slot)))
+            {
+                if (g_androidSaveStateSelectedSlot == slot)
+                {
+                    return true;
+                }
+                g_androidSaveStateSelectedSlot = slot;
+                refreshAndroidSaveStateSlotInfo(slot);
+                refreshAndroidSaveStateThumbnail();
+                return true;
+            }
+        }
+        if (pointInRect(x, y, androidSaveStateActionRect(panel, 0)))
+        {
+            performAndroidSaveStateAction(true);
+            return true;
+        }
+        if (pointInRect(x, y, androidSaveStateActionRect(panel, 1)))
+        {
+            performAndroidSaveStateAction(false);
+            return true;
+        }
+        if (pointInRect(x, y, androidSaveStateActionRect(panel, 2)))
+        {
+            deleteAndroidSaveState();
+            return true;
+        }
+        if (pointInRect(x, y, androidSaveStateActionRect(panel, 3)))
+        {
+            navigateBackAndroidMenu();
+            return true;
+        }
+        return true;
     }
     else if (g_androidMenuScreen == ANDROID_MENU_ABOUT)
     {
@@ -3791,7 +4229,10 @@ static bool handleVirtualControlPointerEvent(const SDL_Event& ev)
     {
         g_virtualMouseReleaseAtTicks = 0;
         uint32_t dpadMask = 0;
-        if (hitTestVirtualDpadDrag(ev.button.x, ev.button.y, true, 0, &dpadMask))
+        bool dpadHit = virtualDpadType() == VIRTUAL_DPAD_SEGMENTED_RING ?
+            hitTestVirtualDpadSegmentedRing(ev.button.x, ev.button.y, &dpadMask) :
+            hitTestVirtualDpadDrag(ev.button.x, ev.button.y, true, 0, &dpadMask);
+        if (dpadHit)
         {
             g_virtualMousePointerHeld = true;
             g_virtualMouseControlsDpad = true;
@@ -3856,7 +4297,13 @@ static bool handleVirtualControlPointerEvent(const SDL_Event& ev)
             if (g_virtualMouseControlsDpad)
             {
                 uint32_t dpadMask = 0;
-                if (hitTestVirtualDpadDrag(ev.motion.x, ev.motion.y, false,
+                if (virtualDpadType() == VIRTUAL_DPAD_SEGMENTED_RING)
+                {
+                    hitTestVirtualDpadSegmentedRing(ev.motion.x, ev.motion.y, &dpadMask);
+                    g_virtualMouseControlMask = dpadMask;
+                    applyCombinedVirtualPointerControls();
+                }
+                else if (hitTestVirtualDpadDrag(ev.motion.x, ev.motion.y, false,
                     g_virtualMouseControlMask, &dpadMask))
                 {
                     g_virtualMouseControlMask = dpadMask;
@@ -3864,7 +4311,8 @@ static bool handleVirtualControlPointerEvent(const SDL_Event& ev)
                 }
                 return true;
             }
-            g_virtualMouseControlMask = hitTestVirtualControls(ev.motion.x, ev.motion.y);
+            g_virtualMouseControlMask =
+                hitTestVirtualControls(ev.motion.x, ev.motion.y) & ~virtualDpadControlMask();
             applyCombinedVirtualPointerControls();
             return true;
         }
@@ -3888,8 +4336,10 @@ static bool handleVirtualControlPointerEvent(const SDL_Event& ev)
         AndroidVirtualTouchContact contact = {
             ev.tfinger.fingerId, 0, false, SDL_GetTicks64() };
         uint32_t dpadMask = 0;
-        if (!androidVirtualDpadTouchActive() &&
-            hitTestVirtualDpadDrag(x, y, true, 0, &dpadMask))
+        bool dpadHit = virtualDpadType() == VIRTUAL_DPAD_SEGMENTED_RING ?
+            hitTestVirtualDpadSegmentedRing(x, y, &dpadMask) :
+            hitTestVirtualDpadDrag(x, y, true, 0, &dpadMask);
+        if (!androidVirtualDpadTouchActive() && dpadHit)
         {
             contact.controlMask = dpadMask;
             contact.controlsDpad = true;
@@ -3985,7 +4435,13 @@ static bool handleVirtualControlPointerEvent(const SDL_Event& ev)
         if (contact.controlsDpad)
         {
             uint32_t dpadMask = 0;
-            if (hitTestVirtualDpadDrag(x, y, false, contact.controlMask, &dpadMask))
+            if (virtualDpadType() == VIRTUAL_DPAD_SEGMENTED_RING)
+            {
+                hitTestVirtualDpadSegmentedRing(x, y, &dpadMask);
+                contact.controlMask = dpadMask;
+            }
+            else if (hitTestVirtualDpadDrag(x, y, false,
+                contact.controlMask, &dpadMask))
             {
                 contact.controlMask = dpadMask;
             }
@@ -4013,6 +4469,10 @@ static void drawVirtualButton(const VirtualControlButton& button)
     bool pressed = virtualButtonPressed(button);
     if (button.dpadDx || button.dpadDy)
     {
+        if (virtualDpadType() == VIRTUAL_DPAD_SEGMENTED_RING)
+        {
+            return;
+        }
         const int minSide = button.rect.w < button.rect.h ? button.rect.w : button.rect.h;
         const int buttonCenterX = button.rect.x + button.rect.w / 2;
         const int buttonCenterY = button.rect.y + button.rect.h / 2;
@@ -4062,15 +4522,11 @@ static void drawVirtualButton(const VirtualControlButton& button)
     }
     else
     {
-        if (portraitMenuButton)
-        {
-            SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, pressed ? 220 : 185);
-        }
-        else
+        if (!portraitMenuButton)
         {
             SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, pressed ? 112 : 42);
+            renderVirtualFillRect(button.rect);
         }
-        renderVirtualFillRect(button.rect);
         SDL_SetRenderDrawColor(g_renderer, 255, 255, 255,
             portraitMenuButton ? 235 : (pressed ? 255 : 210));
         renderVirtualDrawRect(button.rect);
@@ -4082,21 +4538,66 @@ static void drawVirtualButton(const VirtualControlButton& button)
             virtualButtonHasControl(button, CONTROL_BUTTON_SELECT)))
     {
         drawAndroidSystemTextCentered(button.label, button.rect,
-            androidCompactButtonTextSize(button.rect), color);
+            virtualCompactButtonTextSize(button.rect), color);
         return;
     }
     if (!portraitModeEnabled())
     {
-        int pixelSize = button.rect.h * 2 / 5;
-        if (pixelSize < 16) pixelSize = 16;
-        drawAndroidSystemTextCentered(button.label, button.rect, pixelSize, color);
+        drawAndroidSystemTextCentered(button.label, button.rect,
+            virtualButtonTextSize(button.rect), color);
         return;
     }
 
     SDL_Rect portraitRect = rotateVirtualRectCcw(button.rect);
-    int portraitPixelSize = portraitRect.h * 2 / 5;
-    if (portraitPixelSize < 16) portraitPixelSize = 16;
-    drawAndroidSystemTextCentered(button.label, portraitRect, portraitPixelSize, color);
+    drawAndroidSystemTextCentered(button.label, portraitRect,
+        virtualButtonTextSize(portraitRect), color);
+}
+
+static void drawVirtualSegmentedRingDpad(
+    const VirtualControlButton* buttons, int count, int unit, int centerX, int centerY)
+{
+    if (!buttons || count < 8 || unit <= 0)
+    {
+        return;
+    }
+
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    int outerRadius = unit * 140 / 100;
+    int arcInnerRadius = unit * 100 / 100;
+    int arcOuterRadius = unit * 124 / 100;
+    SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 24);
+    renderVirtualFillCircle(centerX, centerY, outerRadius);
+    SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 190);
+    renderVirtualDrawCircle(centerX, centerY, outerRadius);
+
+    SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 74);
+    int separatorInnerRadius = unit * 40 / 100;
+    int separatorOuterRadius = arcOuterRadius;
+    for (int i = 0; i < 4; ++i)
+    {
+        double angle = kPi / 4.0 + (double)i * kPi / 2.0;
+        int innerX = centerX + (int)lround(cos(angle) * separatorInnerRadius);
+        int innerY = centerY + (int)lround(sin(angle) * separatorInnerRadius);
+        int outerX = centerX + (int)lround(cos(angle) * separatorOuterRadius);
+        int outerY = centerY + (int)lround(sin(angle) * separatorOuterRadius);
+        renderVirtualDrawLine(innerX, innerY, outerX, outerY);
+    }
+
+    for (int i = 4; i < 8; ++i)
+    {
+        int directionX = 0;
+        int directionY = 0;
+        virtualDpadButtonDirection(
+            buttons[i], centerX, centerY, &directionX, &directionY);
+        bool pressed = virtualButtonPressed(buttons[i]);
+        SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, pressed ? 230 : 112);
+        renderVirtualFillArcBand(centerX, centerY,
+            arcInnerRadius, arcOuterRadius, directionX, directionY);
+    }
+
+    int centerDotRadius = std::max(2, unit * 7 / 100);
+    SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 145);
+    renderVirtualFillCircle(centerX, centerY, centerDotRadius);
 }
 
 static void drawVirtualControlsOverlay(void)
@@ -4119,21 +4620,27 @@ static void drawVirtualControlsOverlay(void)
     int centerY = 0;
     if (getVirtualDpadGeometry(buttons, count, &unit, &centerX, &centerY))
     {
-        int radius = unit * 3 / 2 - 3;
-        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 24);
-        renderVirtualFillCircle(centerX, centerY, radius);
-        SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 190);
-        renderVirtualDrawCircle(centerX, centerY, radius);
+        if (virtualDpadType() == VIRTUAL_DPAD_SEGMENTED_RING)
+        {
+            drawVirtualSegmentedRingDpad(buttons, count, unit, centerX, centerY);
+        }
+        else
+        {
+            int radius = unit * 3 / 2 - 3;
+            SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 24);
+            renderVirtualFillCircle(centerX, centerY, radius);
+            SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 190);
+            renderVirtualDrawCircle(centerX, centerY, radius);
 
-        bool dpadPointerActive = false;
-        dpadPointerActive = g_virtualMouseControlsDpad || androidVirtualDpadTouchActive();
-        int thumbX = centerX + (dpadPointerActive ? g_virtualDpadOffsetX : 0);
-        int thumbY = centerY + (dpadPointerActive ? g_virtualDpadOffsetY : 0);
-        SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 58);
-        renderVirtualFillCircle(thumbX, thumbY, unit / 2);
-        SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 235);
-        renderVirtualDrawCircle(thumbX, thumbY, unit / 2);
+            updateVirtualDpadVisualPosition();
+            int thumbX = centerX + (int)lround(g_virtualDpadVisualOffsetX);
+            int thumbY = centerY + (int)lround(g_virtualDpadVisualOffsetY);
+            SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 58);
+            renderVirtualFillCircle(thumbX, thumbY, unit / 2);
+            SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 235);
+            renderVirtualDrawCircle(thumbX, thumbY, unit / 2);
+        }
     }
     for (int i = 0; i < count; ++i)
     {
@@ -4144,277 +4651,11 @@ static void drawVirtualControlsOverlay(void)
 
 static bool inputTraceEnabled(void)
 {
-    static int enabled = -1;
-    if (enabled < 0)
-    {
+    static const bool enabled = []() {
         const char* value = getenv("DINGOO_PIE_INPUT_TRACE");
-        enabled = (value && value[0] && value[0] != '0') ? 1 : 0;
-    }
-    return enabled != 0;
-}
-
-static bool pathEndsWithIgnoreCase(const char* path, const char* suffix)
-{
-    if (!path || !suffix)
-    {
-        return false;
-    }
-
-    size_t pathLen = strlen(path);
-    size_t suffixLen = strlen(suffix);
-    if (pathLen < suffixLen)
-    {
-        return false;
-    }
-
-    const char* tail = path + pathLen - suffixLen;
-    for (size_t i = 0; i < suffixLen; ++i)
-    {
-        if (tolower((unsigned char)tail[i]) != tolower((unsigned char)suffix[i]))
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-static FILE* openWriteBinaryUtf8(const char* path)
-{
-    return fopen(path, "wb");
-}
-
-static void writeLe16File(FILE* fp, uint16_t value)
-{
-    fputc((int)(value & 0xff), fp);
-    fputc((int)((value >> 8) & 0xff), fp);
-}
-
-static void writeLe32File(FILE* fp, uint32_t value)
-{
-    fputc((int)(value & 0xff), fp);
-    fputc((int)((value >> 8) & 0xff), fp);
-    fputc((int)((value >> 16) & 0xff), fp);
-    fputc((int)((value >> 24) & 0xff), fp);
-}
-
-static void rotateFrameCcw(uint16_t* dst, const uint16_t* src)
-{
-    if (!dst || !src)
-    {
-        return;
-    }
-
-    for (int y = 0; y < SCREEN_HEIGHT; ++y)
-    {
-        for (int x = 0; x < SCREEN_WIDTH; ++x)
-        {
-            int dstX = y;
-            int dstY = SCREEN_WIDTH - 1 - x;
-            dst[dstY * SCREEN_HEIGHT + dstX] = src[y * SCREEN_WIDTH + x];
-        }
-    }
-}
-
-static bool writeRgb565Bmp(const char* path, const uint16_t* pixels, int width, int height)
-{
-    if (!path || !path[0] || !pixels)
-    {
-        return false;
-    }
-
-    FILE* fp = openWriteBinaryUtf8(path);
-    if (!fp)
-    {
-        printf("frontend: failed to open screenshot path: %s\n", path);
-        return false;
-    }
-
-    const uint32_t rowBytes = (uint32_t)width * 2;
-    const uint32_t paddedRowBytes = (rowBytes + 3u) & ~3u;
-    const uint32_t imageBytes = paddedRowBytes * (uint32_t)height;
-    const uint32_t dibHeaderBytes = 40;
-    const uint32_t bitfieldBytes = 12;
-    const uint32_t pixelOffset = 14 + dibHeaderBytes + bitfieldBytes;
-    const uint32_t fileBytes = pixelOffset + imageBytes;
-
-    fwrite("BM", 1, 2, fp);
-    writeLe32File(fp, fileBytes);
-    writeLe16File(fp, 0);
-    writeLe16File(fp, 0);
-    writeLe32File(fp, pixelOffset);
-    writeLe32File(fp, dibHeaderBytes);
-    writeLe32File(fp, (uint32_t)width);
-    writeLe32File(fp, (uint32_t)height);
-    writeLe16File(fp, 1);
-    writeLe16File(fp, 16);
-    writeLe32File(fp, 3);
-    writeLe32File(fp, imageBytes);
-    writeLe32File(fp, 0);
-    writeLe32File(fp, 0);
-    writeLe32File(fp, 0);
-    writeLe32File(fp, 0);
-    writeLe32File(fp, 0x0000F800);
-    writeLe32File(fp, 0x000007E0);
-    writeLe32File(fp, 0x0000001F);
-
-    const uint8_t padding[3] = { 0, 0, 0 };
-    const uint32_t paddingBytes = paddedRowBytes - rowBytes;
-    for (int y = height - 1; y >= 0; --y)
-    {
-        fwrite(pixels + y * width, 1, rowBytes, fp);
-        if (paddingBytes)
-        {
-            fwrite(padding, 1, paddingBytes, fp);
-        }
-    }
-
-    bool ok = ferror(fp) == 0;
-    fclose(fp);
-    return ok;
-}
-
-static bool writeRgb565Png(const char* path, const uint16_t* pixels, int width, int height)
-{
-    (void)path;
-    (void)pixels;
-    (void)width;
-    (void)height;
-    return false;
-}
-
-static bool writeRgb565Jpeg(const char* path, const uint16_t* pixels, int width, int height)
-{
-    (void)path;
-    (void)pixels;
-    (void)width;
-    (void)height;
-    return false;
-}
-
-static bool writeScreenshotByExtension(const char* path, const uint16_t* pixels, int width, int height)
-{
-    if (pathEndsWithIgnoreCase(path, ".bmp"))
-    {
-        return writeRgb565Bmp(path, pixels, width, height);
-    }
-    if (pathEndsWithIgnoreCase(path, ".jpg") || pathEndsWithIgnoreCase(path, ".jpeg"))
-    {
-        return writeRgb565Jpeg(path, pixels, width, height);
-    }
-    return writeRgb565Png(path, pixels, width, height);
-}
-
-static bool getScreenshotOutputSize(int* outWidth, int* outHeight)
-{
-    if (!outWidth || !outHeight)
-    {
-        return false;
-    }
-
-    int width = 0;
-    int height = 0;
-    if (g_renderer)
-    {
-        SDL_GetRendererOutputSize(g_renderer, &width, &height);
-    }
-    if ((width <= 0 || height <= 0) && g_window)
-    {
-        SDL_GetWindowSize(g_window, &width, &height);
-    }
-    if (width <= 0 || height <= 0)
-    {
-        width = g_lastDisplayFrameWidth;
-        height = g_lastDisplayFrameHeight;
-    }
-    if (width <= 0 || height <= 0)
-    {
-        return false;
-    }
-
-    *outWidth = width;
-    *outHeight = height;
-    return true;
-}
-
-static void applyPixelGridToDisplayPixels(uint16_t* pixels, int width, int height, int sourceWidth, int sourceHeight);
-
-static bool buildDisplaySizedScreenshot(std::vector<uint16_t>* outPixels, int* outWidth, int* outHeight)
-{
-    if (!outPixels || !outWidth || !outHeight || !g_lastDisplayFrameValid)
-    {
-        return false;
-    }
-
-    int width = 0;
-    int height = 0;
-    if (!getScreenshotOutputSize(&width, &height))
-    {
-        return false;
-    }
-
-    outPixels->resize((size_t)width * (size_t)height);
-    for (int y = 0; y < height; ++y)
-    {
-        int srcY = (int)(((int64_t)y * g_lastDisplayFrameHeight) / height);
-        if (srcY >= g_lastDisplayFrameHeight)
-        {
-            srcY = g_lastDisplayFrameHeight - 1;
-        }
-        for (int x = 0; x < width; ++x)
-        {
-            int srcX = (int)(((int64_t)x * g_lastDisplayFrameWidth) / width);
-            if (srcX >= g_lastDisplayFrameWidth)
-            {
-                srcX = g_lastDisplayFrameWidth - 1;
-            }
-            (*outPixels)[(size_t)y * (size_t)width + (size_t)x] =
-                g_lastDisplayFrame[(size_t)srcY * (size_t)g_lastDisplayFrameWidth + (size_t)srcX];
-        }
-    }
-
-    if (pixelGridEffectEnabled())
-    {
-        applyPixelGridToDisplayPixels(outPixels->data(), width, height,
-            g_lastDisplayFrameWidth, g_lastDisplayFrameHeight);
-    }
-
-    *outWidth = width;
-    *outHeight = height;
-    return true;
-}
-
-static void applyPixelGridToDisplayPixels(uint16_t* pixels, int width, int height, int sourceWidth, int sourceHeight)
-{
-    if (!pixels || width <= sourceWidth || height <= sourceHeight || sourceWidth <= 0 || sourceHeight <= 0)
-    {
-        return;
-    }
-
-    for (int y = 0; y < height; ++y)
-    {
-        int sourceY = (int)(((int64_t)y * sourceHeight) / height);
-        int nextSourceY = (int)(((int64_t)(y + 1) * sourceHeight) / height);
-        bool horizontalEdge = nextSourceY > sourceY;
-        if (sourceY >= sourceHeight)
-        {
-            sourceY = sourceHeight - 1;
-        }
-
-        for (int x = 0; x < width; ++x)
-        {
-            int sourceX = (int)(((int64_t)x * sourceWidth) / width);
-            int nextSourceX = (int)(((int64_t)(x + 1) * sourceWidth) / width);
-            bool verticalEdge = nextSourceX > sourceX;
-            if (!horizontalEdge && !verticalEdge)
-            {
-                continue;
-            }
-
-            size_t index = (size_t)y * (size_t)width + (size_t)x;
-            uint32_t alpha = (horizontalEdge && verticalEdge) ? 52u : 34u;
-            pixels[index] = blendRgb565WithBlack(pixels[index], alpha);
-        }
-    }
+        return value && value[0] && value[0] != '0';
+    }();
+    return enabled;
 }
 
 static uint64_t parsePositiveEnv(const char* name, uint64_t defaultValue, uint64_t minValue, uint64_t maxValue)
@@ -4580,6 +4821,11 @@ static MinimizedBehavior currentMinimizedBehavior(void)
     return g_frontendSettings ? g_frontendSettings->minimizedBehavior : MINIMIZED_BEHAVIOR_PAUSE;
 }
 
+void frontendNotifyAndroidBackground(bool backgrounded)
+{
+    SDL_AtomicSet(&g_androidBackgroundRequested, backgrounded ? 1 : 0);
+}
+
 static void applyFrontendPauseState(void)
 {
     bool paused = frontendEffectivePauseRequested();
@@ -4599,7 +4845,7 @@ static void applyFrontendPauseState(void)
     {
         gameRuntimeNotifyPauseRequested();
     }
-    MixerSetFrontendPaused(paused);
+    mixerSetFrontendPaused(paused);
     printf("frontend: game pause %s\n", paused ? "on" : "off");
 }
 
@@ -4624,9 +4870,106 @@ static bool frontendWindowIsForeground(void)
         (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
 }
 
+static SDL_Renderer* createFrontendRenderer(void)
+{
+    SDL_Renderer* renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer)
+    {
+        renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
+    }
+    return renderer;
+}
+
+static bool restoreRendererTextures(const char* reason)
+{
+    resetIdleTextures();
+    if (g_blurredBackdropTexture)
+    {
+        SDL_DestroyTexture(g_blurredBackdropTexture);
+        g_blurredBackdropTexture = NULL;
+        g_blurredBackdropUpdateCounter = 0;
+    }
+    if (g_frameTexture)
+    {
+        SDL_DestroyTexture(g_frameTexture);
+        g_frameTexture = NULL;
+    }
+    if (!createGameFrameTexture())
+    {
+        printf("frontend: renderer texture restore failed after %s: %s\n",
+            reason ? reason : "foreground restore", SDL_GetError());
+        return false;
+    }
+    if (g_frontendSettings)
+    {
+        SDL_SetTextureScaleMode(g_frameTexture,
+            textureLinearSamplingEnabled(*g_frontendSettings) ?
+                SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    }
+    framebufferRequestUpdate();
+    if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE)
+    {
+        refreshAndroidSaveStateThumbnail();
+    }
+    printf("frontend: renderer textures restored after %s\n",
+        reason ? reason : "foreground restore");
+    return true;
+}
+
+static bool recreateFrontendRenderer(const char* reason)
+{
+    resetIdleTextures();
+    invalidateAndroidSaveStateThumbnail();
+    if (g_blurredBackdropTexture)
+    {
+        SDL_DestroyTexture(g_blurredBackdropTexture);
+        g_blurredBackdropTexture = NULL;
+        g_blurredBackdropUpdateCounter = 0;
+    }
+    if (g_frameTexture)
+    {
+        SDL_DestroyTexture(g_frameTexture);
+        g_frameTexture = NULL;
+    }
+    if (g_renderer)
+    {
+        SDL_DestroyRenderer(g_renderer);
+        g_renderer = NULL;
+    }
+
+    g_renderer = createFrontendRenderer();
+    if (!g_renderer)
+    {
+        printf("frontend: renderer recreation failed after %s: %s\n",
+            reason ? reason : "device reset", SDL_GetError());
+        return false;
+    }
+    if (!createGameFrameTexture())
+    {
+        printf("frontend: frame texture recreation failed after %s: %s\n",
+            reason ? reason : "device reset", SDL_GetError());
+        return false;
+    }
+    if (g_frontendSettings)
+    {
+        SDL_SetTextureScaleMode(g_frameTexture,
+            textureLinearSamplingEnabled(*g_frontendSettings) ?
+                SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    }
+    framebufferRequestUpdate();
+    if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE)
+    {
+        refreshAndroidSaveStateThumbnail();
+    }
+    printf("frontend: renderer recreated after %s\n",
+        reason ? reason : "device reset");
+    return true;
+}
+
 static void restoreFrontendFromBackground(const char* reason)
 {
-    if (!g_androidBackgroundActive && !g_minimizedPauseActive)
+    if (!g_androidBackgroundActive && !g_minimizedPauseActive &&
+        !g_androidRendererRestorePending)
     {
         return;
     }
@@ -4635,8 +4978,55 @@ static void restoreFrontendFromBackground(const char* reason)
     {
         setMinimizedPauseActive(false);
     }
+    if (g_androidRendererRestorePending)
+    {
+        g_androidRendererRestorePending = !restoreRendererTextures(reason);
+    }
+    g_androidForegroundStablePumps = 0;
     printf("frontend: Android foreground restored by %s\n",
         reason ? reason : "window state");
+}
+
+static void reconcileAndroidBackgroundRequest(void)
+{
+    bool requested = SDL_AtomicGet(&g_androidBackgroundRequested) != 0;
+    if (requested)
+    {
+        if (g_androidBackgroundActive)
+        {
+            return;
+        }
+    }
+    else
+    {
+        if (!g_androidBackgroundActive && !g_androidRendererRestorePending)
+        {
+            return;
+        }
+        if (!frontendWindowIsForeground())
+        {
+            g_androidForegroundStablePumps = 0;
+            return;
+        }
+        if (g_androidForegroundStablePumps++ == 0)
+        {
+            return;
+        }
+        restoreFrontendFromBackground("deferred Android lifecycle");
+        return;
+    }
+
+    g_androidBackgroundActive = true;
+    g_androidRendererRestorePending = true;
+    g_androidForegroundStablePumps = 0;
+    invalidateAndroidSaveStateThumbnail();
+    releaseFrontendInputControls();
+    if (frontendGameRunning() &&
+        currentMinimizedBehavior() == MINIMIZED_BEHAVIOR_PAUSE)
+    {
+        setMinimizedPauseActive(true);
+    }
+    printf("frontend: Android background entered by lifecycle\n");
 }
 
 void frontendSetGamePaused(bool paused)
@@ -5104,7 +5494,8 @@ void frontendBeginControllerMapping(uint32_t controlBit)
         printf("frontend: controller mapping unavailable because no SDL GameController is connected\n");
         showAndroidMessageDialog(
             androidMenuString(ANDROID_TEXT_INPUT_CONTROLLER_MAPPING),
-            androidMenuString(ANDROID_TEXT_CONTROLLER_MAPPING_NO_DEVICE));
+            androidMenuString(ANDROID_TEXT_CONTROLLER_MAPPING_NO_DEVICE),
+            androidChineseUi() ? u8"\u786e\u5b9a" : "OK");
         return;
     }
 
@@ -5331,15 +5722,43 @@ static bool createGameFrameTexture(void)
     return true;
 }
 
+static bool createBlurredBackdropTexture(void)
+{
+    if (g_blurredBackdropTexture)
+    {
+        return true;
+    }
+    if (!g_renderer)
+    {
+        return false;
+    }
+    g_blurredBackdropTexture = SDL_CreateTexture(g_renderer,
+        SDL_PIXELFORMAT_RGB565, SDL_TEXTUREACCESS_STREAMING,
+        kBlurredBackdropWidth, kBlurredBackdropHeight);
+    if (!g_blurredBackdropTexture)
+    {
+        printf("frontend: blurred backdrop texture creation failed: %s\n", SDL_GetError());
+        return false;
+    }
+    SDL_SetTextureScaleMode(g_blurredBackdropTexture, SDL_ScaleModeLinear);
+    g_blurredBackdropUpdateCounter = 0;
+    return true;
+}
+
 static void releaseGameVideoResources(void)
 {
     resetFpsOverlayTexture();
+    if (g_blurredBackdropTexture)
+    {
+        SDL_DestroyTexture(g_blurredBackdropTexture);
+        g_blurredBackdropTexture = NULL;
+        g_blurredBackdropUpdateCounter = 0;
+    }
     if (g_frameTexture)
     {
         SDL_DestroyTexture(g_frameTexture);
         g_frameTexture = NULL;
     }
-    g_lastDisplayFrameValid = false;
     printf("frontend: released game video resources\n");
 }
 
@@ -5400,9 +5819,13 @@ static bool rebuildFpsOverlayTexture(int displayedFps)
 
     char text[16];
     snprintf(text, sizeof(text), "FPS:%d", displayedFps);
-    int scale = androidFpsOverlayScale();
-    g_fpsOverlayWidth = (int)strlen(text) * 6 * scale + 2 * scale;
-    g_fpsOverlayHeight = 7 * scale + 2 * scale;
+    const int scale = androidFpsOverlayScale();
+    const int padding = scale;
+    const int textLength = (int)strlen(text);
+    const int textWidth = textLength > 0 ? (textLength * 6 - 1) * scale : 0;
+    const int textHeight = 7 * scale;
+    g_fpsOverlayWidth = textWidth + 2 * padding;
+    g_fpsOverlayHeight = textHeight + 2 * padding;
     g_fpsOverlayScale = scale;
 
     g_fpsOverlayTexture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA8888,
@@ -5427,9 +5850,9 @@ static bool rebuildFpsOverlayTexture(int displayedFps)
     uint32_t* pixels = (uint32_t*)lockedPixels;
     int pitchPixels = pitchBytes / (int)sizeof(uint32_t);
     fillRectRgba(pixels, pitchPixels, g_fpsOverlayWidth, g_fpsOverlayHeight,
-        0, 0, g_fpsOverlayWidth, g_fpsOverlayHeight, 0x000000a0u);
+        0, 0, g_fpsOverlayWidth, g_fpsOverlayHeight, 0x00000080u);
     drawTextToPixels(pixels, pitchPixels, g_fpsOverlayWidth, g_fpsOverlayHeight,
-        text, 2, 2, scale, 0xffffffffu);
+        text, padding, padding, scale, 0xffffffffu);
     SDL_UnlockTexture(g_fpsOverlayTexture);
     g_fpsOverlayValue = displayedFps;
     return true;
@@ -5445,7 +5868,7 @@ static void drawFpsOverlay(int displayedFps)
     {
         displayedFps = 0;
     }
-    int scale = androidFpsOverlayScale();
+    const int scale = androidFpsOverlayScale();
     if (!g_fpsOverlayTexture || g_fpsOverlayValue != displayedFps ||
         g_fpsOverlayScale != scale)
     {
@@ -5469,19 +5892,6 @@ static bool textureLinearSamplingEnabled(const EmulatorSettings& settings)
 
 void frontendApplyVideoSettings(const EmulatorSettings& settings)
 {
-    int displayWidth = displayWidthForSettings(&settings);
-    int displayHeight = displayHeightForSettings(&settings);
-
-    if (g_lastDisplayFrameValid &&
-        (g_lastDisplayFrameWidth != displayWidth || g_lastDisplayFrameHeight != displayHeight))
-    {
-        g_lastDisplayFrameValid = false;
-    }
-    if (!g_lastDisplayFrameValid)
-    {
-        g_lastDisplayFrameWidth = displayWidth;
-        g_lastDisplayFrameHeight = displayHeight;
-    }
     resetIdleTextures();
 
     if (g_window)
@@ -5494,7 +5904,10 @@ void frontendApplyVideoSettings(const EmulatorSettings& settings)
             textureLinearSamplingEnabled(settings) ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
     }
 
-    printf("frontend: video settings anti_aliasing=%s effect=%s brightness=%d contrast=%d gamma=%d saturation=%d minimized_behavior=%s screen_orientation=%s portrait=%u show_fps=%u\n",
+    printf(
+        "frontend: video settings anti_aliasing=%s effect=%s brightness=%d "
+        "contrast=%d gamma=%d saturation=%d minimized_behavior=%s "
+        "screen_orientation=%s screen_fill=%s portrait=%u show_fps=%u\n",
         emulatorAntiAliasingName(settings.antiAliasing),
         emulatorColorEffectName(settings.colorEffect),
         settings.brightnessPercent,
@@ -5503,19 +5916,24 @@ void frontendApplyVideoSettings(const EmulatorSettings& settings)
         settings.saturationPercent,
         emulatorMinimizedBehaviorName(settings.minimizedBehavior),
         emulatorScreenOrientationName(settings.screenOrientationMode),
+        emulatorScreenFillName(settings.screenFill),
         settings.portraitMode ? 1u : 0u,
         settings.showFps ? 1u : 0u);
 }
 
 void frontendApplyAudioSettings(const EmulatorSettings& settings)
 {
-    MixerSetMasterVolumePercent(settings.audioVolumePercent);
-    MixerSetBufferSamples(settings.audioBufferSamples);
-    MixerSetAudioEffect(settings.audioEffect);
-    printf("frontend: audio settings volume=%d buffer_samples=%d effect=%s audio_disabled=%u\n",
+    mixerSetMasterVolumePercent(settings.audioVolumePercent);
+    mixerSetBufferSamples(settings.audioBufferSamples);
+    mixerSetAudioEffect(settings.audioEffect);
+    mixerSetDigitalNoiseReduction(settings.digitalNoiseReduction);
+    printf(
+        "frontend: audio settings volume=%d buffer_samples=%d effect=%s "
+        "digital_noise_reduction=%s audio_disabled=%u\n",
         settings.audioVolumePercent,
         settings.audioBufferSamples,
         emulatorAudioEffectName(settings.audioEffect),
+        emulatorDigitalNoiseReductionName(settings.digitalNoiseReduction),
         settings.audioDisabled ? 1u : 0u);
 }
 
@@ -5524,9 +5942,11 @@ void frontendApplyInputSettings(const EmulatorSettings& settings)
     inputApplyKeyboardMapping(settings.keyboardMapping);
     applyGameControllerMappingSettings(settings.controllerMapping);
     applyWindowImePolicy(settings.systemImeDisabled);
-    printf("frontend: input settings system_ime_disabled=%u virtual_controls=%u controller_mapping=%s keyboard_mapping=%s\n",
+    printf("frontend: input settings system_ime_disabled=%u virtual_controls=%u virtual_control_scale=%d virtual_dpad_type=%s controller_mapping=%s keyboard_mapping=%s\n",
         settings.systemImeDisabled ? 1u : 0u,
         settings.showVirtualControls ? 1u : 0u,
+        settings.virtualControlScalePercent,
+        emulatorVirtualDpadTypeName(settings.virtualDpadType),
         settings.controllerMapping.empty() ? "(default)" : settings.controllerMapping.c_str(),
         settings.keyboardMapping.empty() ? "(default)" : settings.keyboardMapping.c_str());
 }
@@ -5544,35 +5964,6 @@ static uint32_t hashFramePixels(const uint16_t* pixels)
     hash ^= words[wordCount - 1];
     hash *= 16777619u;
     return hash;
-}
-
-static uint32_t dominantFrameSamplePercent(const uint16_t* pixels)
-{
-    uint16_t colors[192];
-    uint16_t counts[192] = {};
-    size_t colorCount = 0;
-    uint16_t dominantCount = 0;
-    for (int sampleY = 0; sampleY < 12; ++sampleY)
-    {
-        int y = ((sampleY * 2 + 1) * SCREEN_HEIGHT) / 24;
-        for (int sampleX = 0; sampleX < 16; ++sampleX)
-        {
-            int x = ((sampleX * 2 + 1) * SCREEN_WIDTH) / 32;
-            uint16_t color = pixels[(size_t)y * SCREEN_WIDTH + (size_t)x];
-            size_t index = 0;
-            while (index < colorCount && colors[index] != color)
-            {
-                ++index;
-            }
-            if (index == colorCount)
-            {
-                colors[colorCount++] = color;
-            }
-            uint16_t count = ++counts[index];
-            dominantCount = std::max(dominantCount, count);
-        }
-    }
-    return (uint32_t)dominantCount * 100u / 192u;
 }
 
 struct AutoPressPlan
@@ -6098,77 +6489,37 @@ static void updateAutoPressPlan(uint64_t now, uint64_t startTicks)
 
 static int getAutoPressARequest(void)
 {
-    static int value = -1;
-    if (value < 0)
-    {
+    static const int value = []() {
         const char* text = getenv("DINGOO_PIE_AUTOPRESS_A");
-        value = text ? atoi(text) : 0;
-        if (value < 0)
-        {
-            value = 0;
-        }
-        if (value > 16)
-        {
-            value = 16;
-        }
-    }
+        return std::max(0, std::min(16, text ? atoi(text) : 0));
+    }();
     return value;
 }
 
 static uint64_t getAutoPressAStartDelayMs(void)
 {
-    static int value = -1;
-    if (value < 0)
-    {
+    static const int value = []() {
         const char* text = getenv("DINGOO_PIE_AUTOPRESS_A_DELAY_MS");
-        value = text ? atoi(text) : 1500;
-        if (value < 0)
-        {
-            value = 0;
-        }
-        if (value > 60000)
-        {
-            value = 60000;
-        }
-    }
+        return std::max(0, std::min(60000, text ? atoi(text) : 1500));
+    }();
     return (uint64_t)value;
 }
 
 static uint64_t getAutoPressAPeriodMs(void)
 {
-    static int value = -1;
-    if (value < 0)
-    {
+    static const int value = []() {
         const char* text = getenv("DINGOO_PIE_AUTOPRESS_A_PERIOD_MS");
-        value = text ? atoi(text) : 900;
-        if (value < 100)
-        {
-            value = 100;
-        }
-        if (value > 10000)
-        {
-            value = 10000;
-        }
-    }
+        return std::max(100, std::min(10000, text ? atoi(text) : 900));
+    }();
     return (uint64_t)value;
 }
 
 static uint64_t getAutoPressAHoldMs(void)
 {
-    static int value = -1;
-    if (value < 0)
-    {
+    static const int value = []() {
         const char* text = getenv("DINGOO_PIE_AUTOPRESS_A_HOLD_MS");
-        value = text ? atoi(text) : 180;
-        if (value < 20)
-        {
-            value = 20;
-        }
-        if (value > 5000)
-        {
-            value = 5000;
-        }
-    }
+        return std::max(20, std::min(5000, text ? atoi(text) : 180));
+    }();
     return (uint64_t)value;
 }
 
@@ -6673,6 +7024,152 @@ static AntiAliasingMode currentAntiAliasingMode(void)
     return g_frontendSettings ? g_frontendSettings->antiAliasing : ANTI_ALIASING_OFF;
 }
 
+static ScreenFillMode currentScreenFill(void)
+{
+    if (!g_frontendSettings || g_frontendSettings->screenFill < SCREEN_FILL_ASPECT ||
+        g_frontendSettings->screenFill >= SCREEN_FILL_COUNT)
+    {
+        return SCREEN_FILL_ASPECT;
+    }
+    return g_frontendSettings->screenFill;
+}
+
+static bool updateBlurredBackdropTexture(const uint16_t* pixels)
+{
+    if (!pixels || !createBlurredBackdropTexture())
+    {
+        return false;
+    }
+    if ((g_blurredBackdropUpdateCounter++ & 1u) != 0)
+    {
+        return true;
+    }
+
+    static uint16_t downsampledPixels[kBlurredBackdropWidth * kBlurredBackdropHeight];
+    static uint16_t blurredPixels[kBlurredBackdropWidth * kBlurredBackdropHeight];
+    for (int y = 0; y < kBlurredBackdropHeight; ++y)
+    {
+        for (int x = 0; x < kBlurredBackdropWidth; ++x)
+        {
+            uint32_t red = 0;
+            uint32_t green = 0;
+            uint32_t blue = 0;
+            const int sourceX = x * 4;
+            const int sourceY = y * 4;
+            for (int offsetY = 0; offsetY < 4; ++offsetY)
+            {
+                const uint16_t* source = pixels +
+                    (size_t)(sourceY + offsetY) * SCREEN_WIDTH + sourceX;
+                for (int offsetX = 0; offsetX < 4; ++offsetX)
+                {
+                    const uint16_t pixel = source[offsetX];
+                    red += (pixel >> 11) & 0x1fu;
+                    green += (pixel >> 5) & 0x3fu;
+                    blue += pixel & 0x1fu;
+                }
+            }
+            downsampledPixels[(size_t)y * kBlurredBackdropWidth + x] =
+                (uint16_t)(((red / 16u) << 11) |
+                    ((green / 16u) << 5) | (blue / 16u));
+        }
+    }
+
+    memcpy(blurredPixels, downsampledPixels, sizeof(blurredPixels));
+    for (int y = 1; y < kBlurredBackdropHeight - 1; ++y)
+    {
+        for (int x = 1; x < kBlurredBackdropWidth - 1; ++x)
+        {
+            uint32_t red = 0;
+            uint32_t green = 0;
+            uint32_t blue = 0;
+            for (int offsetY = -1; offsetY <= 1; ++offsetY)
+            {
+                for (int offsetX = -1; offsetX <= 1; ++offsetX)
+                {
+                    const uint16_t pixel = downsampledPixels[
+                        (size_t)(y + offsetY) * kBlurredBackdropWidth +
+                        (size_t)(x + offsetX)];
+                    const uint32_t weight =
+                        offsetX == 0 && offsetY == 0 ? 4u : 1u;
+                    red += ((pixel >> 11) & 0x1fu) * weight;
+                    green += ((pixel >> 5) & 0x3fu) * weight;
+                    blue += (pixel & 0x1fu) * weight;
+                }
+            }
+            blurredPixels[(size_t)y * kBlurredBackdropWidth + x] =
+                (uint16_t)(((red / 12u) << 11) |
+                    ((green / 12u) << 5) | (blue / 12u));
+        }
+    }
+    for (size_t index = 0;
+        index < kBlurredBackdropWidth * kBlurredBackdropHeight; ++index)
+    {
+        blurredPixels[index] = blendRgb565WithBlack(blurredPixels[index], 44);
+    }
+    if (SDL_UpdateTexture(g_blurredBackdropTexture, NULL, blurredPixels,
+        kBlurredBackdropWidth * sizeof(uint16_t)) != 0)
+    {
+        printf("frontend: blurred backdrop update failed: %s\n", SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
+static bool renderBlurredBackdropEdges(const SDL_Rect& foregroundRect)
+{
+    if (!g_renderer || !g_blurredBackdropTexture)
+    {
+        return false;
+    }
+    int outputWidth = 0;
+    int outputHeight = 0;
+    SDL_GetRendererOutputSize(g_renderer, &outputWidth, &outputHeight);
+    if (outputWidth <= 0 || outputHeight <= 0)
+    {
+        return false;
+    }
+
+    const int sampleWidth = std::max(2, kBlurredBackdropWidth / 24);
+    const int sampleHeight = std::max(2, kBlurredBackdropHeight / 24);
+    if (foregroundRect.x > 0)
+    {
+        SDL_Rect leftSource = { 0, 0, sampleWidth, kBlurredBackdropHeight };
+        SDL_Rect leftDestination = { 0, 0, foregroundRect.x, outputHeight };
+        SDL_Rect rightSource = {
+            kBlurredBackdropWidth - sampleWidth, 0,
+            sampleWidth, kBlurredBackdropHeight };
+        SDL_Rect rightDestination = {
+            foregroundRect.x + foregroundRect.w, 0,
+            outputWidth - foregroundRect.x - foregroundRect.w, outputHeight };
+        if (SDL_RenderCopy(g_renderer, g_blurredBackdropTexture,
+                &leftSource, &leftDestination) != 0 ||
+            SDL_RenderCopy(g_renderer, g_blurredBackdropTexture,
+                &rightSource, &rightDestination) != 0)
+        {
+            return false;
+        }
+    }
+    if (foregroundRect.y > 0)
+    {
+        SDL_Rect topSource = { 0, 0, kBlurredBackdropWidth, sampleHeight };
+        SDL_Rect topDestination = { 0, 0, outputWidth, foregroundRect.y };
+        SDL_Rect bottomSource = {
+            0, kBlurredBackdropHeight - sampleHeight,
+            kBlurredBackdropWidth, sampleHeight };
+        SDL_Rect bottomDestination = {
+            0, foregroundRect.y + foregroundRect.h,
+            outputWidth, outputHeight - foregroundRect.y - foregroundRect.h };
+        if (SDL_RenderCopy(g_renderer, g_blurredBackdropTexture,
+                &topSource, &topDestination) != 0 ||
+            SDL_RenderCopy(g_renderer, g_blurredBackdropTexture,
+                &bottomSource, &bottomDestination) != 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool antiAliasingNeedsPostProcess(AntiAliasingMode mode)
 {
     return mode == ANTI_ALIASING_CLEAR;
@@ -6716,20 +7213,6 @@ static bool drawFrame(uint16_t* pixels, int displayedFps)
     {
         applyVideoAdjustments(uploadPixels, SCREEN_WIDTH * SCREEN_HEIGHT, videoAdjustments);
     }
-    if (portraitModeEnabled())
-    {
-        rotateFrameCcw(g_lastDisplayFrame, uploadPixels);
-        g_lastDisplayFrameWidth = SCREEN_HEIGHT;
-        g_lastDisplayFrameHeight = SCREEN_WIDTH;
-    }
-    else
-    {
-        memcpy(g_lastDisplayFrame, uploadPixels, sizeof(g_lastDisplayFrame));
-        g_lastDisplayFrameWidth = SCREEN_WIDTH;
-        g_lastDisplayFrameHeight = SCREEN_HEIGHT;
-    }
-    g_lastDisplayFrameValid = true;
-
     if (SDL_UpdateTexture(g_frameTexture, NULL, uploadPixels, SCREEN_WIDTH * sizeof(uint16_t)) != 0)
     {
         printf("frontend: SDL_UpdateTexture failed: %s\n", SDL_GetError());
@@ -6743,26 +7226,32 @@ static bool drawFrame(uint16_t* pixels, int displayedFps)
         return false;
     }
     int renderResult = 0;
-    if (portraitModeEnabled())
+    ScreenFillMode screenFill = currentScreenFill();
+    SDL_Rect gameDestination;
+    bool hasGameDestination = portraitModeEnabled() ?
+        getPortraitGameDestination(&gameDestination) :
+        getLandscapeGameDestination(&gameDestination);
+    if (!hasGameDestination)
     {
-        SDL_Rect dst;
-        if (!getPortraitGameDestination(&dst))
+        return false;
+    }
+    if (screenFill == SCREEN_FILL_BLURRED_EXTENSION &&
+        updateBlurredBackdropTexture(uploadPixels))
+    {
+        if (!renderBlurredBackdropEdges(gameDestination))
         {
+            printf("frontend: blurred backdrop render failed: %s\n", SDL_GetError());
             return false;
         }
-        renderResult = SDL_RenderCopy(g_renderer, g_frameTexture, NULL, &dst);
+    }
+    if (screenFill == SCREEN_FILL_STRETCH)
+    {
+        renderResult = SDL_RenderCopy(g_renderer, g_frameTexture, NULL, NULL);
     }
     else
     {
-        SDL_Rect dst;
-        if (getLandscapeGameDestination(&dst))
-        {
-            renderResult = SDL_RenderCopy(g_renderer, g_frameTexture, NULL, &dst);
-        }
-        else
-        {
-            renderResult = SDL_RenderCopy(g_renderer, g_frameTexture, NULL, NULL);
-        }
+        renderResult = SDL_RenderCopy(
+            g_renderer, g_frameTexture, NULL, &gameDestination);
     }
     if (renderResult != 0)
     {
@@ -6785,94 +7274,6 @@ void updateFb(void)
     framebufferRequestUpdate();
 }
 
-bool frontendSaveScreenshot(const char* path)
-{
-    if (!g_lastDisplayFrameValid)
-    {
-        printf("frontend: screenshot skipped because no display frame is available\n");
-        return false;
-    }
-
-    std::vector<uint16_t> snapshot;
-    int screenshotWidth = 0;
-    int screenshotHeight = 0;
-    if (!buildDisplaySizedScreenshot(&snapshot, &screenshotWidth, &screenshotHeight))
-    {
-        printf("frontend: screenshot skipped because display size is unavailable\n");
-        return false;
-    }
-
-    bool ok = writeScreenshotByExtension(path, snapshot.data(), screenshotWidth, screenshotHeight);
-    printf("frontend: screenshot %s size=%dx%d path=%s\n",
-        ok ? "saved" : "failed", screenshotWidth, screenshotHeight, path ? path : "");
-    return ok;
-}
-
-bool frontendSaveScreenshotThumbnail(const char* path, int maxWidth, int maxHeight)
-{
-    if (!g_lastDisplayFrameValid)
-    {
-        printf("frontend: thumbnail skipped because no display frame is available\n");
-        return false;
-    }
-    if (!path || !path[0] || maxWidth <= 0 || maxHeight <= 0)
-    {
-        return false;
-    }
-
-    std::vector<uint16_t> snapshot;
-    int screenshotWidth = 0;
-    int screenshotHeight = 0;
-    if (!buildDisplaySizedScreenshot(&snapshot, &screenshotWidth, &screenshotHeight))
-    {
-        printf("frontend: thumbnail skipped because display size is unavailable\n");
-        return false;
-    }
-
-    int scaledWidth = maxWidth;
-    int scaledHeight = (int)(((int64_t)screenshotHeight * scaledWidth) / screenshotWidth);
-    if (scaledHeight > maxHeight)
-    {
-        scaledHeight = maxHeight;
-        scaledWidth = (int)(((int64_t)screenshotWidth * scaledHeight) / screenshotHeight);
-    }
-    if (scaledWidth <= 0)
-    {
-        scaledWidth = 1;
-    }
-    if (scaledHeight <= 0)
-    {
-        scaledHeight = 1;
-    }
-
-    std::vector<uint16_t> thumbnail((size_t)maxWidth * (size_t)maxHeight, 0);
-    int offsetX = (maxWidth - scaledWidth) / 2;
-    int offsetY = (maxHeight - scaledHeight) / 2;
-    for (int y = 0; y < scaledHeight; ++y)
-    {
-        int srcY = (int)(((int64_t)y * screenshotHeight) / scaledHeight);
-        if (srcY >= screenshotHeight)
-        {
-            srcY = screenshotHeight - 1;
-        }
-        for (int x = 0; x < scaledWidth; ++x)
-        {
-            int srcX = (int)(((int64_t)x * screenshotWidth) / scaledWidth);
-            if (srcX >= screenshotWidth)
-            {
-                srcX = screenshotWidth - 1;
-            }
-            thumbnail[(size_t)(offsetY + y) * (size_t)maxWidth + (size_t)(offsetX + x)] =
-                snapshot[(size_t)srcY * (size_t)screenshotWidth + (size_t)srcX];
-        }
-    }
-
-    bool ok = writeScreenshotByExtension(path, thumbnail.data(), maxWidth, maxHeight);
-    printf("frontend: thumbnail %s size=%dx%d path=%s\n",
-        ok ? "saved" : "failed", maxWidth, maxHeight, path);
-    return ok;
-}
-
 bool frontendInit(EmulatorSettings* settings, const char* currentGamePath)
 {
     SDL_LogSetOutputFunction(frontendSdlLogOutput, NULL);
@@ -6888,10 +7289,10 @@ bool frontendInit(EmulatorSettings* settings, const char* currentGamePath)
     SDL_AtomicSet(&g_frontendLoopExitRequested, 0);
     g_androidMenuScreen = g_frontendCurrentGamePath.empty() ? ANDROID_MENU_LIBRARY : ANDROID_MENU_NONE;
     g_androidBackgroundActive = false;
+    SDL_AtomicSet(&g_androidBackgroundRequested, 0);
+    g_androidRendererRestorePending = false;
+    g_androidForegroundStablePumps = 0;
     refreshAndroidGameLibrary();
-    g_lastDisplayFrameValid = false;
-    g_lastDisplayFrameWidth = displayWidthForSettings(settings);
-    g_lastDisplayFrameHeight = displayHeightForSettings(settings);
     SDL_AtomicSet(&g_quitRequested, 0);
     SDL_AtomicSet(&g_gamePaused, 0);
     SDL_AtomicSet(&g_frontendTransitionRequested, 0);
@@ -6909,6 +7310,7 @@ bool frontendInit(EmulatorSettings* settings, const char* currentGamePath)
         printf("frontend: SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
+    reseedIdleVisuals();
     SDL_DisableScreenSaver();
 
     if (!settings || settings->systemImeDisabled)
@@ -6936,11 +7338,7 @@ bool frontendInit(EmulatorSettings* settings, const char* currentGamePath)
     SDL_GameControllerEventState(SDL_ENABLE);
     openFirstGameController();
 
-    g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED);
-    if (!g_renderer)
-    {
-        g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
-    }
+    g_renderer = createFrontendRenderer();
     if (!g_renderer)
     {
         printf("frontend: SDL_CreateRenderer failed: %s\n", SDL_GetError());
@@ -6986,6 +7384,12 @@ void frontendRequestGameExit(void)
     SDL_AtomicSet(&g_frontendGameLaunchPending, 1);
     SDL_AtomicSet(&g_frontendLoopExitRequested, 1);
     SDL_AtomicSet(&g_frontendTransitionRequested, 1);
+}
+
+bool frontendGameExitRequested(void)
+{
+    return SDL_AtomicGet(&g_frontendGameLaunchPending) != 0 &&
+        SDL_AtomicGet(&g_frontendLoopExitRequested) != 0;
 }
 
 void frontendSetCurrentGamePath(const char* gamePath)
@@ -7074,7 +7478,6 @@ void frontendShutdown(void)
         g_window = NULL;
     }
     g_frontendSettings = NULL;
-    g_lastDisplayFrameValid = false;
     // MuMu can block while SDL_Quit closes an already reused audio device.
     SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER);
     printf("frontend: shutdown complete\n");
@@ -7109,9 +7512,6 @@ void frontendRunLoop(const EmulatorOptions& options)
     uint64_t lastIdlePresentCounter = 0;
     uint64_t performanceFrequency = SDL_GetPerformanceFrequency();
     bool pendingFrameRequest = false;
-    uint64_t lastGameInteractionTicks = 0;
-    bool sawDetailedGameFrame = false;
-    uint64_t terminalFrameSince = 0;
     uint16_t frameCopy[SCREEN_WIDTH * SCREEN_HEIGHT];
     while (running && SDL_AtomicGet(&g_frontendLoopExitRequested) == 0 &&
         !SDL_AtomicGet(&g_quitRequested))
@@ -7124,12 +7524,6 @@ void frontendRunLoop(const EmulatorOptions& options)
         bool drewFrame = false;
         while (SDL_PollEvent(&ev))
         {
-            if (frontendGameRunning() &&
-                (ev.type == SDL_KEYDOWN || ev.type == SDL_CONTROLLERBUTTONDOWN ||
-                 ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_FINGERDOWN))
-            {
-                lastGameInteractionTicks = loopNow;
-            }
             if (handleAndroidMenuEvent(ev))
             {
                 continue;
@@ -7143,11 +7537,15 @@ void frontendRunLoop(const EmulatorOptions& options)
             {
                 printf("frontend: SDL_QUIT event received ignoreQuit=%u\n",
                     options.ignoreQuit ? 1u : 0u);
+                char lastTask[192];
+                char lastHle[192];
+                bridge_copy_last_task_stop_summary(lastTask, sizeof(lastTask));
+                bridge_copy_last_hle_summary(lastHle, sizeof(lastHle));
                 printf("frontend: close context app_sha256=%s input=0x%08x last_task=\"%s\" last_hle=\"%s\"\n",
                     bridge_get_game_identity(),
                     inputGetCurrentStatus(),
-                    bridge_get_last_task_stop_summary(),
-                    bridge_get_last_hle_summary());
+                    lastTask,
+                    lastHle);
                 if (!options.ignoreQuit)
                 {
                     running = false;
@@ -7226,6 +7624,14 @@ void frontendRunLoop(const EmulatorOptions& options)
                     handleGameControllerAxisEvent(ev.caxis);
                 }
                 break;
+            case SDL_RENDER_TARGETS_RESET:
+                g_androidRendererRestorePending =
+                    !restoreRendererTextures("SDL_RENDER_TARGETS_RESET");
+                break;
+            case SDL_RENDER_DEVICE_RESET:
+                g_androidRendererRestorePending =
+                    !recreateFrontendRenderer("SDL_RENDER_DEVICE_RESET");
+                break;
             case SDL_WINDOWEVENT:
                 if (inputTraceEnabled())
                 {
@@ -7240,7 +7646,7 @@ void frontendRunLoop(const EmulatorOptions& options)
                 {
                     if (ev.window.event == SDL_WINDOWEVENT_MINIMIZED)
                     {
-                        g_androidBackgroundActive = true;
+                        frontendNotifyAndroidBackground(true);
                     }
                     if (inputTraceEnabled())
                     {
@@ -7273,11 +7679,12 @@ void frontendRunLoop(const EmulatorOptions& options)
                 }
                 else if (ev.window.event == SDL_WINDOWEVENT_RESTORED)
                 {
+                    frontendNotifyAndroidBackground(false);
                     restoreFrontendFromBackground("SDL_WINDOWEVENT_RESTORED");
                 }
                 else if (ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
                 {
-                    restoreFrontendFromBackground("SDL_WINDOWEVENT_FOCUS_GAINED");
+                    frontendNotifyAndroidBackground(false);
                     if (g_frontendSettings && g_frontendSettings->systemImeDisabled)
                     {
                         applyWindowImePolicy(true);
@@ -7288,16 +7695,18 @@ void frontendRunLoop(const EmulatorOptions& options)
                 break;
             }
         }
+        reconcileAndroidBackgroundRequest();
         if (g_androidBackgroundActive)
         {
-            if (frontendWindowIsForeground())
+            if (SDL_AtomicGet(&g_androidBackgroundRequested) == 0 &&
+                frontendWindowIsForeground())
             {
                 restoreFrontendFromBackground("window flag reconciliation");
             }
         }
         if (g_androidBackgroundActive)
         {
-            SDL_Delay(4);
+            SDL_Delay(kMinimizedThrottleLoopDelayMs);
             continue;
         }
         bool transitionPresented = false;
@@ -7381,24 +7790,6 @@ void frontendRunLoop(const EmulatorOptions& options)
             framebufferCopyPresented(frameCopy, sizeof(frameCopy));
             uint32_t frameHash = hashFramePixels(frameCopy);
             bool contentChanged = !hasPresentedFrame || frameHash != lastFrameHash;
-            uint32_t dominantPercent = dominantFrameSamplePercent(frameCopy);
-            if (dominantPercent < 90)
-            {
-                sawDetailedGameFrame = true;
-                terminalFrameSince = 0;
-            }
-            else if (dominantPercent >= 98 && sawDetailedGameFrame &&
-                lastGameInteractionTicks && now - lastGameInteractionTicks <= 15000)
-            {
-                if (!terminalFrameSince)
-                {
-                    terminalFrameSince = now;
-                }
-            }
-            else
-            {
-                terminalFrameSince = 0;
-            }
             if (contentChanged)
             {
                 lastFrameHash = frameHash;
@@ -7421,16 +7812,6 @@ void frontendRunLoop(const EmulatorOptions& options)
                 }
             }
         }
-
-        if (gameRunning && g_androidMenuScreen == ANDROID_MENU_NONE &&
-            gamePathHasAppExtension(g_frontendCurrentGamePath) &&
-            terminalFrameSince && now - terminalFrameSince >= 5000)
-        {
-            printf("frontend: APP remained on a terminal frame after interaction; returning to library\n");
-            frontendRequestGameExit();
-            continue;
-        }
-
 
         now = SDL_GetTicks64();
         if (now - fpsLastTicks >= 1000)

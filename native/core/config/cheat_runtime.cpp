@@ -92,7 +92,7 @@ struct CheatFeatureName
 static size_t findFeatureSeparator(const std::string& entryName)
 {
     size_t asciiColon = entryName.find(':');
-    size_t fullColon = entryName.find("\xEF\xBC\x9A");
+    size_t fullColon = entryName.find(u8"\uff1a");
     if (asciiColon != std::string::npos && fullColon != std::string::npos)
     {
         return asciiColon < fullColon ? asciiColon : fullColon;
