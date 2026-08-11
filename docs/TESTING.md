@@ -34,6 +34,49 @@ For MuMu, the script automatically prefers the MuMu ADB when using serial
 `127.0.0.1:7555`. Pass `-AdbPath` for another emulator-specific ADB. Do not mix
 two ADB server implementations against the same running emulator.
 
+The MuMu x86_64 build uses a pinned Dynarmic A32 backend when `profile=0`.
+Prepare its static libraries before the normal Gradle build:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+    -File scripts/prepare_android_dynarmic.ps1
+.\gradlew.bat --no-daemon assembleDebug
+```
+
+The preparation script pins Dynarmic commit
+`a41c380246d3d9f9874f0f792d234dc0cc17c180`, Boost headers 1.84.0 with
+SHA-512 verification, NDK 26.3.11579264, and CMake 3.22.1. Other ABIs continue
+to use the ARM32 interpreter. Profile runs also use the interpreter so PC/LR
+sampling remains available.
+
+Run both retail 3D CC regressions with OCR-guided scene entry and FPS sampling:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_cc_3d_regression.ps1 `
+    -CcDirectory "C:\Games\cc"
+```
+
+For a MuMu Dynarmic acceptance run, pass `-ExpectedBackend dynarmic` to each
+single-game invocation. The JSON summary records `execution_backend` and
+`profile_active`; formal FPS samples require `profile_active=0`.
+
+Each case archives screenshots, `fps.csv`, Android logcat, the private native
+log, extracted `cc-profile` / `profile:frontend` lines, and a JSON summary. With
+`debug.profile=1`, CC profile rows include interpreter IPS, framebuffer submit
+count, framebuffer copy time, average/maximum frame interval, and counts above
+25 ms and 33 ms. Use those fields to distinguish guest CPU limits from frame
+submission or frontend presentation stalls.
+
+For a diagnostic run without manually editing the emulator settings, pass
+`-EnableProfile` to the single-game script. It backs up `DingooPie.ini`, enables
+`debug.profile=1` for the run, and restores the original file afterward:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_cc_3d_fps.ps1 `
+    -Game qiye -GamePath "C:\Games\cc\?????.cc" `
+    -EnableProfile
+```
+
 With `-VerifySharedSettings`, the test checks the visible Settings order and
 applies the same video, audio, input, execution-mode, clock, speed, delay,
 cheat, and language values to both formats. Auto and Compatibility must still
@@ -123,6 +166,20 @@ powershell -ExecutionPolicy Bypass -File scripts/test_android_save_state_all_sam
 
 Each sample must save, load, and return to the game screen without leaving the
 application in the menu or a stalled runtime state.
+
+For a repeatable CC 3D interactive-scene save test, use the TiandiDao workflow:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_tiandidao_cc_save_restart.ps1 `
+    -GamePath "C:\Games\cc\TiandiDao.cc" `
+    -AdbPath "D:\Android\sdk\platform-tools\adb.exe" `
+    -Serial 127.0.0.1:7555
+```
+
+The workflow enters the playable 3D scene, captures a state, exits and restarts
+without clearing private saves, loads the state, and verifies that the native CC
+runtime restores and continues. Pair it with the OCR/FPS regression above so
+scene interactivity and frame pacing are checked independently from save loading.
 
 Validate the instant save-state menu visually on the 960x540 Android test device:
 

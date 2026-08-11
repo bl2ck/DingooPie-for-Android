@@ -4,13 +4,20 @@
 #include "platform_services.h"
 
 #include <algorithm>
+#include <errno.h>
+#include <mutex>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <utility>
 
 static const uint32_t kCcMaxRecords = 65536u;
 static const uint32_t kCcMaxString = 4096u;
 static const uint32_t kCcMaxMemory = 0x08000000u;
+static const uint32_t kCcMaxPayload = 0x20000000u;
 static const uint32_t kCcPayloadFlagCompressed = 1u;
+
+static std::mutex s_ccSaveStateMutex;
 
 static void appendRaw(std::vector<uint8_t>* output, const void* data, size_t size);
 static bool readRaw(const std::vector<uint8_t>& data, size_t* offset,
@@ -196,7 +203,8 @@ static bool splitSaveStatePath(const std::string& path,
     return true;
 }
 
-static bool readSaveStateFile(const std::string& path, std::vector<uint8_t>* output)
+static bool readSaveStateFile(const std::string& path, std::vector<uint8_t>* output,
+    size_t maxSize)
 {
     std::string directory;
     std::string relativePath;
@@ -212,6 +220,10 @@ static bool readSaveStateFile(const std::string& path, std::vector<uint8_t>* out
     bool ok = fseek(file, 0, SEEK_END) == 0;
     long size = ok ? ftell(file) : -1;
     ok = size >= 0 && fseek(file, 0, SEEK_SET) == 0;
+    if (ok)
+    {
+        ok = (size_t)size <= maxSize;
+    }
     if (ok)
     {
         output->resize((size_t)size);
@@ -239,11 +251,88 @@ static bool writeSaveStateFile(const std::string& path,
     {
         return false;
     }
-    bool ok = data.empty() || fwrite(data.data(), 1, data.size(), file) == data.size();
+    bool ok = (data.empty() || fwrite(data.data(), 1, data.size(), file) == data.size()) &&
+        fflush(file) == 0;
+    int descriptor = fileno(file);
+    if (ok && descriptor >= 0 && fsync(descriptor) != 0 &&
+        errno != EINVAL && errno != ENOTSUP)
+    {
+        ok = false;
+    }
     if (fclose(file) != 0)
     {
         ok = false;
     }
+    return ok;
+}
+
+static bool fileExists(const std::string& path)
+{
+    std::string directory;
+    std::string relativePath;
+    if (!splitSaveStatePath(path, &directory, &relativePath)) return false;
+    FILE* file = platformAndroidOpenSaveFile(directory, relativePath, "rb");
+    if (!file) return false;
+    fclose(file);
+    return true;
+}
+
+static bool copySaveStateFile(const std::string& sourcePath,
+    const std::string& destinationPath)
+{
+    std::string sourceDirectory, sourceRelativePath;
+    std::string destinationDirectory, destinationRelativePath;
+    if (!splitSaveStatePath(sourcePath, &sourceDirectory, &sourceRelativePath) ||
+        !splitSaveStatePath(destinationPath, &destinationDirectory, &destinationRelativePath))
+        return false;
+    FILE* source = platformAndroidOpenSaveFile(sourceDirectory, sourceRelativePath, "rb");
+    FILE* destination = source ? platformAndroidOpenSaveFile(
+        destinationDirectory, destinationRelativePath, "wb") : NULL;
+    bool ok = source && destination;
+    uint8_t buffer[64 * 1024];
+    while (ok)
+    {
+        size_t bytesRead = fread(buffer, 1, sizeof(buffer), source);
+        if (bytesRead > 0 && fwrite(buffer, 1, bytesRead, destination) != bytesRead) ok = false;
+        if (bytesRead < sizeof(buffer))
+        {
+            if (ferror(source)) ok = false;
+            break;
+        }
+    }
+    if (destination && (fflush(destination) != 0 ||
+        (fileno(destination) >= 0 && fsync(fileno(destination)) != 0 &&
+            errno != EINVAL && errno != ENOTSUP))) ok = false;
+    if (source) fclose(source);
+    if (destination && fclose(destination) != 0) ok = false;
+    return ok;
+}
+
+static bool replaceCcSaveStateFile(const std::string& path,
+    const std::vector<uint8_t>& data)
+{
+    std::string directory, relativePath;
+    if (!splitSaveStatePath(path, &directory, &relativePath)) return false;
+    const std::string temporaryPath = directory + "\n" + relativePath + ".tmp";
+    const std::string backupPath = directory + "\n" + relativePath + ".backup";
+    platformAndroidDeleteSaveFile(directory, relativePath + ".tmp");
+    if (!writeSaveStateFile(temporaryPath, data))
+    {
+        platformAndroidDeleteSaveFile(directory, relativePath + ".tmp");
+        return false;
+    }
+    const bool hadOriginal = fileExists(path);
+    platformAndroidDeleteSaveFile(directory, relativePath + ".backup");
+    if (hadOriginal && !copySaveStateFile(path, backupPath))
+    {
+        platformAndroidDeleteSaveFile(directory, relativePath + ".tmp");
+        platformAndroidDeleteSaveFile(directory, relativePath + ".backup");
+        return false;
+    }
+    bool ok = copySaveStateFile(temporaryPath, path);
+    if (!ok && hadOriginal) copySaveStateFile(backupPath, path);
+    platformAndroidDeleteSaveFile(directory, relativePath + ".tmp");
+    platformAndroidDeleteSaveFile(directory, relativePath + ".backup");
     return ok;
 }
 
@@ -274,7 +363,7 @@ static void encodePayload(const CcRuntimeState& state, std::vector<uint8_t>* pay
     appendRaw(payload, state.framebufferWriteHighWater,
         sizeof(state.framebufferWriteHighWater));
     appendUint32(payload, state.framebufferBitsExplicit ? 1u : 0u);
-    appendUint32(payload, state.cc1800Compatibility ? 1u : 0u);
+    appendUint32(payload, 0u);
     appendUint32(payload, state.dvcAudioStarted ? 1u : 0u);
     appendBytes(payload, state.ram);
     appendBytes(payload, state.systemMemory);
@@ -382,7 +471,7 @@ static bool decodePayload(const std::vector<uint8_t>& data,
     {
         return false;
     }
-    state->cc1800Compatibility = value != 0;
+    // Reserved field retained for save-state compatibility.
     if (!readUint32(data, &offset, &value))
     {
         return false;
@@ -515,6 +604,7 @@ bool saveStateWriteCcSlot(const std::string& appPath, int slot,
     const CcRuntimeState& state, std::string* error,
     SaveStateProgressCallback progressCallback, void* progressUserData)
 {
+    std::lock_guard<std::mutex> lock(s_ccSaveStateMutex);
     if (slot < 1 || slot > kSaveStateSlotCount ||
         state.gameSha256.size() != 64 || !recordCountsValid(state))
     {
@@ -554,7 +644,7 @@ bool saveStateWriteCcSlot(const std::string& appPath, int slot,
     file.reserve(kCcSaveStateHeaderSize + compressedPayload.size());
     appendHeader(&file, header);
     appendRaw(&file, compressedPayload.data(), compressedPayload.size());
-    if (!writeSaveStateFile(
+    if (!replaceCcSaveStateFile(
             saveStatePathForSlot(appPath, SAVE_STATE_FORMAT_CC, slot), file))
     {
         if (error) *error = "failed to write save-state file";
@@ -567,51 +657,79 @@ bool saveStateReadCcSlot(const std::string& appPath, int slot,
     CcRuntimeState* state, std::string* error,
     SaveStateProgressCallback progressCallback, void* progressUserData)
 {
+    std::lock_guard<std::mutex> lock(s_ccSaveStateMutex);
     if (!state)
     {
         if (error) *error = "runtime state output is invalid";
         return false;
     }
-    std::vector<uint8_t> file;
-    if (!readSaveStateFile(
-            saveStatePathForSlot(appPath, SAVE_STATE_FORMAT_CC, slot), &file) ||
-        file.size() < kCcSaveStateHeaderSize)
+    const std::string savePath = saveStatePathForSlot(appPath, SAVE_STATE_FORMAT_CC, slot);
+    std::string directory;
+    std::string relativePath;
+    if (!splitSaveStatePath(savePath, &directory, &relativePath))
     {
-        if (error) *error = "save-state file is truncated";
+        if (error) *error = "save-state path is invalid";
         return false;
     }
-    CcSaveStateFileHeader header = {};
-    if (!readHeader(file, &header) || header.magic != kCcSaveStateMagic ||
-        header.headerSize != kCcSaveStateHeaderSize || header.payloadSize == 0 ||
-        header.payloadStoredSize == 0 ||
-        !(header.memoryFlags & kCcPayloadFlagCompressed) ||
-        (uint64_t)kCcSaveStateHeaderSize + header.payloadStoredSize != file.size())
+    const std::string candidatePaths[] = {
+        savePath,
+        directory + "\n" + relativePath + ".tmp",
+        directory + "\n" + relativePath + ".backup" };
+    std::string lastError = "save-state file is truncated";
+    for (size_t candidateIndex = 0;
+        candidateIndex < sizeof(candidatePaths) / sizeof(candidatePaths[0]);
+        ++candidateIndex)
     {
-        if (error) *error = "unsupported save-state file";
-        return false;
+        std::vector<uint8_t> file;
+        if (!readSaveStateFile(candidatePaths[candidateIndex], &file,
+                kCcSaveStateHeaderSize + kCcMaxPayload) ||
+            file.size() < kCcSaveStateHeaderSize)
+        {
+            continue;
+        }
+        CcSaveStateFileHeader header = {};
+        if (!readHeader(file, &header) || header.magic != kCcSaveStateMagic ||
+            header.headerSize != kCcSaveStateHeaderSize || header.payloadSize == 0 ||
+            header.payloadStoredSize == 0 || header.payloadSize > kCcMaxPayload ||
+            header.payloadStoredSize > kCcMaxPayload ||
+            !(header.memoryFlags & kCcPayloadFlagCompressed) ||
+            (uint64_t)kCcSaveStateHeaderSize + header.payloadStoredSize != file.size())
+        {
+            lastError = "unsupported save-state file";
+            continue;
+        }
+        std::string id = saveStateAppIdForPath(appPath);
+        if (id.size() != 64 ||
+            memcmp(header.gameSha256, id.data(), sizeof(header.gameSha256)) != 0)
+        {
+            lastError = "save-state belongs to a different game";
+            continue;
+        }
+        std::vector<uint8_t> stored(file.begin() + kCcSaveStateHeaderSize, file.end());
+        std::vector<uint8_t> payload;
+        if (!saveStateDecompressPayload(
+                stored, 0, stored.size(), header.payloadSize,
+                &payload, progressCallback, progressUserData))
+        {
+            lastError = "failed to decompress save-state file";
+            continue;
+        }
+        CcRuntimeState decodedState;
+        decodedState.gameSha256 = id;
+        if (!decodePayload(payload, header, &decodedState))
+        {
+            lastError = "save-state file is invalid";
+            continue;
+        }
+        *state = std::move(decodedState);
+        if (candidateIndex != 0 &&
+            copySaveStateFile(candidatePaths[candidateIndex], savePath))
+        {
+            platformAndroidDeleteSaveFile(directory, relativePath + ".tmp");
+            platformAndroidDeleteSaveFile(directory, relativePath + ".backup");
+        }
+        return true;
     }
-    std::string id = saveStateAppIdForPath(appPath);
-    if (id.size() != 64 ||
-        memcmp(header.gameSha256, id.data(), sizeof(header.gameSha256)) != 0)
-    {
-        if (error) *error = "save-state belongs to a different game";
-        return false;
-    }
-    std::vector<uint8_t> stored(file.begin() + kCcSaveStateHeaderSize, file.end());
-    std::vector<uint8_t> payload;
-    if (!saveStateDecompressPayload(
-            stored, 0, stored.size(), header.payloadSize,
-            &payload, progressCallback, progressUserData))
-    {
-        if (error) *error = "failed to decompress save-state file";
-        return false;
-    }
-    *state = CcRuntimeState();
-    state->gameSha256 = id;
-    if (!decodePayload(payload, header, state))
-    {
-        if (error) *error = "save-state file is invalid";
-        return false;
-    }
-    return true;
+    if (error) *error = lastError;
+    return false;
 }

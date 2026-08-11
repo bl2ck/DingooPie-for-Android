@@ -12,8 +12,15 @@ static const uint32_t kFlagN = 1u << 31;
 static const uint32_t kFlagZ = 1u << 30;
 static const uint32_t kFlagC = 1u << 29;
 static const uint32_t kFlagV = 1u << 28;
+
 static const uint32_t kFlagQ = 1u << 27;
 static const uint32_t kFlagT = 1u << 5;
+static const uint16_t kConditionMasks[16] = {
+    0xf0f0u, 0x0f0fu, 0xccccu, 0x3333u,
+    0xff00u, 0x00ffu, 0xaaaau, 0x5555u,
+    0x0c0cu, 0xf3f3u, 0xaa55u, 0x55aau,
+    0x0a05u, 0xf5fau, 0xffffu, 0x0000u,
+};
 
 static uint32_t rotateRight(uint32_t value, uint32_t amount)
 {
@@ -25,29 +32,40 @@ static ARM32_ALWAYS_INLINE uint8_t* directPointer(const Arm32Bus* bus, uint32_t 
     size_t size)
 {
     if (!bus) return NULL;
-    uint32_t offset = address - bus->directSystemRamBase;
-    if (bus->directSystemRam && address >= bus->directSystemRamBase &&
-        offset < bus->directSystemRamSize && size <= bus->directSystemRamSize - offset)
+    uint32_t offset = address - bus->directFramebufferBase;
+    if (bus->directFramebuffer && address >= bus->directFramebufferBase &&
+        offset < bus->directFramebufferSize &&
+        size <= bus->directFramebufferSize - offset)
     {
-        return bus->directSystemRam + offset;
-    }
-    offset = address - bus->directRamBase;
-    if (bus->directRam && address >= bus->directRamBase &&
-        offset < bus->directRamSize && size <= bus->directRamSize - offset)
-    {
-        return bus->directRam + offset;
-    }
-    offset = address - bus->directStackBase;
-    if (bus->directStack && address >= bus->directStackBase &&
-        offset < bus->directStackSize && size <= bus->directStackSize - offset)
-    {
-        return bus->directStack + offset;
+        return bus->directFramebuffer + offset;
     }
     offset = address - bus->directHeapBase;
     if (bus->directHeap && address >= bus->directHeapBase &&
-        offset < bus->directHeapSize && size <= bus->directHeapSize - offset)
+        offset < bus->directHeapSize &&
+        size <= bus->directHeapSize - offset)
     {
         return bus->directHeap + offset;
+    }
+    offset = address - bus->directRamBase;
+    if (bus->directRam && address >= bus->directRamBase &&
+        offset < bus->directRamSize &&
+        size <= bus->directRamSize - offset)
+    {
+        return bus->directRam + offset;
+    }
+    offset = address - bus->directSystemRamBase;
+    if (bus->directSystemRam && address >= bus->directSystemRamBase &&
+        offset < bus->directSystemRamSize &&
+        size <= bus->directSystemRamSize - offset)
+    {
+        return bus->directSystemRam + offset;
+    }
+    offset = address - bus->directStackBase;
+    if (bus->directStack && address >= bus->directStackBase &&
+        offset < bus->directStackSize &&
+        size <= bus->directStackSize - offset)
+    {
+        return bus->directStack + offset;
     }
     return NULL;
 }
@@ -58,7 +76,10 @@ static ARM32_ALWAYS_INLINE bool readMemory(const Arm32Bus* bus, uint32_t address
     uint8_t* direct = directPointer(bus, address, size);
     if (direct)
     {
-        memcpy(output, direct, size);
+        if (size == sizeof(uint8_t)) *(uint8_t*)output = direct[0];
+        else if (size == sizeof(uint16_t)) memcpy(output, direct, sizeof(uint16_t));
+        else if (size == sizeof(uint32_t)) memcpy(output, direct, sizeof(uint32_t));
+        else memcpy(output, direct, size);
         return true;
     }
     return bus && bus->read && bus->read(bus->userData, address, output, size);
@@ -71,10 +92,17 @@ static ARM32_ALWAYS_INLINE bool fetchMemory(const Arm32Bus* bus, uint32_t addres
     {
         uint32_t offset = address - bus->directProgramBase;
         bool program = address >= bus->directProgramBase &&
-            offset < bus->directProgramSize && size <= bus->directProgramSize - offset;
+            offset < bus->directProgramSize &&
+            size <= bus->directProgramSize - offset;
+        if (program && bus->directProgram)
+        {
+            memcpy(output, bus->directProgram + offset, size);
+            return true;
+        }
         offset = address - bus->directThunkBase;
         bool thunk = address >= bus->directThunkBase &&
-            offset < bus->directThunkSize && size <= bus->directThunkSize - offset;
+            offset < bus->directThunkSize &&
+            size <= bus->directThunkSize - offset;
         if (program || thunk)
         {
             uint8_t* direct = directPointer(bus, address, size);
@@ -96,7 +124,10 @@ static ARM32_ALWAYS_INLINE bool writeMemory(const Arm32Bus* bus, uint32_t addres
     uint8_t* direct = directPointer(bus, address, size);
     if (direct)
     {
-        memcpy(direct, input, size);
+        if (size == sizeof(uint8_t)) direct[0] = *(const uint8_t*)input;
+        else if (size == sizeof(uint16_t)) memcpy(direct, input, sizeof(uint16_t));
+        else if (size == sizeof(uint32_t)) memcpy(direct, input, sizeof(uint32_t));
+        else memcpy(direct, input, size);
         return true;
     }
     return bus && bus->write && bus->write(bus->userData, address, input, size);
@@ -124,29 +155,8 @@ static void writeLoadedPc(Arm32State* state, uint32_t value)
 
 static ARM32_ALWAYS_INLINE bool conditionPassed(uint32_t cpsr, uint32_t condition)
 {
-    bool n = (cpsr & kFlagN) != 0;
-    bool z = (cpsr & kFlagZ) != 0;
-    bool c = (cpsr & kFlagC) != 0;
-    bool v = (cpsr & kFlagV) != 0;
-    switch (condition)
-    {
-    case 0x0: return z;
-    case 0x1: return !z;
-    case 0x2: return c;
-    case 0x3: return !c;
-    case 0x4: return n;
-    case 0x5: return !n;
-    case 0x6: return v;
-    case 0x7: return !v;
-    case 0x8: return c && !z;
-    case 0x9: return !c || z;
-    case 0xa: return n == v;
-    case 0xb: return n != v;
-    case 0xc: return !z && n == v;
-    case 0xd: return z || n != v;
-    case 0xe: return true;
-    default: return false;
-    }
+    uint32_t flags = (cpsr >> 28) & 0xfu;
+    return ((kConditionMasks[condition & 0xfu] >> flags) & 1u) != 0u;
 }
 
 static void setNz(Arm32State* state, uint32_t value)
@@ -270,12 +280,66 @@ static ShiftResult decodeOperand2(const Arm32State* state, uint32_t instruction)
         amount, registerShift, oldCarry);
 }
 
-static ARM32_ALWAYS_INLINE bool executeDataProcessing(Arm32State* state, uint32_t instruction)
+static ARM32_ALWAYS_INLINE uint32_t decodeUnflaggedOperand2(
+    const Arm32State* state, uint32_t instruction)
+{
+    if (instruction & (1u << 25))
+    {
+        uint32_t amount = ((instruction >> 8) & 0xfu) * 2u;
+        return rotateRight(instruction & 0xffu, amount);
+    }
+    uint32_t value = readRegister(state, instruction & 0xfu);
+    uint32_t amount = (instruction >> 7) & 0x1fu;
+    switch ((instruction >> 5) & 3u)
+    {
+    case 0:
+        return amount ? value << amount : value;
+    case 1:
+        return amount ? value >> amount : 0u;
+    case 2:
+        return amount ? (uint32_t)((int32_t)value >> amount) :
+            (uint32_t)((int32_t)value >> 31);
+    default:
+        if (amount) return rotateRight(value, amount);
+        return ((state->cpsr & kFlagC) ? 0x80000000u : 0u) | (value >> 1);
+    }
+}
+
+static ARM32_ALWAYS_INLINE bool executeDataProcessing(Arm32State* state,
+    uint32_t instruction)
 {
     uint32_t opcode = (instruction >> 21) & 0xfu;
     bool setFlags = (instruction & (1u << 20)) != 0;
-    uint32_t rn = (instruction >> 16) & 0xfu;
     uint32_t rd = (instruction >> 12) & 0xfu;
+    if (!setFlags && (opcode < 8u || opcode >= 12u) &&
+        (instruction & (1u << 4)) == 0u)
+    {
+        uint32_t operand = decodeUnflaggedOperand2(state, instruction);
+        uint32_t left = readRegister(state, (instruction >> 16) & 0xfu);
+        uint32_t result = 0;
+        switch (opcode)
+        {
+        case 0x0: result = left & operand; break;
+        case 0x1: result = left ^ operand; break;
+        case 0x2: result = left - operand; break;
+        case 0x3: result = operand - left; break;
+        case 0x4: result = left + operand; break;
+        case 0x5: result = left + operand +
+            ((state->cpsr & kFlagC) ? 1u : 0u); break;
+        case 0x6: result = left - operand -
+            ((state->cpsr & kFlagC) ? 0u : 1u); break;
+        case 0x7: result = operand - left -
+            ((state->cpsr & kFlagC) ? 0u : 1u); break;
+        case 0xc: result = left | operand; break;
+        case 0xd: result = operand; break;
+        case 0xe: result = left & ~operand; break;
+        default: result = ~operand; break;
+        }
+        state->r[rd] = result;
+        if (rd == 15u) state->r[15] &= ~3u;
+        return true;
+    }
+    uint32_t rn = (instruction >> 16) & 0xfu;
     uint32_t left = readRegister(state, rn);
     ShiftResult operand = decodeOperand2(state, instruction);
     uint32_t carry = (state->cpsr & kFlagC) ? 1u : 0u;
@@ -550,6 +614,35 @@ static ARM32_ALWAYS_INLINE bool executeBlockTransfer(Arm32State* state, const Ar
     uint32_t base = readRegister(state, rn);
     uint32_t address = up ? base + (pre ? 4u : 0u) :
         base - count * 4u + (pre ? 0u : 4u);
+    uint8_t* direct = directPointer(bus, address, count * sizeof(uint32_t));
+    if (direct)
+    {
+        uint32_t values[16] = {};
+        if (load)
+        {
+            memcpy(values, direct, count * sizeof(uint32_t));
+            uint32_t valueIndex = 0;
+            for (uint32_t reg = 0; reg < 16; ++reg)
+            {
+                if (!(list & (1u << reg))) continue;
+                if (reg == 15) writeLoadedPc(state, values[valueIndex]);
+                else state->r[reg] = values[valueIndex];
+                ++valueIndex;
+            }
+        }
+        else
+        {
+            uint32_t valueIndex = 0;
+            for (uint32_t reg = 0; reg < 16; ++reg)
+            {
+                if (!(list & (1u << reg))) continue;
+                values[valueIndex++] = reg == 15 ? state->r[15] + 8u : state->r[reg];
+            }
+            memcpy(direct, values, count * sizeof(uint32_t));
+        }
+        if (writeback) state->r[rn] = up ? base + count * 4u : base - count * 4u;
+        return true;
+    }
     for (uint32_t reg = 0; reg < 16; ++reg)
     {
         if (!(list & (1u << reg))) continue;
@@ -588,6 +681,7 @@ enum Arm32InstructionKind
     ARM32_KIND_SVC,
     ARM32_KIND_UNSUPPORTED
 };
+
 
 static ARM32_ALWAYS_INLINE uint8_t decodeArmInstruction(uint32_t instruction)
 {
@@ -643,6 +737,28 @@ static ARM32_ALWAYS_INLINE uint8_t decodeArmInstruction(uint32_t instruction)
     }
 }
 
+static ARM32_ALWAYS_INLINE uint8_t armInstructionMayChangeFlow(
+    uint32_t instruction, uint8_t kind)
+{
+    if (kind == ARM32_KIND_DATA_PROCESSING)
+    {
+        return ((instruction >> 12) & 0xfu) == 15u;
+    }
+    if (kind == ARM32_KIND_SINGLE_TRANSFER)
+    {
+        return (instruction & (1u << 20)) != 0u &&
+            ((instruction >> 12) & 0xfu) == 15u;
+    }
+    return kind == ARM32_KIND_BLX_IMMEDIATE ||
+        kind == ARM32_KIND_BRANCH_EXCHANGE ||
+        kind == ARM32_KIND_BRANCH ||
+        kind == ARM32_KIND_SVC ||
+        kind == ARM32_KIND_MULTIPLY ||
+        kind == ARM32_KIND_SIGNED_HALFWORD_MULTIPLY ||
+        kind == ARM32_KIND_HALFWORD_TRANSFER ||
+        kind == ARM32_KIND_BLOCK_TRANSFER ||
+        kind == ARM32_KIND_MRS;
+}
 static ARM32_ALWAYS_INLINE uint8_t cachedArmInstructionKind(const Arm32Bus* bus,
     uint32_t pc, uint32_t instruction)
 {
@@ -662,12 +778,60 @@ static ARM32_ALWAYS_INLINE uint8_t cachedArmInstructionKind(const Arm32Bus* bus,
     {
         entry->instruction = instruction;
         entry->kind = decodeArmInstruction(instruction);
+        entry->reserved = armInstructionMayChangeFlow(instruction, entry->kind);
     }
     return entry->kind;
 }
 
+static ARM32_ALWAYS_INLINE bool fetchCachedArmInstruction(const Arm32Bus* bus,
+    uint32_t pc, uint32_t* instruction, uint8_t* kind,
+    uint16_t* conditionMask)
+{
+    uint32_t offset = pc - bus->directProgramBase;
+    if (bus->instructionCache && pc >= bus->directProgramBase &&
+        (offset & 3u) == 0 && offset < bus->directProgramSize)
+    {
+        uint32_t index = offset >> 2;
+        if (index < bus->instructionCacheCount)
+        {
+            Arm32InstructionCacheEntry* entry = bus->instructionCache + index;
+            if (entry->kind != ARM32_KIND_UNKNOWN && bus->directProgram)
+            {
+                *instruction = entry->instruction;
+                *kind = entry->kind;
+                *conditionMask = entry->conditionMask;
+                return true;
+            }
+            if (!fetchMemory(bus, pc, instruction, sizeof(*instruction)))
+            {
+                return false;
+            }
+            if (entry->kind == ARM32_KIND_UNKNOWN ||
+                entry->instruction != *instruction)
+            {
+                entry->instruction = *instruction;
+                entry->kind = decodeArmInstruction(*instruction);
+                entry->reserved = armInstructionMayChangeFlow(*instruction,
+                    entry->kind);
+                entry->conditionMask = kConditionMasks[*instruction >> 28];
+            }
+            *kind = entry->kind;
+            *conditionMask = entry->conditionMask;
+            return true;
+        }
+    }
+    if (!fetchMemory(bus, pc, instruction, sizeof(*instruction)))
+    {
+        return false;
+    }
+    *kind = cachedArmInstructionKind(bus, pc, *instruction);
+    *conditionMask = kConditionMasks[*instruction >> 28];
+    return true;
+}
+
 static ARM32_ALWAYS_INLINE bool executeArmInstruction(Arm32State* state,
-    const Arm32Bus* bus, uint32_t instruction, uint8_t kind, bool* stopped)
+    const Arm32Bus* bus, uint32_t instruction, uint8_t kind,
+    uint16_t conditionMask, bool* stopped)
 {
     uint32_t pc = state->r[15];
     state->r[15] = pc + 4u;
@@ -680,8 +844,14 @@ static ARM32_ALWAYS_INLINE bool executeArmInstruction(Arm32State* state,
         state->cpsr |= kFlagT;
         return true;
     }
-    uint32_t condition = instruction >> 28;
-    if (condition != 0xeu && !conditionPassed(state->cpsr, condition)) return true;
+    if (conditionMask != 0xffffu)
+    {
+        uint32_t flags = (state->cpsr >> 28) & 0xfu;
+        if (((conditionMask >> flags) & 1u) == 0u)
+        {
+            return true;
+        }
+    }
 
     switch (kind)
     {
@@ -1043,6 +1213,23 @@ Arm32RunResult arm32Run(Arm32State* state, const Arm32Bus* bus,
     while (!instructionLimit || state->instructions < instructionLimit)
     {
         if (state->r[15] == stopPc) return ARM32_RUN_OK;
+        if (bus->profilePcSamples && (state->instructions & 0x3ffu) == 0u)
+        {
+            uint32_t pcOffset = state->r[15] - bus->directProgramBase;
+            uint32_t pcIndex = pcOffset >> 2;
+            if (state->r[15] >= bus->directProgramBase &&
+                pcIndex < bus->profileSampleCount)
+            {
+                ++bus->profilePcSamples[pcIndex];
+            }
+            uint32_t lrOffset = state->r[14] - bus->directProgramBase;
+            uint32_t lrIndex = lrOffset >> 2;
+            if (state->r[14] >= bus->directProgramBase &&
+                lrIndex < bus->profileSampleCount)
+            {
+                ++bus->profileLrSamples[lrIndex];
+            }
+        }
         if (state->cpsr & kFlagT)
         {
             uint16_t instruction = 0;
@@ -1059,15 +1246,76 @@ Arm32RunResult arm32Run(Arm32State* state, const Arm32Bus* bus,
             if (stopped) return ARM32_RUN_STOPPED;
             continue;
         }
+        if (!bus->profilePcSamples && bus->directProgram &&
+            bus->instructionCache)
+        {
+            uint32_t blockPc = state->r[15];
+            uint32_t blockOffset = blockPc - bus->directProgramBase;
+            if (blockPc >= bus->directProgramBase &&
+                (blockOffset & 3u) == 0u &&
+                blockOffset < bus->directProgramSize)
+            {
+                uint32_t cacheIndex = blockOffset >> 2;
+                uint32_t blockCount = 0;
+                uint32_t blockLimit = 32u;
+                if (instructionLimit)
+                {
+                    uint64_t remaining = instructionLimit - state->instructions;
+                    if (remaining < blockLimit) blockLimit = (uint32_t)remaining;
+                }
+                while (cacheIndex < bus->instructionCacheCount &&
+                    blockOffset + sizeof(uint32_t) <= bus->directProgramSize &&
+                    blockCount < blockLimit)
+                {
+                    uint32_t pc = state->r[15];
+                    Arm32InstructionCacheEntry* entry =
+                        bus->instructionCache + cacheIndex;
+                    if (entry->kind == ARM32_KIND_UNKNOWN)
+                    {
+                        memcpy(&entry->instruction,
+                            bus->directProgram + blockOffset,
+                            sizeof(entry->instruction));
+                        entry->kind = decodeArmInstruction(entry->instruction);
+                        entry->reserved = armInstructionMayChangeFlow(
+                            entry->instruction, entry->kind);
+                        entry->conditionMask =
+                            kConditionMasks[entry->instruction >> 28];
+                    }
+                    bool stopped = false;
+                    if (!executeArmInstruction(state, bus, entry->instruction,
+                            entry->kind, entry->conditionMask, &stopped))
+                    {
+                        return ARM32_RUN_UNSUPPORTED;
+                    }
+                    state->instructions++;
+                    if (entry->kind == ARM32_KIND_SVC && stopped)
+                    {
+                        return ARM32_RUN_STOPPED;
+                    }
+                    if (entry->reserved &&
+                        ((state->cpsr & kFlagT) || state->r[15] != pc + 4u))
+                    {
+                        break;
+                    }
+                    blockOffset += sizeof(uint32_t);
+                    ++cacheIndex;
+                    ++blockCount;
+                }
+                continue;
+            }
+        }
         uint32_t instruction = 0;
         uint32_t pc = state->r[15];
-        if (!fetchMemory(bus, pc, &instruction, sizeof(instruction)))
+        uint8_t kind = ARM32_KIND_UNKNOWN;
+        uint16_t conditionMask = 0u;
+        if (!fetchCachedArmInstruction(bus, pc, &instruction, &kind,
+                &conditionMask))
         {
             return ARM32_RUN_INVALID_MEMORY;
         }
-        uint8_t kind = cachedArmInstructionKind(bus, pc, instruction);
         bool stopped = false;
-        if (!executeArmInstruction(state, bus, instruction, kind, &stopped))
+        if (!executeArmInstruction(state, bus, instruction, kind,
+                conditionMask, &stopped))
         {
             return ARM32_RUN_UNSUPPORTED;
         }

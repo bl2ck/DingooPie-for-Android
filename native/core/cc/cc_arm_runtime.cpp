@@ -5,7 +5,9 @@
 #include "guest/guest_package.h"
 #include "game/game_paths.h"
 #include "cc/arm32_interpreter.h"
-#include "cc/cc_graphics_compat.h"
+#if defined(DINGOO_PIE_ARM32_DYNARMIC)
+#include "cc/arm32_dynarmic.h"
+#endif
 #include "cc/cc_runtime_timing.h"
 #include "cc/cc_input_mapping.h"
 #include "config/cheat_runtime.h"
@@ -92,7 +94,6 @@ static std::atomic<bool> s_running(false);
 static std::atomic<double> s_runtimeSpeedScale(kAutoRuntimeSpeedScale);
 static std::atomic<double> s_hostDelayScale(1.0);
 static std::atomic<uint64_t> s_targetInstructionsPerSecond(0);
-static std::atomic<bool> s_compatibilityExecutionMode(false);
 static std::mutex s_runtimeMutex;
 struct CcArmRuntime;
 static CcArmRuntime* s_activeRuntime = NULL;
@@ -151,6 +152,8 @@ struct CcArmRuntime
     std::vector<uint8_t> legacyAudioMmio;
     std::vector<uint8_t> legacySystemMmio;
     std::vector<Arm32InstructionCacheEntry> instructionCache;
+    std::vector<uint32_t> profilePcSamples;
+    std::vector<uint32_t> profileLrSamples;
     std::vector<HeapBlock> heap;
     std::vector<Task> tasks;
     std::vector<ResourceHandle> resources;
@@ -176,7 +179,6 @@ struct CcArmRuntime
     bool faultWrite;
     bool faultFetch;
     bool yielded;
-    bool cc1800Compatibility;
     bool dvcAudioStarted;
     Arm32Bus bus;
     CcArmRuntimeStats* stats;
@@ -305,7 +307,6 @@ bool ccArmRuntimeCaptureState(CcRuntimeState* out, std::string* error)
     memcpy(out->framebufferWriteHighWater, runtime->framebufferWriteHighWater,
         sizeof(out->framebufferWriteHighWater));
     out->framebufferBitsExplicit = runtime->framebufferBitsExplicit;
-    out->cc1800Compatibility = runtime->cc1800Compatibility;
     out->dvcAudioStarted = runtime->dvcAudioStarted;
     return !out->tasks.empty();
 }
@@ -477,7 +478,6 @@ bool ccArmRuntimeRestoreState(const CcRuntimeState& state, std::string* error)
     memcpy(runtime->framebufferWriteHighWater, state.framebufferWriteHighWater,
         sizeof(runtime->framebufferWriteHighWater));
     runtime->framebufferBitsExplicit = state.framebufferBitsExplicit;
-    runtime->cc1800Compatibility = state.cc1800Compatibility;
     runtime->dvcAudioStarted = state.dvcAudioStarted;
     runtime->stats->instructions = state.runtimeInstructions;
     runtime->startTime = std::chrono::steady_clock::now() -
@@ -501,9 +501,18 @@ bool ccArmRuntimeRestoreState(const CcRuntimeState& state, std::string* error)
     runtime->bus.directHeapSize = runtime->legacySystemMmio.empty() ?
         (uint32_t)runtime->heapMemory.size() :
         kLegacySystemMmioStart - runtime->heapStart;
+    runtime->bus.directFramebuffer = runtime->framebufferBitsExplicit ?
+        runtime->framebuffer.data() : NULL;
+    runtime->bus.directFramebufferBase = kFramebufferAddress;
+    runtime->bus.directFramebufferSize = (uint32_t)runtime->framebuffer.size();
+    runtime->bus.directProgram = runtime->ram.data() +
+        (runtime->package->origin - runtime->ramStart);
     runtime->bus.instructionCache = runtime->instructionCache.data();
     runtime->bus.instructionCacheCount =
         (uint32_t)runtime->instructionCache.size();
+#if defined(DINGOO_PIE_ARM32_DYNARMIC)
+    arm32DynarmicReset();
+#endif
     printf("cc-arm: save-state restored tasks=%u streams=%u resources=%u\n",
         (uint32_t)runtime->tasks.size(), (uint32_t)runtime->openStreams.size(),
         (uint32_t)runtime->resources.size());
@@ -659,6 +668,26 @@ static bool busWrite(void* userData, uint32_t address, const void* input, size_t
     }
     if (!destination) return false;
     memcpy(destination, input, size);
+    uint64_t writeEnd = (uint64_t)address + size;
+    uint64_t programStart = runtime->package->origin;
+    uint64_t programEnd = programStart + runtime->package->prog_size;
+    if (!runtime->instructionCache.empty() && size &&
+        address < programEnd && writeEnd > programStart)
+    {
+        uint32_t firstAddress = std::max<uint32_t>(address,
+            runtime->package->origin) & ~3u;
+        uint32_t lastAddress = (uint32_t)(std::min<uint64_t>(writeEnd,
+            programEnd) - 1u) & ~3u;
+        for (uint32_t instructionAddress = firstAddress;
+             instructionAddress <= lastAddress; instructionAddress += 4u)
+        {
+            size_t index = (instructionAddress - runtime->package->origin) / 4u;
+            if (index < runtime->instructionCache.size())
+            {
+                runtime->instructionCache[index] = Arm32InstructionCacheEntry{};
+            }
+        }
+    }
     if (size == sizeof(uint32_t) && address == kLegacyGraphicsStride)
     {
         uint32_t value = 0;
@@ -668,6 +697,7 @@ static bool busWrite(void* userData, uint32_t address, const void* input, size_t
         {
             runtime->framebufferBits = value * 8u / kFramebufferWidth;
             runtime->framebufferBitsExplicit = true;
+            runtime->bus.directFramebuffer = runtime->framebuffer.data();
         }
     }
     else if (size == sizeof(uint32_t) && address == kLegacyGraphicsSurface)
@@ -911,6 +941,7 @@ static uint32_t allocateMemory(CcArmRuntime* runtime, uint32_t size)
             CcArmRuntime::HeapBlock rest = { address + aligned, oldSize - aligned, true };
             runtime->heap.insert(runtime->heap.begin() + i + 1, rest);
         }
+        memset(resolveMemory(runtime, address, aligned), 0, aligned);
         return address;
     }
     uint64_t allocationEnd = (uint64_t)runtime->heapCursor + aligned;
@@ -925,6 +956,7 @@ static uint32_t allocateMemory(CcArmRuntime* runtime, uint32_t size)
     uint32_t address = runtime->heapCursor;
     runtime->heapCursor += aligned;
     runtime->heap.push_back({ address, aligned, false });
+    memset(resolveMemory(runtime, address, aligned), 0, aligned);
     return address;
 }
 
@@ -1082,216 +1114,6 @@ static void recordUnknownImport(CcArmRuntime* runtime, const char* name)
     }
 }
 
-static bool runTransparentBlit16(CcArmRuntime* runtime,
-    uint32_t objectAddress, uint32_t blendMode)
-{
-    uint8_t* object = resolveMemory(runtime, objectAddress, 0x4cu);
-    if (!object) return false;
-    uint32_t destinationStride = 0;
-    uint32_t left = 0;
-    uint32_t top = 0;
-    uint32_t right = 0;
-    uint32_t bottom = 0;
-    uint32_t sourceAddress = 0;
-    uint32_t destinationAddress = 0;
-    uint32_t sourceInfoAddress = 0;
-    uint16_t transparent = 0;
-    memcpy(&destinationStride, object + 0x00, sizeof(destinationStride));
-    memcpy(&sourceInfoAddress, object + 0x1c, sizeof(sourceInfoAddress));
-    memcpy(&transparent, object + 0x28, sizeof(transparent));
-    memcpy(&sourceAddress, object + 0x2c, sizeof(sourceAddress));
-    memcpy(&destinationAddress, object + 0x30, sizeof(destinationAddress));
-    memcpy(&left, object + 0x3c, sizeof(left));
-    memcpy(&top, object + 0x40, sizeof(top));
-    memcpy(&right, object + 0x44, sizeof(right));
-    memcpy(&bottom, object + 0x48, sizeof(bottom));
-    uint16_t* sourceInfo = (uint16_t*)resolveMemory(runtime, sourceInfoAddress, sizeof(uint16_t));
-    if (!sourceInfo || right < left || bottom < top) return false;
-    uint32_t width = right - left;
-    uint32_t height = bottom - top;
-    uint32_t sourceStride = *sourceInfo;
-    if (!height)
-    {
-        return true;
-    }
-    if (width > 2048u || height > 2048u || sourceStride < width ||
-        destinationStride < width)
-    {
-        return false;
-    }
-    uint64_t sourcePixels = (uint64_t)(height - 1u) * sourceStride + width;
-    uint64_t destinationPixels = (uint64_t)(height - 1u) * destinationStride + width;
-    uint64_t sourceBytes = sourcePixels * sizeof(uint16_t);
-    uint64_t destinationBytes = destinationPixels * sizeof(uint16_t);
-    uint64_t sourceAdvance = (uint64_t)height * sourceStride * sizeof(uint16_t);
-    uint64_t destinationAdvance =
-        (uint64_t)height * destinationStride * sizeof(uint16_t);
-    if (sourceBytes > UINT32_MAX || destinationBytes > UINT32_MAX ||
-        sourceAdvance > UINT32_MAX || destinationAdvance > UINT32_MAX)
-    {
-        return false;
-    }
-    const uint16_t* source = (const uint16_t*)resolveMemory(runtime,
-        sourceAddress, (uint32_t)sourceBytes);
-    uint16_t* destination = (uint16_t*)resolveMemory(runtime,
-        destinationAddress, (uint32_t)destinationBytes);
-    if (!source || !destination) return false;
-    ccBlitTransparentBlend16(destination, destinationStride, source,
-        sourceStride, width, height, transparent, blendMode);
-    sourceAddress += (uint32_t)sourceAdvance;
-    destinationAddress += (uint32_t)destinationAdvance;
-    memcpy(object + 0x2c, &sourceAddress, sizeof(sourceAddress));
-    memcpy(object + 0x30, &destinationAddress, sizeof(destinationAddress));
-    return true;
-}
-
-static bool readScaledBlit16(CcArmRuntime* runtime, uint32_t objectAddress,
-    uint32_t* destinationStride, uint32_t* sourceInfoAddress,
-    uint32_t* destinationAddress, uint32_t* sourceLeft, uint32_t* sourceTop,
-    uint32_t* left, uint32_t* top, uint32_t* right, uint32_t* bottom,
-    uint32_t* sourceXStep, uint32_t* sourceYStep)
-{
-    uint8_t* object = resolveMemory(runtime, objectAddress, 0x64u);
-    if (!object) return false;
-    memcpy(destinationStride, object + 0x00, sizeof(*destinationStride));
-    memcpy(sourceInfoAddress, object + 0x1c, sizeof(*sourceInfoAddress));
-    memcpy(destinationAddress, object + 0x30, sizeof(*destinationAddress));
-    memcpy(sourceLeft, object + 0x3c, sizeof(*sourceLeft));
-    memcpy(sourceTop, object + 0x40, sizeof(*sourceTop));
-    memcpy(left, object + 0x4c, sizeof(*left));
-    memcpy(top, object + 0x50, sizeof(*top));
-    memcpy(right, object + 0x54, sizeof(*right));
-    memcpy(bottom, object + 0x58, sizeof(*bottom));
-    memcpy(sourceXStep, object + 0x5c, sizeof(*sourceXStep));
-    memcpy(sourceYStep, object + 0x60, sizeof(*sourceYStep));
-    return true;
-}
-
-static bool validateScaledBlit16(uint32_t destinationStride,
-    uint32_t sourceStride, uint32_t sourceLeft, uint32_t sourceTop,
-    uint32_t sourceXStep, uint32_t sourceYStep, uint32_t width,
-    uint32_t height)
-{
-    if (!width || !height || width > 2048u || height > 2048u ||
-        destinationStride < width || !sourceStride)
-    {
-        return false;
-    }
-    uint64_t lastX = sourceLeft +
-        (((uint64_t)(width - 1u) * sourceXStep) >> 16);
-    uint64_t lastY = sourceTop +
-        (((uint64_t)(height - 1u) * sourceYStep) >> 16);
-    return lastX < sourceStride && lastY < 2048u;
-}
-
-static bool runScaledBlit16(CcArmRuntime* runtime, uint32_t objectAddress,
-    bool indexed, bool useTransparent)
-{
-    uint32_t destinationStride = 0;
-    uint32_t sourceInfoAddress = 0;
-    uint32_t destinationAddress = 0;
-    uint32_t sourceLeft = 0;
-    uint32_t sourceTop = 0;
-    uint32_t left = 0;
-    uint32_t top = 0;
-    uint32_t right = 0;
-    uint32_t bottom = 0;
-    uint32_t sourceXStep = 0;
-    uint32_t sourceYStep = 0;
-    uint16_t transparent = 0;
-    if (!readScaledBlit16(runtime, objectAddress, &destinationStride,
-            &sourceInfoAddress, &destinationAddress, &sourceLeft, &sourceTop,
-            &left, &top, &right, &bottom, &sourceXStep, &sourceYStep) ||
-        right < left || bottom < top)
-    {
-        return false;
-    }
-
-    uint8_t* object = resolveMemory(runtime, objectAddress, 0x64u);
-    if (!object) return false;
-    memcpy(&transparent, object + 0x28, sizeof(transparent));
-    uint8_t* sourceInfo = resolveMemory(runtime, sourceInfoAddress, 0x18u);
-    if (!sourceInfo) return false;
-    uint16_t sourceStride = 0;
-    uint16_t sourceHeight = 0;
-    uint32_t sourceBase = 0;
-    memcpy(&sourceStride, sourceInfo, sizeof(sourceStride));
-    memcpy(&sourceHeight, sourceInfo + sizeof(sourceStride),
-        sizeof(sourceHeight));
-    memcpy(&sourceBase, sourceInfo + 0x14, sizeof(sourceBase));
-    uint32_t width = right - left;
-    uint32_t height = bottom - top;
-    if (sourceLeft <= sourceStride && sourceTop <= sourceHeight)
-    {
-        sourceXStep = ccNormalizeScaledStep(sourceXStep,
-            sourceStride - sourceLeft, width);
-        sourceYStep = ccNormalizeScaledStep(sourceYStep,
-            sourceHeight - sourceTop, height);
-    }
-    if (!validateScaledBlit16(destinationStride, sourceStride, sourceLeft,
-            sourceTop, sourceXStep, sourceYStep, width, height))
-    {
-        return false;
-    }
-
-    uint32_t sourceAddressOffset = indexed ? 0x38u : 0x2cu;
-    uint32_t sourceAddress = 0;
-    uint8_t* sourcePointer = resolveMemory(runtime,
-        objectAddress + sourceAddressOffset, sizeof(sourceAddress));
-    uint8_t* destinationPointer = resolveMemory(runtime,
-        objectAddress + 0x30u, sizeof(destinationAddress));
-    if (!sourcePointer || !destinationPointer) return false;
-    memcpy(&sourceAddress, sourcePointer, sizeof(sourceAddress));
-
-    const uint16_t* palette = NULL;
-    if (indexed)
-    {
-        uint32_t paletteAddress = 0;
-        uint8_t* palettePointer = resolveMemory(runtime,
-            objectAddress + 0x2cu, sizeof(paletteAddress));
-        if (!palettePointer) return false;
-        memcpy(&paletteAddress, palettePointer, sizeof(paletteAddress));
-        palette = (const uint16_t*)resolveMemory(runtime,
-            paletteAddress, 256u * sizeof(uint16_t));
-        if (!palette) return false;
-    }
-
-    uint64_t lastSample =
-        ((uint64_t)(width - 1u) * sourceXStep) >> 16;
-    uint32_t sourceY = sourceTop << 16;
-    for (uint32_t y = 0; y < height; ++y)
-    {
-        uint16_t* destination = (uint16_t*)resolveMemory(runtime,
-            destinationAddress, width * sizeof(uint16_t));
-        uint32_t sourceElementSize = indexed ? 1u : sizeof(uint16_t);
-        uint8_t* source = resolveMemory(runtime, sourceAddress,
-            (uint32_t)(lastSample + 1u) * sourceElementSize);
-        if (!destination || !source) return false;
-        uint32_t sourceX = 0;
-        for (uint32_t x = 0; x < width; ++x)
-        {
-            uint32_t sample = sourceX >> 16;
-            uint16_t pixel = indexed ? palette[source[sample]] :
-                ((const uint16_t*)source)[sample];
-            if (!useTransparent || pixel != transparent)
-            {
-                destination[x] = pixel;
-            }
-            sourceX += sourceXStep;
-        }
-        destinationAddress += destinationStride * sizeof(uint16_t);
-        sourceY += sourceYStep;
-        uint64_t rowOffset = (uint64_t)(sourceY >> 16) * sourceStride +
-            sourceLeft;
-        uint64_t nextSourceAddress = sourceBase + rowOffset * sourceElementSize;
-        if (nextSourceAddress > UINT32_MAX) return false;
-        sourceAddress = (uint32_t)nextSourceAddress;
-    }
-    memcpy(sourcePointer, &sourceAddress, sizeof(sourceAddress));
-    memcpy(destinationPointer, &destinationAddress, sizeof(destinationAddress));
-    return true;
-}
-
 static bool readGuestU32(CcArmRuntime* runtime, uint32_t address, uint32_t* value)
 {
     uint8_t* source = resolveMemory(runtime, address, sizeof(*value));
@@ -1299,1070 +1121,15 @@ static bool readGuestU32(CcArmRuntime* runtime, uint32_t address, uint32_t* valu
     memcpy(value, source, sizeof(*value));
     return true;
 }
-
 static bool writeGuestU32(CcArmRuntime* runtime, uint32_t address, uint32_t value)
 {
     return busWrite(runtime, address, &value, sizeof(value));
 }
 
-static uint32_t runFastCopy(CcArmRuntime* runtime, uint32_t destinationAddress,
-    uint32_t sourceAddress, uint32_t size)
-{
-    uint8_t* destination = resolveMemory(runtime, destinationAddress, size ? size : 1u);
-    uint8_t* source = resolveMemory(runtime, sourceAddress, size ? size : 1u);
-    if (!destination || !source) return 0;
-    memmove(destination, source, size);
-    return destinationAddress;
-}
 
-static uint32_t runFastFill(CcArmRuntime* runtime, uint32_t destinationAddress,
-    uint32_t size, uint8_t value)
-{
-    uint8_t* destination = resolveMemory(runtime, destinationAddress, size ? size : 1u);
-    if (!destination) return 0;
-    memset(destination, value, size);
-    return destinationAddress;
-}
 
-static const char kFill32PairsImport[] = "cc_internal_fill32_pairs";
-static const char kAdpcmDecodeTailImport[] = "cc_internal_adpcm_decode_tail";
-static const char kRowFill32PairsImport[] = "cc_internal_row_fill32_pairs";
 
-static bool runCc1800Fill32Pairs(CcArmRuntime* runtime, Arm32State* state)
-{
-    uint32_t pairs = state->r[1];
-    if (pairs > UINT32_MAX / 8u) return false;
-    uint32_t byteCount = pairs * 8u;
-    uint32_t destinationAddress = state->r[0] + 4u;
-    uint8_t* destination = resolveMemory(runtime, destinationAddress,
-        byteCount ? byteCount : 1u);
-    if (!destination)
-    {
-        runtime->faultAddress = destinationAddress;
-        runtime->faultSize = byteCount;
-        runtime->faultWrite = true;
-        runtime->faultFetch = false;
-        return false;
-    }
-    uint32_t* output = (uint32_t*)destination;
-    std::fill(output, output + pairs * 2u, state->r[4]);
-    state->r[0] += byteCount;
-    state->r[1] = 0;
-    state->r[15] = 0x10166270u;
-    return true;
-}
 
-static bool runCc1800AdpcmDecodeTail(CcArmRuntime* runtime, Arm32State* state)
-{
-    uint32_t inputAddress = state->r[3];
-    uint32_t inputEnd = state->r[10];
-    if (inputAddress >= inputEnd)
-    {
-        state->r[15] = 0x10167644u;
-        return true;
-    }
-    uint32_t inputSize = inputEnd - inputAddress;
-    bool highNibble = (state->r[2] & 4u) != 0;
-    uint64_t sampleCount64 = (uint64_t)inputSize * 2u -
-        (highNibble ? 1u : 0u);
-    if (sampleCount64 > UINT32_MAX / sizeof(uint16_t)) return false;
-    uint32_t sampleCount = (uint32_t)sampleCount64;
-    uint8_t* input = resolveMemory(runtime, inputAddress, inputSize);
-    uint8_t* outputBytes = resolveMemory(runtime, state->r[12],
-        (size_t)sampleCount * sizeof(uint16_t));
-    uint8_t* stepBytes = resolveMemory(runtime, state->r[11], 89u * 4u);
-    uint8_t* indexBytes = resolveMemory(runtime, state->r[7], 8u * 4u);
-    if (!input || !outputBytes || !stepBytes || !indexBytes)
-    {
-        runtime->faultAddress = !input ? inputAddress : state->r[12];
-        runtime->faultSize = !input ? inputSize : sampleCount * sizeof(uint16_t);
-        runtime->faultWrite = input != NULL;
-        runtime->faultFetch = false;
-        return false;
-    }
-
-    int32_t predictor = (int32_t)state->r[0];
-    int32_t index = (int32_t)state->r[1];
-    uint16_t* output = (uint16_t*)outputBytes;
-    uint32_t produced = 0;
-    uint32_t sourceOffset = 0;
-    while (sourceOffset < inputSize && produced < sampleCount)
-    {
-        uint32_t nibble = (input[sourceOffset] >> (highNibble ? 4u : 0u)) & 0x0fu;
-        int32_t step = 0;
-        int32_t indexDelta = 0;
-        memcpy(&step, stepBytes + (uint32_t)index * 4u, sizeof(step));
-        memcpy(&indexDelta, indexBytes + (nibble & 7u) * 4u,
-            sizeof(indexDelta));
-        int32_t difference = ((step * (int32_t)(nibble & 7u)) >> 2) +
-            (step >> 3);
-        index = std::max<int32_t>(0, std::min<int32_t>(88,
-            index + indexDelta));
-        predictor += (nibble & 8u) ? -difference : difference;
-        predictor = std::max<int32_t>(-32768,
-            std::min<int32_t>(32767, predictor));
-        output[produced++] = (uint16_t)predictor;
-        if (highNibble)
-        {
-            ++sourceOffset;
-            highNibble = false;
-        }
-        else
-        {
-            highNibble = true;
-        }
-    }
-    state->r[0] = (uint32_t)predictor;
-    state->r[1] = (uint32_t)index;
-    state->r[3] = inputEnd;
-    state->r[12] += produced * sizeof(uint16_t);
-    state->r[15] = 0x10167644u;
-    return true;
-}
-
-static bool runCc1800RowFill32Pairs(CcArmRuntime* runtime, Arm32State* state)
-{
-    if (state->r[1] > state->r[12]) return false;
-    uint32_t pixelCount = state->r[12] - state->r[1];
-    if (pixelCount & 1u) return false;
-    uint32_t destinationBase = 0;
-    uint32_t colorHigh = 0;
-    uint16_t colorLow = 0;
-    if (!readGuestU32(runtime, state->r[0] + 0x20u, &destinationBase) ||
-        !readGuestU32(runtime, state->r[0] + 0x58u, &colorHigh))
-    {
-        return false;
-    }
-    uint8_t* lowBytes = resolveMemory(runtime, state->r[0] + 0x54u,
-        sizeof(colorLow));
-    uint64_t destinationAddress64 = (uint64_t)destinationBase +
-        (uint64_t)state->r[2] * 4u;
-    uint64_t byteCount64 = (uint64_t)pixelCount * 4u;
-    if (!lowBytes || destinationAddress64 > UINT32_MAX ||
-        byteCount64 > UINT32_MAX)
-    {
-        return false;
-    }
-    memcpy(&colorLow, lowBytes, sizeof(colorLow));
-    uint32_t destinationAddress = (uint32_t)destinationAddress64;
-    uint32_t byteCount = (uint32_t)byteCount64;
-    uint8_t* destination = resolveMemory(runtime, destinationAddress,
-        byteCount ? byteCount : 1u);
-    if (!destination)
-    {
-        runtime->faultAddress = destinationAddress;
-        runtime->faultSize = byteCount;
-        runtime->faultWrite = true;
-        runtime->faultFetch = false;
-        return false;
-    }
-    uint32_t color = colorHigh | colorLow;
-    uint32_t* output = (uint32_t*)destination;
-    std::fill(output, output + pixelCount, color);
-    state->r[1] += pixelCount;
-    state->r[2] += pixelCount;
-    state->r[15] = 0x10157be0u;
-    return true;
-}
-
-static uint32_t runFastFrameCopy(CcArmRuntime* runtime, const Arm32State* state)
-{
-    uint32_t width = 0;
-    uint32_t height = 0;
-    if (!readGuestU32(runtime, state->r[0] + 4u, &width) ||
-        !readGuestU32(runtime, state->r[0] + 8u, &height))
-    {
-        return 0;
-    }
-    uint64_t requested = (uint64_t)width * height;
-    uint32_t count = (uint32_t)std::min<uint64_t>(requested,
-        (uint64_t)kFramebufferWidth * kFramebufferHeight);
-    uint8_t* source = resolveMemory(runtime, state->r[1], count * 4u);
-    uint8_t* destination = resolveMemory(runtime, state->r[2], count * 2u);
-    if (!source || !destination) return 0;
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        destination[i * 2u] = source[i * 4u];
-        destination[i * 2u + 1u] = source[i * 4u + 1u];
-    }
-    return state->r[2] + count * 2u;
-}
-
-static uint32_t runNormalizeVector3Fixed(CcArmRuntime* runtime,
-    uint32_t destinationAddress, uint32_t sourceAddress)
-{
-    int32_t* source = (int32_t*)resolveMemory(runtime, sourceAddress,
-        3u * sizeof(int32_t));
-    int32_t* destination = (int32_t*)resolveMemory(runtime,
-        destinationAddress, 3u * sizeof(int32_t));
-    if (!source || !destination) return 0;
-    int32_t input[3] = { source[0], source[1], source[2] };
-    return ccNormalizeVector3Fixed(destination, input) ?
-        destinationAddress : 0;
-}
-
-static uint32_t runFastIndexedBlit(CcArmRuntime* runtime, uint32_t context,
-    bool scaled, bool transparent)
-{
-    uint32_t left = 0;
-    uint32_t top = 0;
-    uint32_t right = 0;
-    uint32_t bottom = 0;
-    uint32_t image = 0;
-    uint32_t sourceRow = 0;
-    uint32_t destinationRow = 0;
-    uint32_t destinationStride = 0;
-    uint32_t flags = 0;
-    uint32_t paletteAddress = 0;
-    uint32_t sourceStride = 0;
-    if (!readGuestU32(runtime, context, &destinationStride) ||
-        !readGuestU32(runtime, context + 0x10u, &image) ||
-        !readGuestU32(runtime, context + 0x20u, &destinationRow) ||
-        !readGuestU32(runtime, context + 0x28u, &sourceRow) ||
-        !readGuestU32(runtime, context + (scaled ? 0x3cu : 0x2cu), &left) ||
-        !readGuestU32(runtime, context + (scaled ? 0x40u : 0x30u), &top) ||
-        !readGuestU32(runtime, context + (scaled ? 0x44u : 0x34u), &right) ||
-        !readGuestU32(runtime, context + (scaled ? 0x48u : 0x38u), &bottom) ||
-        !readGuestU32(runtime, context + 0x58u, &flags) ||
-        !readGuestU32(runtime, image + 0x28u, &sourceStride) ||
-        !readGuestU32(runtime, image + 0x54u, &paletteAddress))
-    {
-        return context;
-    }
-    int32_t width = (int32_t)right - (int32_t)left;
-    int32_t height = (int32_t)bottom - (int32_t)top;
-    uint8_t* palette = resolveMemory(runtime, paletteAddress, 512u);
-    if (width <= 0 || height <= 0 || width > (int32_t)kFramebufferWidth ||
-        height > (int32_t)kFramebufferHeight || !palette || !sourceStride ||
-        destinationStride < (uint32_t)width)
-    {
-        return context;
-    }
-
-    uint32_t sourceBase = 0;
-    uint32_t sourceX = 0;
-    uint32_t xStep = 0x10000u;
-    uint32_t yStep = 0x10000u;
-    uint32_t yFixed = top << 16;
-    if (scaled &&
-        (!readGuestU32(runtime, image + 0x4cu, &sourceBase) ||
-         !readGuestU32(runtime, context + 0x2cu, &sourceX) ||
-         !readGuestU32(runtime, context + 0x4cu, &xStep) ||
-         !readGuestU32(runtime, context + 0x50u, &yStep)))
-    {
-        return context;
-    }
-    uint8_t transparentIndex = 0;
-    if (transparent)
-    {
-        uint8_t* value = resolveMemory(runtime, context + 0x19u, 1u);
-        if (!value) return context;
-        transparentIndex = *value;
-    }
-
-    for (int32_t y = 0; y < height; ++y)
-    {
-        uint8_t* source = resolveMemory(runtime, sourceRow, sourceStride);
-        uint8_t* destination = resolveMemory(runtime, destinationRow,
-            (uint32_t)width * 4u);
-        if (!source || !destination) return context;
-        uint32_t xFixed = 0;
-        for (int32_t x = 0; x < width; ++x)
-        {
-            uint32_t sourceIndex = scaled ? xFixed >> 16 : (uint32_t)x;
-            if (sourceIndex >= sourceStride) return context;
-            uint8_t paletteIndex = source[sourceIndex];
-            if (!transparent || paletteIndex != transparentIndex)
-            {
-                uint32_t paletteOffset = (uint32_t)paletteIndex * 2u;
-                uint32_t color = flags | (uint32_t)palette[paletteOffset] |
-                    ((uint32_t)palette[paletteOffset + 1u] << 8);
-                memcpy(destination + (uint32_t)x * 4u, &color, sizeof(color));
-            }
-            xFixed += xStep;
-        }
-        destinationRow += destinationStride * 4u;
-        if (scaled)
-        {
-            yFixed += yStep;
-            sourceRow = sourceBase + (yFixed >> 16) * sourceStride + sourceX;
-        }
-        else
-        {
-            sourceRow += sourceStride;
-        }
-    }
-    writeGuestU32(runtime, context + 0x20u, destinationRow);
-    writeGuestU32(runtime, context + 0x28u, sourceRow);
-    return context;
-}
-
-static uint32_t runSoft3dOpaqueScanlines(CcArmRuntime* runtime,
-    uint32_t rendererAddress, uint32_t spanAddress, bool paletteFromSpan,
-    bool transparent)
-{
-    static const uint32_t kSpanSentinel = 0xfffe7961u;
-    uint32_t context = rendererAddress + 0x1000u;
-    uint32_t image = 0;
-    uint32_t textureBase = 0;
-    uint32_t paletteBase = 0;
-    uint32_t maskU = 0;
-    uint32_t maskV = 0;
-    uint32_t textureShift = 0;
-    uint32_t depth = 0;
-    uint32_t depthAccumulatorStep = 0;
-    uint32_t pixelDepthStep = 0;
-    uint32_t edge = 0;
-    uint32_t edgeStep = 0;
-    uint32_t depthCorrection = 0;
-    uint32_t negativeEdgeBase = 0;
-    uint32_t uStep = 0;
-    uint32_t vStep = 0;
-    if (!readGuestU32(runtime, context + 0xa6cu, &image) ||
-        !readGuestU32(runtime, image + 0x4cu, &textureBase) ||
-        !readGuestU32(runtime, image + 0x54u, &paletteBase) ||
-        !readGuestU32(runtime, context + 0xdb4u, &maskV) ||
-        !readGuestU32(runtime, context + 0xdb8u, &maskU) ||
-        !readGuestU32(runtime, context + 0xdbcu, &textureShift) ||
-        !readGuestU32(runtime, context + 0xdc0u, &edge) ||
-        !readGuestU32(runtime, context + 0xdc4u, &depth) ||
-        !readGuestU32(runtime, context + 0xdc8u, &depthAccumulatorStep) ||
-        !readGuestU32(runtime, context + 0xdccu, &depthCorrection) ||
-        !readGuestU32(runtime, context + 0xdd0u, &negativeEdgeBase) ||
-        !readGuestU32(runtime, context + 0xdd4u, &edgeStep) ||
-        !readGuestU32(runtime, context + 0xdd8u, &pixelDepthStep) ||
-        !readGuestU32(runtime, context + 0xddcu, &uStep) ||
-        !readGuestU32(runtime, context + 0xde0u, &vStep))
-    {
-        return rendererAddress;
-    }
-    if (textureShift >= 32u) return rendererAddress;
-    uint32_t textureAvailable = 0;
-    uint32_t paletteAvailable = 0;
-    uint8_t* texture = resolveMemorySpan(runtime, textureBase, &textureAvailable);
-    uint8_t* palette = resolveMemorySpan(runtime, paletteBase, &paletteAvailable);
-    uint8_t transparentIndex = 0;
-    if (transparent)
-    {
-        uint8_t* value = resolveMemory(runtime, context + 0xe50u, 1u);
-        if (!value) return rendererAddress;
-        transparentIndex = *value;
-    }
-
-    for (uint32_t span = 0; span < 4096u; ++span, spanAddress += 24u)
-    {
-        uint32_t left = 0;
-        if (!readGuestU32(runtime, spanAddress, &left)) break;
-        if (left == kSpanSentinel) break;
-
-        uint32_t previousEdge = edge;
-        uint32_t accumulator = depth + depthAccumulatorStep;
-        depth = accumulator;
-        if ((int32_t)accumulator < 0)
-        {
-            edge = negativeEdgeBase + previousEdge;
-        }
-        else
-        {
-            edge = previousEdge + edgeStep;
-            depth = accumulator - depthCorrection;
-        }
-        writeGuestU32(runtime, context + 0xdc0u, edge);
-        writeGuestU32(runtime, context + 0xdc4u, depth);
-
-        int32_t width = (int32_t)previousEdge - (int32_t)left;
-        if (width <= 0) continue;
-        if (width > 2048) return rendererAddress;
-
-        uint32_t destinationAddress = 0;
-        uint32_t interpolatedDepth = 0;
-        uint32_t u = 0;
-        uint32_t v = 0;
-        uint32_t paletteValue = 15u << 8;
-        if (!readGuestU32(runtime, spanAddress + 4u, &destinationAddress) ||
-            !readGuestU32(runtime, spanAddress + 8u, &interpolatedDepth) ||
-            !readGuestU32(runtime, spanAddress + 12u, &u) ||
-            !readGuestU32(runtime, spanAddress + 16u, &v) ||
-            (paletteFromSpan &&
-             !readGuestU32(runtime, spanAddress + 20u, &paletteValue)))
-        {
-            return rendererAddress;
-        }
-        uint32_t* destination = (uint32_t*)resolveMemory(runtime,
-            destinationAddress, (uint32_t)width * sizeof(uint32_t));
-        if (!destination) return rendererAddress;
-        for (int32_t x = 0; x < width; ++x)
-        {
-            uint32_t packedDepth = (interpolatedDepth << 8) & 0xffff00ffu;
-            if (packedDepth >= destination[x])
-            {
-                uint32_t textureOffset = ((maskU & v) << textureShift) +
-                    (maskV & u);
-                uint32_t textureOffsetBytes = textureOffset >> 16;
-                uint8_t* texel = texture &&
-                    textureOffsetBytes < textureAvailable ?
-                    texture + textureOffsetBytes :
-                    resolveMemory(runtime, textureBase + textureOffsetBytes, 1u);
-                if (!texel) return rendererAddress;
-                if (transparent && *texel == transparentIndex)
-                {
-                    interpolatedDepth += pixelDepthStep;
-                    u += uStep;
-                    v += vStep;
-                    continue;
-                }
-                uint32_t paletteIndex =
-                    (uint32_t)((int32_t)paletteValue >> 8) |
-                    ((uint32_t)*texel << 5);
-                uint32_t paletteOffset = paletteIndex * 2u;
-                uint16_t* color = palette && paletteAvailable >= sizeof(uint16_t) &&
-                    paletteOffset <= paletteAvailable - sizeof(uint16_t) ?
-                    (uint16_t*)(palette + paletteOffset) :
-                    (uint16_t*)resolveMemory(runtime,
-                        paletteBase + paletteOffset, sizeof(uint16_t));
-                if (!color) return rendererAddress;
-                destination[x] = packedDepth | *color;
-            }
-            interpolatedDepth += pixelDepthStep;
-            u += uStep;
-            v += vStep;
-        }
-    }
-    return rendererAddress;
-}
-
-static void saveArmCalleeSaved(const Arm32State* state, uint32_t* saved)
-{
-    memcpy(saved, state->r + 4u, 8u * sizeof(uint32_t));
-}
-
-static void restoreArmCalleeSaved(Arm32State* state, const uint32_t* saved)
-{
-    memcpy(state->r + 4u, saved, 8u * sizeof(uint32_t));
-}
-
-static uint32_t runSoft3dFill32(CcArmRuntime* runtime, const Arm32State* state)
-{
-    int32_t count = (int32_t)state->r[3];
-    if (count <= 0 || count > 4096) return state->r[0];
-    uint32_t stride = 0;
-    uint32_t surface = 0;
-    uint32_t pixels = 0;
-    uint32_t color = 0;
-    if (!readGuestU32(runtime, state->r[0] + 0x220u, &stride) ||
-        !readGuestU32(runtime, state->r[0] + 0x1a68u, &surface) ||
-        !readGuestU32(runtime, surface + 0x4cu, &pixels) ||
-        !readGuestU32(runtime, state->r[13], &color))
-    {
-        return state->r[0];
-    }
-    uint64_t pixelOffset = (uint64_t)state->r[2] * stride + state->r[1];
-    if (pixelOffset > UINT32_MAX / 4u) return state->r[0];
-    uint32_t* destination = (uint32_t*)resolveMemory(runtime,
-        pixels + (uint32_t)pixelOffset * 4u, (uint32_t)count * sizeof(uint32_t));
-    if (!destination) return state->r[0];
-    std::fill(destination, destination + count, color);
-    return state->r[0];
-}
-
-static uint32_t runFastIndexedAlphaBlit(CcArmRuntime* runtime, uint32_t context)
-{
-    uint32_t left = 0;
-    uint32_t top = 0;
-    uint32_t right = 0;
-    uint32_t bottom = 0;
-    uint32_t image = 0;
-    uint32_t sourceRow = 0;
-    uint32_t alphaRow = 0;
-    uint32_t destinationRow = 0;
-    uint32_t sourceStride = 0;
-    uint32_t destinationStride = 0;
-    uint32_t paletteAddress = 0;
-    uint32_t flags = 0;
-    if (!readGuestU32(runtime, context, &destinationStride) ||
-        !readGuestU32(runtime, context + 0x10u, &image) ||
-        !readGuestU32(runtime, context + 0x20u, &destinationRow) ||
-        !readGuestU32(runtime, context + 0x24u, &alphaRow) ||
-        !readGuestU32(runtime, context + 0x28u, &sourceRow) ||
-        !readGuestU32(runtime, context + 0x2cu, &left) ||
-        !readGuestU32(runtime, context + 0x30u, &top) ||
-        !readGuestU32(runtime, context + 0x34u, &right) ||
-        !readGuestU32(runtime, context + 0x38u, &bottom) ||
-        !readGuestU32(runtime, context + 0x58u, &flags) ||
-        !readGuestU32(runtime, image + 0x28u, &sourceStride) ||
-        !readGuestU32(runtime, image + 0x54u, &paletteAddress))
-    {
-        return context;
-    }
-    int32_t width = (int32_t)right - (int32_t)left;
-    int32_t height = (int32_t)bottom - (int32_t)top;
-    uint8_t* palette = resolveMemory(runtime, paletteAddress, 512u);
-    if (width <= 0 || height <= 0 || width > (int32_t)kFramebufferWidth ||
-        height > (int32_t)kFramebufferHeight || !sourceStride || !palette ||
-        destinationStride < (uint32_t)width)
-    {
-        return context;
-    }
-    for (int32_t y = 0; y < height; ++y)
-    {
-        uint8_t* source = resolveMemory(runtime, sourceRow, (uint32_t)width);
-        uint8_t* alpha = resolveMemory(runtime, alphaRow, (uint32_t)width);
-        uint32_t* destination = (uint32_t*)resolveMemory(runtime, destinationRow,
-            (uint32_t)width * sizeof(uint32_t));
-        if (!source || !alpha || !destination) return context;
-        for (int32_t x = 0; x < width; ++x)
-        {
-            uint32_t opacity = alpha[x];
-            if (opacity <= 1u) continue;
-            uint32_t paletteOffset = (uint32_t)source[x] * 2u;
-            uint16_t sourceColor = (uint16_t)palette[paletteOffset] |
-                ((uint16_t)palette[paletteOffset + 1u] << 8);
-            uint32_t packed = destination[x] | flags;
-            if (opacity >= 31u)
-            {
-                destination[x] = (packed & 0xffff0000u) | sourceColor;
-                continue;
-            }
-            uint16_t destinationColor = (uint16_t)packed;
-            uint32_t sourceExpanded = ((sourceColor & 0xf800u) << 10) |
-                ((sourceColor & 0x07e0u) << 5) | (sourceColor & 0x001fu);
-            uint32_t destinationExpanded = ((destinationColor & 0xf800u) << 10) |
-                ((destinationColor & 0x07e0u) << 5) | (destinationColor & 0x001fu);
-            uint32_t blend = (sourceExpanded - destinationExpanded) * opacity +
-                (destinationExpanded << 5);
-            uint16_t color = (uint16_t)(((blend & 0x7c000000u) >> 15) |
-                ((blend & 0x001f8000u) >> 10) | ((blend & 0x000003e0u) >> 5));
-            destination[x] = (packed & 0xffff0000u) | color;
-        }
-        destinationRow += destinationStride * 4u;
-        sourceRow += sourceStride;
-        alphaRow += sourceStride;
-    }
-    writeGuestU32(runtime, context + 0x20u, destinationRow);
-    writeGuestU32(runtime, context + 0x24u, alphaRow);
-    writeGuestU32(runtime, context + 0x28u, sourceRow);
-    return context;
-}
-
-static uint32_t runCc1800TransitionBlend(CcArmRuntime* runtime,
-    const Arm32State* state)
-{
-    const uint32_t object = state->r[0];
-    uint32_t active = 0;
-    if (!readGuestU32(runtime, object + 0x20u, &active) || !active)
-    {
-        return 0;
-    }
-
-    uint32_t current = 0;
-    uint32_t duration = 0;
-    if (!readGuestU32(runtime, object + 0x18u, &current) ||
-        !readGuestU32(runtime, object + 0x1cu, &duration))
-    {
-        return object;
-    }
-    if (current != duration)
-    {
-        ++current;
-        writeGuestU32(runtime, object + 0x18u, current);
-    }
-    else
-    {
-        writeGuestU32(runtime, object + 0x24u, 1u);
-        uint32_t stopWhenComplete = 0;
-        if (!readGuestU32(runtime, object + 0x30u, &stopWhenComplete))
-        {
-            return object;
-        }
-        if (stopWhenComplete)
-        {
-            writeGuestU32(runtime, object + 0x20u, 0u);
-            uint32_t direction = 0;
-            if (!readGuestU32(runtime, object + 0x28u, &direction))
-            {
-                return object;
-            }
-            if (!direction)
-            {
-                uint32_t owner = 0;
-                uint32_t globals = 0;
-                uint32_t selected = 0;
-                if (readGuestU32(runtime, object + 0x14u, &owner) &&
-                    readGuestU32(runtime, owner + 0x1a374u, &globals))
-                {
-                    uint8_t* mode = resolveMemory(runtime,
-                        globals + 0x1e4fu, 1u);
-                    uint32_t selectionOffset = mode && *mode ? 0x1a84u : 0x1a80u;
-                    if (mode && readGuestU32(runtime, globals + selectionOffset,
-                            &selected))
-                    {
-                        writeGuestU32(runtime, globals + 0x1a7cu, selected);
-                        writeGuestU32(runtime, selected + 0x10u, 0u);
-                    }
-                }
-            }
-        }
-    }
-
-    uint32_t direction = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t background = 0;
-    if (!duration ||
-        !readGuestU32(runtime, object + 0x28u, &direction) ||
-        !readGuestU32(runtime, object + 0x04u, &width) ||
-        !readGuestU32(runtime, object + 0x08u, &height) ||
-        !readGuestU32(runtime, object + 0x2cu, &background))
-    {
-        return object;
-    }
-    uint32_t opacity = (current * 31u) / duration;
-    if (!direction) opacity = 32u - opacity;
-
-    uint64_t count64 = (uint64_t)width * height;
-    if (!count64 || count64 > kFramebufferWidth * kFramebufferHeight)
-    {
-        return opacity;
-    }
-    uint32_t count = (uint32_t)count64;
-    const uint8_t* source = resolveMemory(runtime, state->r[1], count * 4u);
-    uint8_t* destination = resolveMemory(runtime, state->r[2], count * 2u);
-    if (!source || !destination) return object;
-
-    uint16_t backgroundColor = (uint16_t)background;
-    uint32_t backgroundExpanded = ((backgroundColor & 0xf800u) << 10) |
-        ((backgroundColor & 0x07e0u) << 5) | (backgroundColor & 0x001fu);
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        uint32_t packed = 0;
-        memcpy(&packed, source + i * 4u, sizeof(packed));
-        uint16_t color = (uint16_t)packed;
-        if ((packed >> 16) != 0x6fffu)
-        {
-            if (opacity >= 31u)
-            {
-                color = backgroundColor;
-            }
-            else if (opacity > 1u)
-            {
-                uint32_t sourceExpanded = ((color & 0xf800u) << 10) |
-                    ((color & 0x07e0u) << 5) | (color & 0x001fu);
-                uint32_t blend = (backgroundExpanded - sourceExpanded) * opacity +
-                    (sourceExpanded << 5);
-                color = (uint16_t)(((blend & 0x7c000000u) >> 15) |
-                    ((blend & 0x001f8000u) >> 10) |
-                    ((blend & 0x000003e0u) >> 5));
-            }
-        }
-        memcpy(destination + i * 2u, &color, sizeof(color));
-    }
-    return opacity;
-}
-
-static const char kTransitionBlendImport[] = {
-    99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 116, 114, 97,
-    110, 115, 105, 116, 105, 111, 110, 95, 98, 108, 101, 110, 100, 0
-};
-
-static const char kSoft3dLitScanlineImport[] = {
-    99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 115, 111, 102,
-    116, 51, 100, 95, 115, 99, 97, 110, 108, 105, 110, 101, 95, 108, 105,
-    116, 0
-};
-
-static uint32_t armArithmeticShiftRightRegister(uint32_t value,
-    uint32_t shiftRegister)
-{
-    uint32_t shift = shiftRegister & 0xffu;
-    if (!shift) return value;
-    if (shift >= 32u) return (int32_t)value < 0 ? UINT32_MAX : 0u;
-    return (uint32_t)((int32_t)value >> shift);
-}
-
-static uint32_t runCc1800TextureSpanBlock(CcArmRuntime* runtime,
-    Arm32State* state)
-{
-    uint32_t continuation = state->r[15] == 0x1016f2e0u ?
-        0x1016f31cu : 0x1016f19cu;
-    uint32_t count = state->r[6];
-    if (!count || count > 4096u) return state->r[0];
-
-    uint32_t destinationAddress = state->r[0];
-    uint32_t textureCoordinate = state->r[4];
-    uint32_t paletteCoordinate = state->r[5];
-    uint32_t depth = state->r[8];
-    uint32_t lastDepthStep = 0;
-    uint32_t lastDepthHigh = 0;
-    uint32_t textureAvailable = 0;
-    uint8_t* textureBase = resolveMemorySpan(runtime, state->r[2],
-        &textureAvailable);
-    uint8_t* destination = resolveMemory(runtime, destinationAddress,
-        (size_t)count * sizeof(uint32_t));
-    if (!readGuestU32(runtime, state->r[1] + 0x18u, &lastDepthStep))
-    {
-        return state->r[0];
-    }
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        uint32_t paletteOffset = state->r[3] &
-            armArithmeticShiftRightRegister(paletteCoordinate, state->r[12]);
-        uint32_t textureOffset = (uint32_t)((int32_t)textureCoordinate >> 16);
-        uint32_t sourceOffset = textureOffset * 2u + paletteOffset * 2u;
-        uint8_t* source = NULL;
-        if (textureBase && textureAvailable >= sizeof(uint16_t) &&
-            sourceOffset <= textureAvailable - sizeof(uint16_t) &&
-            sourceOffset <= UINT32_MAX - state->r[2])
-        {
-            source = textureBase + sourceOffset;
-        }
-        else
-        {
-            source = resolveMemory(runtime, state->r[2] + sourceOffset,
-                sizeof(uint16_t));
-        }
-        uint8_t* pixel = destination ? destination + i * sizeof(uint32_t) :
-            resolveMemory(runtime, destinationAddress, sizeof(uint32_t));
-        if (!source || !pixel)
-        {
-            return state->r[0];
-        }
-        uint16_t color = 0;
-        memcpy(&color, source, sizeof(color));
-        lastDepthHigh = (uint32_t)((int32_t)depth >> 8);
-        uint32_t packed = (uint32_t)color | (lastDepthHigh << 16);
-        memcpy(pixel, &packed, sizeof(packed));
-        destinationAddress += 4u;
-        textureCoordinate += state->r[9];
-        paletteCoordinate += state->r[10];
-        depth += lastDepthStep;
-    }
-
-    state->r[0] = destinationAddress;
-    state->r[4] = textureCoordinate;
-    state->r[5] = paletteCoordinate;
-    state->r[6] = 0;
-    state->r[7] = lastDepthStep;
-    state->r[8] = depth;
-    state->r[11] = lastDepthHigh;
-    state->r[14] = destinationAddress;
-    state->cpsr = (state->cpsr & ~((1u << 31) | (1u << 30) | (1u << 29))) |
-        (1u << 30) | (1u << 29);
-    state->r[15] = continuation;
-    return destinationAddress;
-}
-
-static const char kTextureSpanBlockImport[] = {
-    99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 116, 101, 120,
-    116, 117, 114, 101, 95, 115, 112, 97, 110, 95, 98, 108, 111, 99, 107,
-    0
-};
-
-static uint32_t armLogicalShiftLeftRegister(uint32_t value,
-    uint32_t shiftRegister)
-{
-    uint32_t shift = shiftRegister & 0xffu;
-    if (!shift) return value;
-    return shift < 32u ? value << shift : 0u;
-}
-
-static uint32_t runCc1800ShiftLeft64(CcArmRuntime* runtime,
-    const Arm32State* state)
-{
-    uint32_t sourceHigh = 0;
-    uint32_t sourceLow = 0;
-    if (!readGuestU32(runtime, state->r[1], &sourceHigh) ||
-        !readGuestU32(runtime, state->r[1] + 4u, &sourceLow))
-    {
-        return state->r[0];
-    }
-
-    int32_t shift = (int32_t)state->r[2];
-    uint32_t resultHigh = sourceHigh;
-    uint32_t resultLow = sourceLow;
-    if (shift != 0 && shift < 63)
-    {
-        resultHigh = 0;
-        if (shift > 0)
-        {
-            for (uint32_t bit = 32u; bit < 64u; ++bit)
-            {
-                int32_t sourceBit = (int32_t)bit - shift;
-                if (sourceBit < 0 || sourceBit >= 64) continue;
-                uint32_t word = sourceBit < 32 ? sourceLow : sourceHigh;
-                uint32_t wordBit = (uint32_t)sourceBit & 31u;
-                if (word & (1u << wordBit)) resultHigh |= 1u << (bit - 32u);
-            }
-        }
-        resultLow = shift > 31 ? sourceLow << 31 :
-            armLogicalShiftLeftRegister(sourceLow, state->r[2]);
-    }
-    writeGuestU32(runtime, state->r[0], resultHigh);
-    writeGuestU32(runtime, state->r[0] + 4u, resultLow);
-    return state->r[0];
-}
-
-static const char kShiftLeft64Import[] = {
-    99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 115, 104, 105,
-    102, 116, 95, 108, 101, 102, 116, 54, 52, 0
-};
-
-static const char kSoft3dTransparentScanlineImport[] = {
-    99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 115, 111, 102,
-    116, 51, 100, 95, 116, 114, 97, 110, 115, 112, 97, 114, 101, 110, 116,
-    95, 115, 99, 97, 110, 108, 105, 110, 101, 0
-};
-
-static uint32_t cc1800FixedMultiply(uint32_t left, uint32_t right)
-{
-    int64_t product = (int64_t)(int32_t)left * (int32_t)right;
-    return (uint32_t)(product >> 16);
-}
-
-static uint32_t runCc1800AudioConvertBlock(CcArmRuntime* runtime,
-    Arm32State* state)
-{
-    uint32_t count = state->r[3];
-    if (!count || count > 4096u) return state->r[0];
-    uint8_t* source = resolveMemory(runtime, state->r[1], count * 4u);
-    uint8_t* destination = resolveMemory(runtime, state->r[2], count * 2u);
-    if (!source || !destination) return state->r[0];
-
-    int32_t last = 0;
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        int32_t sample = 0;
-        memcpy(&sample, source + i * 4u, sizeof(sample));
-        uint32_t product = (uint32_t)((int32_t)state->r[12]) *
-            (uint32_t)(sample >> 8);
-        int32_t scaled = (int32_t)product >> 8;
-        if (scaled < -32768) scaled = -32768;
-        else if (scaled >= 32768) scaled = 32767;
-        int16_t output = (int16_t)scaled;
-        memcpy(destination + i * 2u, &output, sizeof(output));
-        last = scaled;
-    }
-    state->r[0] = (uint32_t)last;
-    state->r[1] += count * 4u;
-    state->r[2] += count * 2u;
-    state->r[3] = 0;
-    state->cpsr = (state->cpsr & ~((1u << 31) | (1u << 30) | (1u << 29))) |
-        (1u << 30) | (1u << 29);
-    state->r[15] = 0x10150a48u;
-    return state->r[0];
-}
-
-static const char kAudioConvertBlockImport[] = {
-    99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 97, 117, 100,
-    105, 111, 95, 99, 111, 110, 118, 101, 114, 116, 95, 98, 108, 111, 99,
-    107, 0
-};
-
-static uint32_t runCc1800PerspectiveChunkSetup(CcArmRuntime* runtime,
-    Arm32State* state)
-{
-    uint32_t remaining = 0;
-    if (!readGuestU32(runtime, state->r[13] + 0x14u, &remaining))
-    {
-        return state->r[0];
-    }
-    state->r[6] = 0;
-    writeGuestU32(runtime, state->r[13], 0u);
-    writeGuestU32(runtime, state->r[13] + 4u, 0u);
-    if (remaining <= 16u)
-    {
-        writeGuestU32(runtime, state->r[13] + 0x14u, 0u);
-        if (!remaining)
-        {
-            state->r[15] = 0x1016f34cu;
-            return state->r[0];
-        }
-        state->r[6] = remaining;
-        if (remaining == 1u)
-        {
-            uint32_t paletteOffset = state->r[3] &
-                armArithmeticShiftRightRegister(state->r[5], state->r[12]);
-            uint32_t textureOffset = (uint32_t)((int32_t)state->r[4] >> 16);
-            uint8_t* source = resolveMemory(runtime, state->r[2] +
-                textureOffset * 2u + paletteOffset * 2u, sizeof(uint16_t));
-            uint8_t* destination = resolveMemory(runtime, state->r[0],
-                sizeof(uint32_t));
-            if (!source || !destination) return state->r[0];
-            uint16_t color = 0;
-            memcpy(&color, source, sizeof(color));
-            uint32_t packed = (uint32_t)color |
-                ((uint32_t)((int32_t)state->r[8] >> 8) << 16);
-            memcpy(destination, &packed, sizeof(packed));
-            state->r[0] += 4u;
-            state->r[15] = 0x1016f34cu;
-            return state->r[0];
-        }
-
-        uint32_t spanFixed = (remaining - 1u) << 16;
-        uint32_t xStepAddress = 0;
-        uint32_t yStepAddress = 0;
-        uint32_t xBase = 0;
-        uint32_t yBase = 0;
-        uint32_t depthStep = 0;
-        if (!readGuestU32(runtime, state->r[13] + 0x28u, &xStepAddress) ||
-            !readGuestU32(runtime, state->r[13] + 0x30u, &yStepAddress) ||
-            !readGuestU32(runtime, state->r[13] + 0x10u, &xBase) ||
-            !readGuestU32(runtime, state->r[13] + 0x0cu, &yBase) ||
-            !readGuestU32(runtime, state->r[1] + 0x18u, &depthStep))
-        {
-            return state->r[0];
-        }
-        uint32_t xStep = 0;
-        uint32_t yStep = 0;
-        if (!readGuestU32(runtime, xStepAddress, &xStep) ||
-            !readGuestU32(runtime, yStepAddress, &yStep))
-        {
-            return state->r[0];
-        }
-        uint32_t xEnd = xBase + cc1800FixedMultiply(xStep, spanFixed);
-        uint32_t yEnd = yBase + cc1800FixedMultiply(yStep, spanFixed);
-        writeGuestU32(runtime, state->r[13] + 0x10u, xEnd);
-        writeGuestU32(runtime, state->r[13] + 0x0cu, yEnd);
-        uint32_t depthEnd = state->r[8] +
-            cc1800FixedMultiply(depthStep, spanFixed);
-        uint32_t reciprocalTable = 0;
-        if (!readGuestU32(runtime, 0x1016f848u, &reciprocalTable))
-        {
-            return state->r[0];
-        }
-        uint32_t depthReciprocal = 0;
-        uint32_t depthIndex = (depthEnd << 9) >> 16;
-        if (!readGuestU32(runtime, reciprocalTable + depthIndex * 4u,
-                &depthReciprocal))
-        {
-            return state->r[0];
-        }
-        uint32_t xBiasAddress = 0;
-        uint32_t yBiasAddress = 0;
-        uint32_t xMaximumAddress = 0;
-        uint32_t yMaximumAddress = 0;
-        if (!readGuestU32(runtime, state->r[13] + 0x44u, &xBiasAddress) ||
-            !readGuestU32(runtime, state->r[13] + 0x40u, &yBiasAddress) ||
-            !readGuestU32(runtime, state->r[13] + 0x3cu, &xMaximumAddress) ||
-            !readGuestU32(runtime, state->r[13] + 0x38u, &yMaximumAddress))
-        {
-            return state->r[0];
-        }
-        uint32_t xBias = 0;
-        uint32_t yBias = 0;
-        uint32_t xMaximum = 0;
-        uint32_t yMaximum = 0;
-        if (!readGuestU32(runtime, xBiasAddress, &xBias) ||
-            !readGuestU32(runtime, yBiasAddress, &yBias) ||
-            !readGuestU32(runtime, xMaximumAddress, &xMaximum) ||
-            !readGuestU32(runtime, yMaximumAddress, &yMaximum))
-        {
-            return state->r[0];
-        }
-        uint32_t depthFactor = depthReciprocal << 3;
-        int32_t projectedX = (int32_t)(cc1800FixedMultiply(xEnd,
-            depthFactor) + xBias);
-        int32_t projectedY = (int32_t)(cc1800FixedMultiply(yEnd,
-            depthFactor) + yBias);
-        projectedX = std::max<int32_t>(16,
-            std::min<int32_t>(projectedX, (int32_t)xMaximum));
-        projectedY = std::max<int32_t>(16,
-            std::min<int32_t>(projectedY, (int32_t)yMaximum));
-        writeGuestU32(runtime, state->r[13] + 4u, (uint32_t)projectedX);
-        writeGuestU32(runtime, state->r[13], (uint32_t)projectedY);
-
-        uint32_t spanReciprocal = 0;
-        uint32_t spanIndex = (spanFixed & 0x000f0000u) >> 4;
-        if (!readGuestU32(runtime, reciprocalTable + spanIndex * 4u,
-                &spanReciprocal))
-        {
-            return state->r[0];
-        }
-        uint32_t stepFactor = (uint32_t)((int32_t)spanReciprocal >> 2);
-        state->r[9] = cc1800FixedMultiply(
-            (uint32_t)(projectedX - (int32_t)state->r[4]), stepFactor);
-        state->r[10] = cc1800FixedMultiply(
-            (uint32_t)(projectedY - (int32_t)state->r[5]), stepFactor);
-        state->r[15] = 0x1016f2e0u;
-        return runCc1800TextureSpanBlock(runtime, state);
-    }
-    writeGuestU32(runtime, state->r[13] + 0x14u, remaining - 16u);
-
-    uint32_t xBase = 0;
-    uint32_t yBase = 0;
-    uint32_t xOffset = 0;
-    uint32_t yOffset = 0;
-    uint32_t depthOffset = 0;
-    if (!readGuestU32(runtime, state->r[13] + 0x10u, &xBase) ||
-        !readGuestU32(runtime, state->r[13] + 0x20u, &xOffset) ||
-        !readGuestU32(runtime, state->r[13] + 0x0cu, &yBase) ||
-        !readGuestU32(runtime, state->r[13] + 0x1cu, &yOffset) ||
-        !readGuestU32(runtime, state->r[13] + 0x18u, &depthOffset))
-    {
-        return state->r[0];
-    }
-    uint32_t x = xBase + xOffset;
-    uint32_t y = yBase + yOffset;
-    writeGuestU32(runtime, state->r[13] + 0x10u, x);
-    writeGuestU32(runtime, state->r[13] + 0x0cu, y);
-
-    uint32_t reciprocalIndex = ((depthOffset + state->r[8]) << 9) >> 16;
-    uint32_t reciprocalTable = 0;
-    if (!readGuestU32(runtime, 0x1016f848u, &reciprocalTable))
-    {
-        return state->r[0];
-    }
-    uint32_t reciprocal = 0;
-    if (!readGuestU32(runtime, reciprocalTable + reciprocalIndex * 4u,
-            &reciprocal))
-    {
-        return state->r[0];
-    }
-    uint32_t factor = reciprocal << 3;
-
-    uint32_t xBiasAddress = 0;
-    uint32_t yBiasAddress = 0;
-    uint32_t xMaximumAddress = 0;
-    uint32_t yMaximumAddress = 0;
-    if (!readGuestU32(runtime, state->r[13] + 0x44u, &xBiasAddress) ||
-        !readGuestU32(runtime, state->r[13] + 0x40u, &yBiasAddress) ||
-        !readGuestU32(runtime, state->r[13] + 0x3cu, &xMaximumAddress) ||
-        !readGuestU32(runtime, state->r[13] + 0x38u, &yMaximumAddress))
-    {
-        return state->r[0];
-    }
-    uint32_t xBias = 0;
-    uint32_t yBias = 0;
-    uint32_t xMaximum = 0;
-    uint32_t yMaximum = 0;
-    if (!readGuestU32(runtime, xBiasAddress, &xBias) ||
-        !readGuestU32(runtime, yBiasAddress, &yBias) ||
-        !readGuestU32(runtime, xMaximumAddress, &xMaximum) ||
-        !readGuestU32(runtime, yMaximumAddress, &yMaximum))
-    {
-        return state->r[0];
-    }
-    int32_t projectedX = (int32_t)(cc1800FixedMultiply(x, factor) + xBias);
-    int32_t projectedY = (int32_t)(cc1800FixedMultiply(y, factor) + yBias);
-    projectedX = std::max<int32_t>(16,
-        std::min<int32_t>(projectedX, (int32_t)xMaximum));
-    projectedY = std::max<int32_t>(16,
-        std::min<int32_t>(projectedY, (int32_t)yMaximum));
-    writeGuestU32(runtime, state->r[13] + 4u, (uint32_t)projectedX);
-    writeGuestU32(runtime, state->r[13], (uint32_t)projectedY);
-
-    state->r[6] = 16u;
-    state->r[7] = (uint32_t)(projectedY - (int32_t)state->r[5]);
-    state->r[9] = (uint32_t)((projectedX - (int32_t)state->r[4]) >> 4);
-    state->r[10] = (uint32_t)((projectedY - (int32_t)state->r[5]) >> 4);
-    state->r[15] = 0x1016f15cu;
-    return runCc1800TextureSpanBlock(runtime, state);
-}
-
-static const char kPerspectiveChunkSetupImport[] = {
-    99, 99, 95, 105, 110, 116, 101, 114, 110, 97, 108, 95, 112, 101, 114,
-    115, 112, 101, 99, 116, 105, 118, 101, 95, 99, 104, 117, 110, 107, 95,
-    115, 101, 116, 117, 112, 0
-};
 
 static void handleMemoryImport(CcArmRuntime* runtime, Arm32State* state,
     const char* name)
@@ -2714,160 +1481,6 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
     }
     if (!strcmp(name, "GetDLHandle") || !strcmp(name, "get_dl_handle")) { state->r[0] = kLoaderHandle; return true; }
     if (!strcmp(name, "__to_locale_ansi") || !strcmp(name, "_to_locale_ansi")) { state->r[0] = kLocaleString; return true; }
-    if (!strcmp(name, "cc_internal_blit_transparent16"))
-    {
-        uint32_t object = state->r[0];
-        state->r[0] = runTransparentBlit16(runtime, object, 0u) ? object : 0;
-        return true;
-    }
-    if (!strncmp(name, "cc_internal_blit_transparent_blend", 34u))
-    {
-        uint32_t object = state->r[0];
-        uint32_t mode = (uint32_t)(name[34] - '0');
-        state->r[0] = runTransparentBlit16(runtime, object, mode) ? object : 0;
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_blit_scaled16"))
-    {
-        uint32_t object = state->r[0];
-        state->r[0] = runScaledBlit16(
-            runtime, object, false, false) ? object : 0;
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_blit_scaled_indexed16"))
-    {
-        uint32_t object = state->r[0];
-        state->r[0] = runScaledBlit16(
-            runtime, object, true, false) ? object : 0;
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_blit_scaled_transparent16"))
-    {
-        uint32_t object = state->r[0];
-        state->r[0] = runScaledBlit16(
-            runtime, object, false, true) ? object : 0;
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_fast_copy"))
-    {
-        state->r[0] = runFastCopy(runtime, state->r[0], state->r[1], state->r[2]);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_fast_fill_zero"))
-    {
-        state->r[0] = runFastFill(runtime, state->r[0], state->r[1], 0);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_fast_fill_byte"))
-    {
-        state->r[0] = runFastFill(runtime, state->r[0], state->r[1],
-            (uint8_t)state->r[2]);
-        return true;
-    }
-    if (!strcmp(name, kFill32PairsImport))
-    {
-        return runCc1800Fill32Pairs(runtime, state);
-    }
-    if (!strcmp(name, kAdpcmDecodeTailImport))
-    {
-        return runCc1800AdpcmDecodeTail(runtime, state);
-    }
-    if (!strcmp(name, kRowFill32PairsImport))
-    {
-        return runCc1800RowFill32Pairs(runtime, state);
-    }
-    if (!strcmp(name, "cc_internal_frame_copy"))
-    {
-        state->r[0] = runFastFrameCopy(runtime, state);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_normalize_vec3_fixed"))
-    {
-        uint32_t saved[8];
-        saveArmCalleeSaved(state, saved);
-        state->r[0] = runNormalizeVector3Fixed(runtime,
-            state->r[0], state->r[1]);
-        restoreArmCalleeSaved(state, saved);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_indexed_scaled"))
-    {
-        state->r[0] = runFastIndexedBlit(runtime, state->r[0], true, false);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_indexed_copy"))
-    {
-        state->r[0] = runFastIndexedBlit(runtime, state->r[0], false, false);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_indexed_transparent"))
-    {
-        state->r[0] = runFastIndexedBlit(runtime, state->r[0], false, true);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_soft3d_scanline_opaque"))
-    {
-        uint32_t saved[8];
-        saveArmCalleeSaved(state, saved);
-        state->r[0] = runSoft3dOpaqueScanlines(runtime, state->r[0], state->r[1],
-            false, false);
-        restoreArmCalleeSaved(state, saved);
-        return true;
-    }
-    if (!strcmp(name, kSoft3dLitScanlineImport))
-    {
-        uint32_t saved[8];
-        saveArmCalleeSaved(state, saved);
-        state->r[0] = runSoft3dOpaqueScanlines(runtime, state->r[0], state->r[1],
-            true, false);
-        restoreArmCalleeSaved(state, saved);
-        return true;
-    }
-    if (!strcmp(name, kSoft3dTransparentScanlineImport))
-    {
-        uint32_t saved[8];
-        saveArmCalleeSaved(state, saved);
-        state->r[0] = runSoft3dOpaqueScanlines(runtime, state->r[0], state->r[1],
-            false, true);
-        restoreArmCalleeSaved(state, saved);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_soft3d_fill32"))
-    {
-        state->r[0] = runSoft3dFill32(runtime, state);
-        return true;
-    }
-    if (!strcmp(name, "cc_internal_indexed_alpha"))
-    {
-        state->r[0] = runFastIndexedAlphaBlit(runtime, state->r[0]);
-        return true;
-    }
-    if (!strcmp(name, kTransitionBlendImport))
-    {
-        state->r[0] = runCc1800TransitionBlend(runtime, state);
-        return true;
-    }
-
-    if (!strcmp(name, kTextureSpanBlockImport))
-    {
-        state->r[0] = runCc1800TextureSpanBlock(runtime, state);
-        return true;
-    }
-    if (!strcmp(name, kShiftLeft64Import))
-    {
-        state->r[0] = runCc1800ShiftLeft64(runtime, state);
-        return true;
-    }
-    if (!strcmp(name, kAudioConvertBlockImport))
-    {
-        state->r[0] = runCc1800AudioConvertBlock(runtime, state);
-        return true;
-    }
-    if (!strcmp(name, kPerspectiveChunkSetupImport))
-    {
-        state->r[0] = runCc1800PerspectiveChunkSetup(runtime, state);
-        return true;
-    }
     if (!strcmp(name, "malloc") || !strcmp(name, "calloc") || !strcmp(name, "realloc") ||
         !strcmp(name, "free") || !strcmp(name, "OSMalloc") || !strcmp(name, "OSFree") ||
         !strcmp(name, "jmalloc") || !strcmp(name, "jfree") || !strcmp(name, "memset") ||
@@ -3091,6 +1704,7 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
         {
             runtime->framebufferBits = state->r[0];
             runtime->framebufferBitsExplicit = true;
+            runtime->bus.directFramebuffer = runtime->framebuffer.data();
         }
         printf("cc-arm: framebuffer bits=%u\n", state->r[0]);
         state->r[0] = 0;
@@ -3285,8 +1899,19 @@ static Arm32RunResult runState(CcArmRuntime* runtime, Arm32State* state,
     runtime->faultWrite = false;
     runtime->faultFetch = false;
     uint64_t before = state->instructions;
-    Arm32RunResult result = arm32Run(state, &runtime->bus, kExitAddress,
-        state->instructions + sliceInstructions);
+    Arm32RunResult result;
+#if defined(DINGOO_PIE_ARM32_DYNARMIC)
+    if (!runtime->bus.profilePcSamples)
+    {
+        result = arm32RunDynarmic(state, &runtime->bus, kExitAddress,
+            state->instructions + sliceInstructions);
+    }
+    else
+#endif
+    {
+        result = arm32Run(state, &runtime->bus, kExitAddress,
+            state->instructions + sliceInstructions);
+    }
     runtime->stats->instructions += state->instructions - before;
     uint64_t targetIps = s_targetInstructionsPerSecond.load();
     if (targetIps)
@@ -3344,14 +1969,69 @@ static void profileCcRuntime(CcArmRuntime* runtime)
     }
     uint64_t intervalInstructions = runtime->stats->instructions -
         runtime->profileLastInstructions;
+    uint64_t submittedFrames = consumeFramebufferSubmittedCount();
+    uint64_t framebufferCopyMicros = consumeFramebufferCopyMicros();
+    uint64_t totalFrameIntervalMicros = 0;
+    uint64_t maxFrameIntervalMicros = 0;
+    uint64_t frameIntervalsOver25ms = 0;
+    uint64_t frameIntervalsOver33ms = 0;
+    consumeFramebufferTimingStats(&totalFrameIntervalMicros, &maxFrameIntervalMicros,
+        &frameIntervalsOver25ms, &frameIntervalsOver33ms);
+    uint64_t averageFrameIntervalMicros = submittedFrames ?
+        totalFrameIntervalMicros / submittedFrames : 0;
     printf("cc-profile: elapsed_ms=%llu ips=%llu tick=%u tasks=%u delayed=%u "
-        "pc=0x%08x deadline=%u frames=%u last=%s\n",
+        "pc=0x%08x deadline=%u frames=%u fb_submit=%llu fb_copy_us=%llu "
+        "fb_interval_us=%llu/%llu over25=%llu over33=%llu last=%s\n",
         (unsigned long long)elapsedMillis,
         (unsigned long long)runtimeLogRatePerSecond(intervalInstructions,
             elapsedMillis - runtime->profileLastMillis),
         currentOsTick(runtime), activeTasks, delayedTasks, firstPc, firstDelay,
         runtime->stats->framesSubmitted,
+        (unsigned long long)submittedFrames,
+        (unsigned long long)framebufferCopyMicros,
+        (unsigned long long)averageFrameIntervalMicros,
+        (unsigned long long)maxFrameIntervalMicros,
+        (unsigned long long)frameIntervalsOver25ms,
+        (unsigned long long)frameIntervalsOver33ms,
         runtime->stats->lastImport[0] ? runtime->stats->lastImport : "(none)");
+    auto printHotspots = [&](const char* label,
+        const std::vector<uint32_t>& samples)
+    {
+        struct Hotspot
+        {
+            uint32_t count;
+            uint32_t index;
+        };
+        Hotspot top[8] = {};
+        for (uint32_t index = 0; index < samples.size(); ++index)
+        {
+            uint32_t count = samples[index];
+            if (count <= top[7].count)
+            {
+                continue;
+            }
+            uint32_t position = 7;
+            while (position > 0 && count > top[position - 1].count)
+            {
+                top[position] = top[position - 1];
+                --position;
+            }
+            top[position] = { count, index };
+        }
+        printf("cc-profile: %s", label);
+        for (const Hotspot& hotspot : top)
+        {
+            if (!hotspot.count)
+            {
+                break;
+            }
+            printf(" 0x%08x:%u", runtime->package->origin +
+                hotspot.index * 4u, hotspot.count);
+        }
+        printf("\n");
+    };
+    printHotspots("pc", runtime->profilePcSamples);
+    printHotspots("lr", runtime->profileLrSamples);
     runtime->profileLastMillis = elapsedMillis;
     runtime->profileLastInstructions = runtime->stats->instructions;
 }
@@ -3380,26 +2060,6 @@ static bool writeArmTailBranch(CcArmRuntime* runtime, uint32_t address,
     }
     uint32_t instruction = 0xea000000u |
         ((uint32_t)(displacement >> 2) & 0x00ffffffu);
-    return busWrite(runtime, address, &instruction, sizeof(instruction));
-}
-
-static bool writeArmAbsoluteTailJump(CcArmRuntime* runtime, uint32_t address,
-    uint32_t target)
-{
-    // LDR pc, [pc, #-4] loads the following literal without changing lr.
-    const uint32_t instructions[2] = { 0xe51ff004u, target };
-    return busWrite(runtime, address, instructions, sizeof(instructions));
-}
-
-static bool writeArmInlineImport(CcArmRuntime* runtime, uint32_t address,
-    const char* importName)
-{
-    uint32_t thunk = createDynamicImport(runtime, importName);
-    if (thunk < kDynamicThunkStart) return false;
-    uint32_t slot = (thunk - kDynamicThunkStart) / 8u;
-    uint32_t index = runtime->package->import_count + slot;
-    if (index > 0x00ffffffu) return false;
-    uint32_t instruction = 0xef000000u | index;
     return busWrite(runtime, address, &instruction, sizeof(instruction));
 }
 
@@ -3461,297 +2121,6 @@ static void patchLegacySdkAllocator(CcArmRuntime* runtime)
     }
 }
 
-static uint32_t patchArmFunctionsBySignature(CcArmRuntime* runtime,
-    const uint32_t* signature, size_t wordCount, uint32_t occurrence,
-    const char* importName);
-
-static void patchCommonGraphicsRoutines(CcArmRuntime* runtime)
-{
-    static const uint32_t transparentBlitSignature[] = {
-        0xe92d4018u, 0xe5901044u, 0xe590203cu, 0xe5903040u,
-        0xe0411002u, 0xe5902048u, 0xe0522003u,
-    };
-    uint32_t start = runtime->package->origin;
-    uint32_t end = start + runtime->package->prog_size;
-    for (uint32_t address = start;
-        address + sizeof(transparentBlitSignature) <= end; address += 4u)
-    {
-        uint8_t* code = resolveMemory(runtime, address,
-            sizeof(transparentBlitSignature));
-        if (!code || memcmp(code, transparentBlitSignature,
-                sizeof(transparentBlitSignature)) != 0)
-        {
-            continue;
-        }
-        uint32_t thunk = createDynamicImport(runtime,
-            "cc_internal_blit_transparent16");
-        if (thunk && writeArmAbsoluteTailJump(runtime, address, thunk))
-        {
-            printf("cc-arm: graphics fast path transparent16=0x%08x\n",
-                address);
-        }
-        else
-        {
-            printf("cc-arm: graphics fast path patch failed address=0x%08x thunk=0x%08x\n",
-                address, thunk);
-        }
-        break;
-    }
-
-    static const uint32_t scaledBlitSignature[] = {
-        0xe92d40f0u, 0xe5901054u, 0xe590204cu, 0xe3a05000u,
-        0xe0416002u, 0xe5902050u, 0xe5901058u,
-    };
-    static const uint32_t scaledTransparentBlitSignature[] = {
-        0xe92d4078u, 0xe5901054u, 0xe590204cu, 0xe3a04000u,
-        0xe0415002u, 0xe5902050u, 0xe5901058u, 0xe0416002u,
-    };
-    uint32_t scaledTransparentPatched = patchArmFunctionsBySignature(runtime,
-        scaledTransparentBlitSignature,
-        sizeof(scaledTransparentBlitSignature) /
-            sizeof(scaledTransparentBlitSignature[0]),
-        0u, "cc_internal_blit_scaled_transparent16");
-    uint32_t directPatched = 0;
-    uint32_t scaledIndexedPatched = 0;
-    for (uint32_t address = start;
-        address + 0x44u <= end; address += 4u)
-    {
-        uint32_t* code = (uint32_t*)resolveMemory(runtime, address, 0x44u);
-        if (!code || memcmp(code, scaledBlitSignature,
-                sizeof(scaledBlitSignature)) != 0)
-        {
-            continue;
-        }
-        const char* importName = NULL;
-        if (code[16] == 0xe590c02cu)
-        {
-            importName = "cc_internal_blit_scaled16";
-        }
-        else if (code[16] == 0xe590c038u)
-        {
-            importName = "cc_internal_blit_scaled_indexed16";
-        }
-        if (!importName) continue;
-        uint32_t thunk = createDynamicImport(runtime, importName);
-        if (!thunk || !writeArmAbsoluteTailJump(runtime, address, thunk))
-        {
-            continue;
-        }
-        if (code[16] == 0xe590c02cu) ++directPatched;
-        else ++scaledIndexedPatched;
-    }
-    if (directPatched || scaledIndexedPatched || scaledTransparentPatched)
-    {
-        printf("cc-arm: graphics fast path scaled16=%u indexed16=%u "
-            "transparent16=%u\n", directPatched, scaledIndexedPatched,
-            scaledTransparentPatched);
-    }
-
-    static const uint32_t transparentBlendSignature[] = {
-        0xe92d43f8u, 0xe1a04000u, 0xe594103cu, 0xe5900044u,
-        0xe5942040u, 0xe0400001u, 0xe5941048u, 0xe0516002u,
-    };
-    static const uint32_t transparentHalfBlendSignature[] = {
-        0xe92d4078u, 0xe5901044u, 0xe590203cu, 0xe5903040u,
-        0xe0411002u, 0xe5902048u, 0xe0523003u, 0xe590201cu,
-    };
-    uint32_t blendedPatched = 0;
-    blendedPatched += patchArmFunctionsBySignature(runtime,
-        transparentBlendSignature,
-        sizeof(transparentBlendSignature) /
-            sizeof(transparentBlendSignature[0]),
-        0u, "cc_internal_blit_transparent_blend1");
-    blendedPatched += patchArmFunctionsBySignature(runtime,
-        transparentBlendSignature,
-        sizeof(transparentBlendSignature) /
-            sizeof(transparentBlendSignature[0]),
-        1u, "cc_internal_blit_transparent_blend2");
-    blendedPatched += patchArmFunctionsBySignature(runtime,
-        transparentBlendSignature,
-        sizeof(transparentBlendSignature) /
-            sizeof(transparentBlendSignature[0]),
-        2u, "cc_internal_blit_transparent_blend3");
-    blendedPatched += patchArmFunctionsBySignature(runtime,
-        transparentBlendSignature,
-        sizeof(transparentBlendSignature) /
-            sizeof(transparentBlendSignature[0]),
-        3u, "cc_internal_blit_transparent_blend4");
-    blendedPatched += patchArmFunctionsBySignature(runtime,
-        transparentHalfBlendSignature,
-        sizeof(transparentHalfBlendSignature) /
-            sizeof(transparentHalfBlendSignature[0]),
-        0u, "cc_internal_blit_transparent_blend5");
-    if (blendedPatched)
-    {
-        printf("cc-arm: graphics fast path transparent blends=%u\n",
-            blendedPatched);
-    }
-}
-
-static uint32_t patchArmFunctionsBySignature(CcArmRuntime* runtime,
-    const uint32_t* signature, size_t wordCount, uint32_t occurrence,
-    const char* importName)
-{
-    if (!signature || !wordCount || !importName) return 0;
-    uint32_t start = runtime->package->origin;
-    uint32_t end = start + runtime->package->prog_size;
-    size_t byteCount = wordCount * sizeof(uint32_t);
-    uint32_t thunk = 0;
-    uint32_t patched = 0;
-    uint32_t matched = 0;
-    for (uint32_t address = start; address + byteCount <= end; address += 4u)
-    {
-        uint8_t* code = resolveMemory(runtime, address, byteCount);
-        if (!code || memcmp(code, signature, byteCount) != 0)
-        {
-            continue;
-        }
-        if (matched++ != occurrence)
-        {
-            continue;
-        }
-        if (!thunk)
-        {
-            thunk = createDynamicImport(runtime, importName);
-        }
-        if (thunk && writeArmAbsoluteTailJump(runtime, address, thunk))
-        {
-            ++patched;
-        }
-        break;
-    }
-    return patched;
-}
-
-static void patchPortableCc1800GraphicsRoutines(CcArmRuntime* runtime)
-{
-    if (runtime->cc1800Compatibility) return;
-    static const uint32_t normalizeVector3Fixed[] = {
-        0xe92d4070u, 0xe1a06000u, 0xe5910000u, 0xe1a05001u,
-        0xe1a01fc0u, 0xe5952004u, 0xe0200001u, 0xe0401001u,
-    };
-    uint32_t patched = 0;
-    patched += patchArmFunctionsBySignature(runtime, normalizeVector3Fixed,
-        sizeof(normalizeVector3Fixed) / sizeof(normalizeVector3Fixed[0]), 0u,
-        "cc_internal_normalize_vec3_fixed");
-    if (patched)
-    {
-        runtime->cc1800Compatibility = true;
-        printf("cc-arm: portable CC1800 fast paths=%u\n", patched);
-    }
-}
-
-static uint32_t patchCc1800IndexedGraphicsRoutines(CcArmRuntime* runtime)
-{
-    struct Patch
-    {
-        uint32_t address;
-        uint32_t first;
-        uint32_t second;
-        const char* importName;
-    };
-    static const Patch patches[] = {
-        { 0x101540e0u, 0xea011470u, 0xea011450u, "cc_internal_fast_copy" },
-        { 0x101992a8u, 0xe92d4001u, 0xeb0000e7u, "cc_internal_fast_copy" },
-        { 0x101992d0u, 0xe3a02000u, 0xe3510004u, "cc_internal_fast_fill_zero" },
-        { 0x101992c0u, 0xe20230ffu, 0xe1832403u, "cc_internal_fast_fill_byte" },
-        { 0x10165494u, 0xe92d0037u, 0xe5b03004u, "cc_internal_frame_copy" },
-        { 0x1015696cu, 0xe92d07f0u, 0xe5901044u, "cc_internal_indexed_scaled" },
-        { 0x10155d1cu, 0xe92d07f0u, 0xe5902034u, "cc_internal_indexed_copy" },
-        { 0x10156308u, 0xe92d03f0u, 0xe5902034u, "cc_internal_indexed_transparent" },
-        { 0x10157820u, 0xe92d0ff8u, 0xe5901034u, "cc_internal_indexed_alpha" },
-        { 0x1015a724u, 0xe52d4004u, 0xe5904220u, "cc_internal_soft3d_fill32" },
-        { 0x101819dcu, 0xe92d47f0u, 0xe1a06000u, kTransitionBlendImport },
-    };
-    uint32_t end = runtime->package->origin + runtime->package->prog_size;
-    uint32_t patched = 0;
-    for (size_t i = 0; i < sizeof(patches) / sizeof(patches[0]); ++i)
-    {
-        const Patch& patch = patches[i];
-        if (patch.address < runtime->package->origin || patch.address + 8u > end)
-        {
-            continue;
-        }
-        uint32_t* code = (uint32_t*)resolveMemory(runtime, patch.address, 8u);
-        if (!code || code[0] != patch.first || code[1] != patch.second)
-        {
-            continue;
-        }
-        uint32_t thunk = createDynamicImport(runtime, patch.importName);
-        if (thunk && writeArmAbsoluteTailJump(runtime, patch.address, thunk))
-        {
-            ++patched;
-        }
-    }
-    const uint32_t spanBlockAddress = 0x1016f15cu;
-    uint32_t* spanBlock = (uint32_t*)resolveMemory(runtime, spanBlockAddress,
-        sizeof(uint32_t));
-    if (spanBlock && *spanBlock == 0xe003bc55u &&
-        writeArmInlineImport(runtime, spanBlockAddress, kTextureSpanBlockImport))
-    {
-        ++patched;
-    }
-    const uint32_t perspectiveSpanBlockAddress = 0x1016f2dcu;
-    uint32_t* perspectiveSpanBlock = (uint32_t*)resolveMemory(runtime,
-        perspectiveSpanBlockAddress, sizeof(uint32_t));
-    if (perspectiveSpanBlock && *perspectiveSpanBlock == 0xe003bc55u &&
-        writeArmInlineImport(runtime, perspectiveSpanBlockAddress,
-            kTextureSpanBlockImport))
-    {
-        ++patched;
-    }
-    const uint32_t audioConvertBlockAddress = 0x10150a18u;
-    uint32_t* audioConvertBlock = (uint32_t*)resolveMemory(runtime,
-        audioConvertBlockAddress, sizeof(uint32_t));
-    if (audioConvertBlock && *audioConvertBlock == 0xe4910004u &&
-        writeArmInlineImport(runtime, audioConvertBlockAddress,
-            kAudioConvertBlockImport))
-    {
-        ++patched;
-    }
-    const uint32_t perspectiveChunkAddress = 0x1016f060u;
-    uint32_t* perspectiveChunk = (uint32_t*)resolveMemory(runtime,
-        perspectiveChunkAddress, sizeof(uint32_t));
-    if (perspectiveChunk && *perspectiveChunk == 0xe3a06000u &&
-        writeArmInlineImport(runtime, perspectiveChunkAddress,
-            kPerspectiveChunkSetupImport))
-    {
-        ++patched;
-    }
-    const uint32_t fill32PairsAddress = 0x10166260u;
-    uint32_t* fill32Pairs = (uint32_t*)resolveMemory(runtime,
-        fill32PairsAddress, sizeof(uint32_t));
-    if (fill32Pairs && *fill32Pairs == 0xe5804004u &&
-        writeArmInlineImport(runtime, fill32PairsAddress,
-            kFill32PairsImport))
-    {
-        ++patched;
-    }
-    const uint32_t adpcmDecodeTailAddress = 0x101675dcu;
-    uint32_t* adpcmDecodeTail = (uint32_t*)resolveMemory(runtime,
-        adpcmDecodeTailAddress, sizeof(uint32_t));
-    if (adpcmDecodeTail && *adpcmDecodeTail == 0xe1a04259u &&
-        writeArmInlineImport(runtime, adpcmDecodeTailAddress,
-            kAdpcmDecodeTailImport))
-    {
-        ++patched;
-    }
-    const uint32_t rowFill32PairsAddress = 0x10157ba4u;
-    uint32_t* rowFill32Pairs = (uint32_t*)resolveMemory(runtime,
-        rowFill32PairsAddress, sizeof(uint32_t));
-    if (rowFill32Pairs && *rowFill32Pairs == 0xe1d095b4u &&
-        writeArmInlineImport(runtime, rowFill32PairsAddress,
-            kRowFill32PairsImport))
-    {
-        ++patched;
-    }
-    if (patched)
-    {
-        runtime->cc1800Compatibility = true;
-        printf("cc-arm: CC1800 indexed graphics fast paths=%u\n", patched);
-    }
-    return patched;
-}
 
 static bool initializeRuntime(CcArmRuntime* runtime, const char* path)
 {
@@ -3813,21 +2182,15 @@ static bool initializeRuntime(CcArmRuntime* runtime, const char* path)
     runtime->bus.directHeapSize = runtime->legacySystemMmio.empty() ?
         (uint32_t)runtime->heapMemory.size() :
         kLegacySystemMmioStart - runtime->heapStart;
+    runtime->bus.directFramebufferBase = kFramebufferAddress;
+    runtime->bus.directFramebufferSize = (uint32_t)runtime->framebuffer.size();
+    runtime->bus.directProgram = runtime->ram.data() +
+        (runtime->package->origin - runtime->ramStart);
     runtime->bus.directProgramBase = runtime->package->origin;
     runtime->bus.directProgramSize = runtime->package->prog_size;
     runtime->bus.directThunkBase = kDynamicThunkStart;
     runtime->bus.directThunkSize = 0x10000u;
     patchLegacySdkAllocator(runtime);
-    if (!s_compatibilityExecutionMode.load())
-    {
-        patchCommonGraphicsRoutines(runtime);
-        patchCc1800IndexedGraphicsRoutines(runtime);
-        patchPortableCc1800GraphicsRoutines(runtime);
-    }
-    else
-    {
-        printf("cc-arm: compatibility mode uses base ARM32 execution paths\n");
-    }
     std::string fileName = gameFileNameFromPath(path ? path : "game.cc");
     std::string locale = ".\\" + fileName;
     busWrite(runtime, kLocaleString, locale.c_str(), locale.size() + 1);
@@ -3850,6 +2213,15 @@ static bool initializeRuntime(CcArmRuntime* runtime, const char* path)
     runtime->bus.instructionCache = runtime->instructionCache.data();
     runtime->bus.instructionCacheCount =
         (uint32_t)runtime->instructionCache.size();
+    if (runtimeLogProfileEnabled())
+    {
+        runtime->profilePcSamples.resize(runtime->instructionCache.size());
+        runtime->profileLrSamples.resize(runtime->instructionCache.size());
+        runtime->bus.profilePcSamples = runtime->profilePcSamples.data();
+        runtime->bus.profileLrSamples = runtime->profileLrSamples.data();
+        runtime->bus.profileSampleCount =
+            (uint32_t)runtime->profilePcSamples.size();
+    }
     memset(framebufferPixels(), 0, VM_LCD_FB_SIZE);
     memset(runtime->framebuffer.data(), 0, runtime->framebuffer.size());
     return true;
@@ -4122,6 +2494,9 @@ bool ccArmRuntimeRunFile(const char* path,
     fsys_set_game_identity("");
     fsys_set_game_name("");
     guestPackageDestroy(runtime.package);
+#if defined(DINGOO_PIE_ARM32_DYNARMIC)
+    arm32DynarmicReset();
+#endif
     {
         std::lock_guard<std::mutex> lock(s_runtimeMutex);
         s_activeRuntime = NULL;
@@ -4171,13 +2546,14 @@ void ccArmRuntimeApplySettings(void)
     s_targetInstructionsPerSecond.store(targetIps);
     const char* requestedBackend = getenv("DINGOO_PIE_BACKEND");
     RuntimeExecutionMode executionMode = runtimeExecutionModeFromName(requestedBackend, NULL);
-    bool compatibilityMode = executionMode == RUNTIME_EXECUTION_MODE_COMPATIBILITY;
-    s_compatibilityExecutionMode.store(compatibilityMode);
-    printf("cc-arm: settings requested_backend=%s effective_backend=arm32_interpreter "
-        "execution_mode=%s cpu_clock=%s target_ips=%llu runtime_scale=%.3f "
+    const char* effectiveBackend = "arm32_interpreter";
+#if defined(DINGOO_PIE_ARM32_DYNARMIC)
+    if (!runtimeLogProfileEnabled()) effectiveBackend = "dynarmic";
+#endif
+    printf("cc-arm: settings requested_backend=%s effective_backend=%s "
+        "execution_mode=standard cpu_clock=%s target_ips=%llu runtime_scale=%.3f "
         "delay_scale=%.3f profile=%u\n",
-        runtimeExecutionModeName(executionMode),
-        compatibilityMode ? "base" : "optimized",
+        runtimeExecutionModeName(executionMode), effectiveBackend,
         cpuClock && cpuClock[0] ? cpuClock : "auto",
         (unsigned long long)targetIps, runtimeScale, delayScale,
         runtimeLogProfileEnabled() ? 1u : 0u);
@@ -4185,6 +2561,9 @@ void ccArmRuntimeApplySettings(void)
 
 void ccArmRuntimePrepareRun(void)
 {
+#if defined(DINGOO_PIE_ARM32_DYNARMIC)
+    arm32DynarmicReset();
+#endif
     ccArmRuntimeApplySettings();
     s_stopRequested.store(false);
 }

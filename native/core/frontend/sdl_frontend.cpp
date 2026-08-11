@@ -1589,6 +1589,8 @@ struct AndroidThemeColors
 };
 
 static AndroidThemeColors androidThemeColors(void);
+static SDL_Color androidThemeBlend(SDL_Color first, SDL_Color second,
+    int secondWeight, uint8_t alpha);
 
 static const int kAndroidLibraryHeaderTop = 10;
 static const int kAndroidLibraryActionTop = 18;
@@ -2131,16 +2133,22 @@ static bool drawAndroidLibraryScreen(void)
         int lastRow = std::min(totalCount, firstRow + visibleCount + 2);
         SDL_Rect viewport = { 0, layout.top, width, layout.viewportHeight };
         SDL_RenderSetClipRect(g_renderer, &viewport);
+        const SDL_Color itemBackground = colors.button;
+        const SDL_Color itemBackgroundBorder = colors.buttonBorder;
+        const SDL_Color itemControl = androidThemeBlend(
+            colors.card, colors.button, 40, colors.card.a);
+        const SDL_Color itemControlBorder = androidThemeBlend(
+            colors.cardBorder, colors.buttonBorder, 40, colors.cardBorder.a);
         for (int i = firstRow; i < lastRow; ++i)
         {
             SDL_Rect card = androidLibraryRowRect(width, height, i);
-            drawAndroidRect(card, colors.card);
-            drawAndroidOutline(card, colors.cardBorder);
+            drawAndroidRect(card, itemBackground);
+            drawAndroidOutline(card, itemBackgroundBorder);
             int iconSize = std::max(32 * scale, card.h - 16 * scale);
             SDL_Rect icon = { card.x + 10 * scale, card.y + (card.h - iconSize) / 2,
                 iconSize, iconSize };
-            drawAndroidRect(icon, colors.icon);
-            drawAndroidOutline(icon, colors.iconBorder);
+            drawAndroidRect(icon, itemControl);
+            drawAndroidOutline(icon, itemControlBorder);
             const char* typeLabel = gamePathHasAppExtension(g_androidGamePaths[(size_t)i]) ?
                 "APP" : "CC";
             drawAndroidSystemTextCentered(typeLabel, icon, 17 * scale,
@@ -2152,8 +2160,8 @@ static bool drawAndroidLibraryScreen(void)
                 std::max(1, removeRect.x - nameX - 10 * scale), card.h };
             drawAndroidSystemTextLeftCentered(name.c_str(), nameRect, 0, 23 * scale,
                 colors.text);
-            drawAndroidRect(removeRect, colors.button);
-            drawAndroidOutline(removeRect, colors.buttonBorder);
+            drawAndroidRect(removeRect, itemControl);
+            drawAndroidOutline(removeRect, itemControlBorder);
             drawAndroidSystemTextCentered(androidChineseUi() ? kZhRemove : "Remove",
                 removeRect, androidLibraryLayout(width, height).compact ? 14 * scale : 17 * scale,
                 colors.buttonText);

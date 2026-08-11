@@ -84,7 +84,6 @@ struct CcRuntimeState
     uint32_t framebufferBits;
     uint32_t framebufferWriteHighWater[4];
     bool framebufferBitsExplicit;
-    bool cc1800Compatibility;
     bool dvcAudioStarted;
 };
 

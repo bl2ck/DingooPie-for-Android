@@ -5,6 +5,36 @@ PPSSPP_PATH := $(PROJECT_ROOT)/third_party/ppsspp-master
 
 include $(SDL_PATH)/Android.mk
 
+ifeq ($(TARGET_ARCH_ABI),x86_64)
+DYNARMIC_BUILD := $(PROJECT_ROOT)/.tools/dynarmic-android-x86_64-build
+DYNARMIC_SOURCE := $(PROJECT_ROOT)/.tools/dynarmic-eval-20260810
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := dynarmic_cc
+LOCAL_SRC_FILES := $(DYNARMIC_BUILD)/src/dynarmic/libdynarmic.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := dynarmic_zydis
+LOCAL_SRC_FILES := $(DYNARMIC_BUILD)/externals/zydis/libZydis.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := dynarmic_zycore
+LOCAL_SRC_FILES := $(DYNARMIC_BUILD)/externals/zydis/zycore/libZycore.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := dynarmic_mcl
+LOCAL_SRC_FILES := $(DYNARMIC_BUILD)/externals/mcl/src/libmcl.a
+include $(PREBUILT_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := dynarmic_fmt
+LOCAL_SRC_FILES := $(DYNARMIC_BUILD)/externals/fmt/libfmt.a
+include $(PREBUILT_STATIC_LIBRARY)
+endif
+
 include $(CLEAR_VARS)
 LOCAL_MODULE := main
 LOCAL_C_INCLUDES := \
@@ -67,6 +97,13 @@ LOCAL_SRC_FILES := \
     $(PROJECT_ROOT)/native/android/Common/Crypto/sha256.cpp \
     $(PROJECT_ROOT)/native/android/platform_android.cpp \
     $(PROJECT_ROOT)/native/android/capstone_stub.cpp
+
+ifeq ($(TARGET_ARCH_ABI),x86_64)
+LOCAL_C_INCLUDES += $(DYNARMIC_SOURCE)/src
+LOCAL_CPPFLAGS += -DDINGOO_PIE_ARM32_DYNARMIC
+LOCAL_SRC_FILES += $(PROJECT_ROOT)/native/core/cc/arm32_dynarmic.cpp
+LOCAL_STATIC_LIBRARIES += dynarmic_cc dynarmic_zydis dynarmic_zycore dynarmic_mcl dynarmic_fmt
+endif
 
 LOCAL_CPPFLAGS += -DDINGOO_PIE_DINGOO_MEMORY -D__LIBRETRO__
 LOCAL_SRC_FILES += \
@@ -143,6 +180,6 @@ LOCAL_SRC_FILES += \
     $(PPSSPP_PATH)/Core/MIPS/ARM64/Arm64IRJit.cpp \
     $(PPSSPP_PATH)/Core/MIPS/ARM64/Arm64IRRegCache.cpp
 endif
-LOCAL_LDLIBS := -lGLESv1_CM -lGLESv2 -lOpenSLES -llog -landroid
+LOCAL_LDLIBS := -lGLESv1_CM -lGLESv2 -lOpenSLES -llog -landroid -latomic
 LOCAL_SHARED_LIBRARIES := SDL2
 include $(BUILD_SHARED_LIBRARY)

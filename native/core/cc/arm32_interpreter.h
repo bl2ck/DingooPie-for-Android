@@ -23,8 +23,9 @@ typedef bool (*Arm32SvcCallback)(void* userData, Arm32State* state,
 struct Arm32InstructionCacheEntry
 {
     uint32_t instruction;
+    uint16_t conditionMask;
     uint8_t kind;
-    uint8_t reserved[3];
+    uint8_t reserved;
 };
 
 struct Arm32Bus
@@ -46,12 +47,19 @@ struct Arm32Bus
     uint8_t* directHeap;
     uint32_t directHeapBase;
     uint32_t directHeapSize;
+    uint8_t* directFramebuffer;
+    uint32_t directFramebufferBase;
+    uint32_t directFramebufferSize;
+    uint8_t* directProgram;
     uint32_t directProgramBase;
     uint32_t directProgramSize;
     uint32_t directThunkBase;
     uint32_t directThunkSize;
     Arm32InstructionCacheEntry* instructionCache;
     uint32_t instructionCacheCount;
+    uint32_t* profilePcSamples;
+    uint32_t* profileLrSamples;
+    uint32_t profileSampleCount;
 };
 
 enum Arm32RunResult

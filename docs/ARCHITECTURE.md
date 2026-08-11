@@ -60,7 +60,7 @@ from the activity lifecycle and menu implementation.
 - `guest_text_format.*`, `guest_filesystem.*`, audio, input, settings, cheats,
   and frontend code are shared services and therefore use format-neutral names.
 - `app_mips_runtime.*` contains only the MIPS APP execution path.
-- `cc_arm_runtime.*`, `cc_graphics_compat.h`, `cc_math_compat.h`, and
+- `cc_arm_runtime.*`, `arm32_interpreter.*`, and
   `cc_runtime_timing.h` contain only the ARM CC execution path and its
   compatibility behavior.
 

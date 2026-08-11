@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <vector>
 
 static const uint8_t kSaveStateTokenRaw = 0;
@@ -234,7 +235,11 @@ static bool writeAll(const std::string& path, const uint8_t* data, size_t size)
         return false;
     }
 
-    bool ok = size == 0 || fwrite(data, 1, size, file) == size;
+    bool ok = (size == 0 || fwrite(data, 1, size, file) == size) &&
+        fflush(file) == 0;
+    int descriptor = fileno(file);
+    if (ok && descriptor >= 0 && fsync(descriptor) != 0 &&
+        errno != EINVAL && errno != ENOTSUP) ok = false;
     ok = fclose(file) == 0 && ok;
     return ok;
 }
@@ -262,6 +267,9 @@ static bool copySaveStateFile(const std::string& sourcePath,
         }
     }
     if (destination && fflush(destination) != 0) ok = false;
+    int descriptor = destination ? fileno(destination) : -1;
+    if (ok && descriptor >= 0 && fsync(descriptor) != 0 &&
+        errno != EINVAL && errno != ENOTSUP) ok = false;
     if (source) fclose(source);
     if (destination && fclose(destination) != 0) ok = false;
     return ok;

@@ -552,10 +552,21 @@ int main(int argc, char** argv)
     bus.read = readMemory;
     bus.write = writeMemory;
     bus.svc = handleSvc;
+    bus.directSystemRam = context.memory.systemMemory.data();
+    bus.directSystemRamBase = kCcHomebrewSystemRamStart;
+    bus.directSystemRamSize = (uint32_t)context.memory.systemMemory.size();
+    bus.directRam = context.memory.ram.data();
+    bus.directRamBase = context.ramStart;
+    bus.directRamSize = context.ramSize;
+    bus.directStack = context.memory.stack.data();
+    bus.directStackBase = kStackStart;
+    bus.directStackSize = kStackSize;
     std::vector<Arm32InstructionCacheEntry> instructionCache;
     if (ARM_TEST_USE_INSTRUCTION_CACHE)
     {
         instructionCache.resize((package->prog_size + 3u) / 4u);
+        bus.directProgram = context.memory.ram.data() +
+            package->origin - context.ramStart;
         bus.directProgramBase = package->origin;
         bus.directProgramSize = package->prog_size;
         bus.instructionCache = instructionCache.data();

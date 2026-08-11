@@ -216,36 +216,6 @@ $compiler = Join-Path $resolvedSdkRoot `
 if (!(Test-Path -LiteralPath $compiler)) {
     throw "Android NDK compiler was not found: $compiler"
 }
-$nativeTest = Join-Path $resolvedOutputDirectory 'cc-graphics-compat-test-x86_64'
-& $compiler -std=c++11 -O2 -Wall -Wextra -Werror -static-libstdc++ `
-    -I (Join-Path $projectRoot 'native\core') `
-    (Join-Path $projectRoot 'tests\cc_graphics_compat_test.cpp') `
-    -o $nativeTest
-if ($LASTEXITCODE -ne 0) {
-    throw 'CC graphics native regression test compilation failed.'
-}
-Invoke-Adb -Arguments @('push', $nativeTest, '/data/local/tmp/cc-graphics-compat-test') | Out-Null
-Invoke-Adb -Arguments @('shell', 'chmod', '755', '/data/local/tmp/cc-graphics-compat-test') | Out-Null
-$nativeResult = (Invoke-Adb -Arguments @(
-    'shell', '/data/local/tmp/cc-graphics-compat-test')) -join "`n"
-if ($nativeResult -notmatch 'regression passed') {
-    throw "CC graphics native regression test failed:`n$nativeResult"
-}
-$mathTest = Join-Path $resolvedOutputDirectory 'cc-math-compat-test-x86_64'
-& $compiler -std=c++11 -O2 -Wall -Wextra -Werror -static-libstdc++ `
-    -I (Join-Path $projectRoot 'native\core') `
-    (Join-Path $projectRoot 'tests\cc_math_compat_test.cpp') `
-    -o $mathTest
-if ($LASTEXITCODE -ne 0) {
-    throw 'CC math native regression test compilation failed.'
-}
-Invoke-Adb -Arguments @('push', $mathTest, '/data/local/tmp/cc-math-compat-test') | Out-Null
-Invoke-Adb -Arguments @('shell', 'chmod', '755', '/data/local/tmp/cc-math-compat-test') | Out-Null
-$mathResult = (Invoke-Adb -Arguments @(
-    'shell', '/data/local/tmp/cc-math-compat-test')) -join "`n"
-if ($mathResult -notmatch 'regression passed') {
-    throw "CC math native regression test failed:`n$mathResult"
-}
 $timingTest = Join-Path $resolvedOutputDirectory 'cc-runtime-timing-test-x86_64'
 & $compiler -std=c++11 -O2 -Wall -Wextra -Werror -static-libstdc++ `
     -I (Join-Path $projectRoot 'native\core') `
