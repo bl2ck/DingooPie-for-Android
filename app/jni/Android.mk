@@ -44,9 +44,6 @@ LOCAL_C_INCLUDES := \
     $(PROJECT_ROOT)/native/core/cc \
     $(PROJECT_ROOT)/native/core/config \
     $(PROJECT_ROOT)/native/core/frontend \
-    $(PROJECT_ROOT)/native/core/game \
-    $(PROJECT_ROOT)/native/core/guest \
-    $(PROJECT_ROOT)/native/core/runtime \
     $(PROJECT_ROOT)/native/android \
     $(PPSSPP_PATH) \
     $(PPSSPP_PATH)/Common \
@@ -55,53 +52,58 @@ LOCAL_CPP_FEATURES := exceptions rtti
 LOCAL_CPPFLAGS := -std=c++17 -Wno-format-security
 LOCAL_SRC_FILES := \
     $(SDL_PATH)/src/main/android/SDL_android_main.c \
-    $(PROJECT_ROOT)/native/core/app/app_mips_runtime.cpp \
-    $(PROJECT_ROOT)/native/core/app/save_state.cpp \
-    $(PROJECT_ROOT)/native/core/cc/arm32_interpreter.cpp \
-    $(PROJECT_ROOT)/native/core/cc/cc_save_state.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/audio_validation_capture.cpp \
-    $(PROJECT_ROOT)/native/core/cc/cc_arm_runtime.cpp \
-    $(PROJECT_ROOT)/native/core/config/cheat_engine.cpp \
-    $(PROJECT_ROOT)/native/core/config/cheat_runtime.cpp \
-    $(PROJECT_ROOT)/native/core/config/compat_profile.cpp \
-    $(PROJECT_ROOT)/native/core/runtime/crash_log.cpp \
-    $(PROJECT_ROOT)/native/core/runtime/debug_log.cpp \
-    $(PROJECT_ROOT)/native/core/app/emulated_memory.cpp \
-    $(PROJECT_ROOT)/native/core/config/emulator_options.cpp \
-    $(PROJECT_ROOT)/native/core/config/emulator_settings.cpp \
-    $(PROJECT_ROOT)/native/core/runtime/execution_backend.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/framebuffer.cpp \
-    $(PROJECT_ROOT)/native/core/game/game_paths.cpp \
-    $(PROJECT_ROOT)/native/core/game/game_runtime.cpp \
-    $(PROJECT_ROOT)/native/core/guest/guest_audio.cpp \
-    $(PROJECT_ROOT)/native/core/guest/guest_filesystem.cpp \
-    $(PROJECT_ROOT)/native/core/guest/guest_save_transaction.cpp \
-    $(PROJECT_ROOT)/native/core/guest/guest_text_format.cpp \
-    $(PROJECT_ROOT)/native/core/guest/guest_package.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/input_controls.cpp \
-    $(PROJECT_ROOT)/native/core/app/instruction_compat.cpp \
+    $(PROJECT_ROOT)/native/core/app/cpu/mips_compat.cpp \
+    $(PROJECT_ROOT)/native/core/app/cpu/mips_runtime.cpp \
+    $(PROJECT_ROOT)/native/core/app/cpu/ppsspp_backend.cpp \
+    $(PROJECT_ROOT)/native/core/app/cpu/ppsspp_bridge.cpp \
+    $(PROJECT_ROOT)/native/core/app/hle/app_hle.cpp \
+    $(PROJECT_ROOT)/native/core/app/hle/app_task_lifecycle.cpp \
+    $(PROJECT_ROOT)/native/core/app/hle/app_task_scheduler.cpp \
+    $(PROJECT_ROOT)/native/core/app/hle/app_text_format.cpp \
+    $(PROJECT_ROOT)/native/core/app/memory/app_framebuffer_mapping.cpp \
+    $(PROJECT_ROOT)/native/core/app/memory/app_memory.cpp \
+    $(PROJECT_ROOT)/native/core/app/runtime/app_cheat_adapter.cpp \
+    $(PROJECT_ROOT)/native/core/app/runtime/app_crash_report.cpp \
+    $(PROJECT_ROOT)/native/core/app/runtime/app_runtime.cpp \
+    $(PROJECT_ROOT)/native/core/app/runtime/app_runtime_debug.cpp \
+    $(PROJECT_ROOT)/native/core/app/save/app_save_state.cpp \
+    $(PROJECT_ROOT)/native/core/cc/cpu/arm32_interpreter.cpp \
+    $(PROJECT_ROOT)/native/core/cc/runtime/cc_crash_report.cpp \
+    $(PROJECT_ROOT)/native/core/cc/runtime/cc_runtime.cpp \
+    $(PROJECT_ROOT)/native/core/cc/save/cc_save_state.cpp \
+    $(PROJECT_ROOT)/native/core/config/cheats/cheat_engine.cpp \
+    $(PROJECT_ROOT)/native/core/config/cheats/cheat_runtime.cpp \
+    $(PROJECT_ROOT)/native/core/config/compatibility/compat_profile.cpp \
+    $(PROJECT_ROOT)/native/core/config/settings/emulator_options.cpp \
+    $(PROJECT_ROOT)/native/core/config/settings/emulator_settings.cpp \
+    $(PROJECT_ROOT)/native/core/shared/diagnostics/debug_log.cpp \
+    $(PROJECT_ROOT)/native/core/shared/diagnostics/runtime_log.cpp \
+    $(PROJECT_ROOT)/native/core/shared/execution/execution_backend.cpp \
+    $(PROJECT_ROOT)/native/core/shared/execution/pause_gate.cpp \
+    $(PROJECT_ROOT)/native/core/shared/execution/thread_join.cpp \
+    $(PROJECT_ROOT)/native/core/shared/game/game_paths.cpp \
+    $(PROJECT_ROOT)/native/core/shared/game/game_runtime.cpp \
+    $(PROJECT_ROOT)/native/core/shared/save/guest_save_transaction.cpp \
+    $(PROJECT_ROOT)/native/core/shared/save/save_file_storage.cpp \
+    $(PROJECT_ROOT)/native/core/shared/services/guest_audio.cpp \
+    $(PROJECT_ROOT)/native/core/shared/services/guest_filesystem.cpp \
+    $(PROJECT_ROOT)/native/core/shared/services/guest_package.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/audio/audio_validation_capture.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/audio/sdl_audio.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/input/input_controls.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/menu/menu_strings.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/shell/frontend_shell.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/video/frame_processor.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/video/framebuffer.cpp \
     $(PROJECT_ROOT)/native/core/main.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/menu_strings.cpp \
-    $(PROJECT_ROOT)/native/core/runtime/native_runtime.cpp \
-    $(PROJECT_ROOT)/native/core/runtime/thread_join.cpp \
-    $(PROJECT_ROOT)/native/core/runtime/pause_gate.cpp \
-    $(PROJECT_ROOT)/native/core/app/ppsspp_irjit_backend.cpp \
-    $(PROJECT_ROOT)/native/core/app/ppsspp_shim.cpp \
-    $(PROJECT_ROOT)/native/core/runtime/runtime_debug.cpp \
-    $(PROJECT_ROOT)/native/core/runtime/runtime_log.cpp \
-    $(PROJECT_ROOT)/native/core/app/sdk_hle.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/sdl_audio.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/sdl_frontend.cpp \
-    $(PROJECT_ROOT)/native/core/app/task_thread_lifecycle.cpp \
-    $(PROJECT_ROOT)/native/core/app/task_scheduler.cpp \
     $(PROJECT_ROOT)/native/android/Common/Crypto/sha256.cpp \
-    $(PROJECT_ROOT)/native/android/platform_android.cpp \
-    $(PROJECT_ROOT)/native/android/capstone_stub.cpp
+    $(PROJECT_ROOT)/native/android/capstone_stub.cpp \
+    $(PROJECT_ROOT)/native/android/platform_android.cpp
 
 ifeq ($(TARGET_ARCH_ABI),x86_64)
 LOCAL_C_INCLUDES += $(DYNARMIC_SOURCE)/src
 LOCAL_CPPFLAGS += -DDINGOO_PIE_ARM32_DYNARMIC
-LOCAL_SRC_FILES += $(PROJECT_ROOT)/native/core/cc/arm32_dynarmic.cpp
+LOCAL_SRC_FILES += $(PROJECT_ROOT)/native/core/cc/cpu/arm32_dynarmic.cpp
 LOCAL_STATIC_LIBRARIES += dynarmic_cc dynarmic_zydis dynarmic_zycore dynarmic_mcl dynarmic_fmt
 endif
 

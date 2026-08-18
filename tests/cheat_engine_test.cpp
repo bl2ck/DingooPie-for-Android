@@ -1,5 +1,5 @@
-#include "config/cheat_engine.h"
-#include "game/game_paths.h"
+#include "config/cheats/cheat_engine.h"
+#include "shared/game/game_paths.h"
 
 #include <stdint.h>
 #include <stdio.h>

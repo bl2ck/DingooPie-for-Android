@@ -1,7 +1,7 @@
-#include "app/task_thread_lifecycle.h"
-#include "runtime/profile_counter.h"
-#include "runtime/runtime_shared_text.h"
-#include "runtime/runtime_tick_clock.h"
+#include "app/hle/app_task_lifecycle.h"
+#include "shared/diagnostics/profile_counter.h"
+#include "shared/diagnostics/runtime_shared_text.h"
+#include "shared/execution/runtime_tick_clock.h"
 
 #include <pthread.h>
 #include <sched.h>

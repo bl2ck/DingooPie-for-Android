@@ -1,5 +1,5 @@
-#include "cc/cc_runtime_timing.h"
-#include "cc/cc_input_mapping.h"
+#include "cc/runtime/cc_timing.h"
+#include "cc/hle/cc_input_mapping.h"
 
 #include <stdio.h>
 

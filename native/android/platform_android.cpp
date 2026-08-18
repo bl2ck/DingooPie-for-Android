@@ -1,8 +1,10 @@
-#include "platform_services.h"
-#include "frontend/sdl_frontend.h"
-#include "guest/guest_filesystem.h"
-#include "app/sdk_hle.h"
-#include "app/save_state.h"
+#include "shared/platform/storage_services.h"
+#include "shared/platform/lifecycle_services.h"
+#include "shared/platform/automation_services.h"
+#include "frontend/shell/frontend_shell.h"
+#include "shared/services/guest_filesystem.h"
+#include "app/hle/app_hle.h"
+#include "app/save/app_save_state.h"
 #include "jni_local_ref.h"
 
 #include <SDL_system.h>
@@ -87,7 +89,7 @@ static int openAndroidGameSiblingDescriptor(const std::string& gamePath,
     return descriptor;
 }
 
-std::string platformAndroidConsumeCheatManagerAutomationGamePath(void)
+std::string platformConsumeCheatManagerAutomationGamePath(void)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -120,7 +122,7 @@ std::string platformAndroidConsumeCheatManagerAutomationGamePath(void)
     return result;
 }
 
-std::string platformAndroidConsumeGameAutomationPath(void)
+std::string platformConsumeGameAutomationPath(void)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -153,7 +155,7 @@ std::string platformAndroidConsumeGameAutomationPath(void)
     return result;
 }
 
-bool platformAndroidConsumeAudioValidationAutomationEnabled(void)
+bool platformConsumeAudioValidationAutomationEnabled(void)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -182,7 +184,7 @@ bool platformAndroidConsumeAudioValidationAutomationEnabled(void)
     return enabled;
 }
 
-void platformAndroidRequestApplicationExit(void)
+void platformRequestApplicationExit(void)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -208,7 +210,7 @@ void platformAndroidRequestApplicationExit(void)
     }
 }
 
-std::string platformAndroidGetSaveDirectory(const std::string& gamePath,
+std::string platformGetAppSaveDirectory(const std::string& gamePath,
     const std::string& gameIdentity)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
@@ -248,7 +250,7 @@ std::string platformAndroidGetSaveDirectory(const std::string& gamePath,
     return result;
 }
 
-std::string platformAndroidGetCcSaveDirectory(const std::string& gamePath,
+std::string platformGetCcSaveDirectory(const std::string& gamePath,
     const std::string& gameIdentity)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
@@ -288,7 +290,7 @@ std::string platformAndroidGetCcSaveDirectory(const std::string& gamePath,
     return result;
 }
 
-std::string platformAndroidGetLogDirectory(void)
+std::string platformGetLogDirectory(void)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -321,7 +323,7 @@ std::string platformAndroidGetLogDirectory(void)
     return result;
 }
 
-bool platformAndroidIsPrivateSaveDirectory(const std::string& directoryUri)
+bool platformIsPrivateStorageDirectory(const std::string& directoryUri)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -349,7 +351,7 @@ bool platformAndroidIsPrivateSaveDirectory(const std::string& directoryUri)
     return result;
 }
 
-FILE* platformAndroidOpenSaveFile(const std::string& directoryUri,
+FILE* platformOpenStorageFile(const std::string& directoryUri,
     const std::string& fileName, const char* mode)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
@@ -414,7 +416,7 @@ FILE* platformAndroidOpenSaveFile(const std::string& directoryUri,
     return file;
 }
 
-bool platformAndroidDeleteSaveFile(const std::string& directoryUri,
+bool platformDeleteStorageFile(const std::string& directoryUri,
     const std::string& fileName)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
@@ -445,7 +447,7 @@ bool platformAndroidDeleteSaveFile(const std::string& directoryUri,
     return deleted;
 }
 
-uint64_t platformAndroidGetSaveFileModifiedTime(const std::string& directoryUri,
+uint64_t platformGetStorageFileModifiedTime(const std::string& directoryUri,
     const std::string& fileName)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
@@ -475,7 +477,7 @@ uint64_t platformAndroidGetSaveFileModifiedTime(const std::string& directoryUri,
 static bool writeSaveAutomationFile(const std::string& directory,
     const char* name, const char* mode, const uint8_t* data, size_t size)
 {
-    FILE* file = platformAndroidOpenSaveFile(directory, name, mode);
+    FILE* file = platformOpenStorageFile(directory, name, mode);
     if (!file)
     {
         return false;
@@ -488,7 +490,7 @@ static bool writeSaveAutomationFile(const std::string& directory,
 static bool readSaveAutomationFile(const std::string& directory,
     const char* name, const uint8_t* expected, size_t size)
 {
-    FILE* file = platformAndroidOpenSaveFile(directory, name, "rb");
+    FILE* file = platformOpenStorageFile(directory, name, "rb");
     if (!file)
     {
         return false;
@@ -502,7 +504,7 @@ static bool readSaveAutomationFile(const std::string& directory,
 
 static bool saveAutomationFileMissing(const std::string& directory, const char* name)
 {
-    FILE* file = platformAndroidOpenSaveFile(directory, name, "rb");
+    FILE* file = platformOpenStorageFile(directory, name, "rb");
     if (!file)
     {
         return true;
@@ -637,9 +639,9 @@ Java_com_dingoopie_android_DingooPieActivity_nativeRunSaveAutomation(
     env->ReleaseStringUTFChars(appDirectoryText, appChars);
 
     bool directoryClassification =
-        platformAndroidIsPrivateSaveDirectory(appDirectory) &&
-        platformAndroidIsPrivateSaveDirectory(ccDirectory) &&
-        !platformAndroidIsPrivateSaveDirectory(
+        platformIsPrivateStorageDirectory(appDirectory) &&
+        platformIsPrivateStorageDirectory(ccDirectory) &&
+        !platformIsPrivateStorageDirectory(
             "content://automation/tree/authorized-directory");
     const uint8_t initial[] = { 11, 12, 13, 14 };
     const uint8_t appended[] = { 15, 16 };

@@ -1,13 +1,16 @@
-#include "game/game_runtime.h"
-#include "game/game_paths.h"
-#include "config/cheat_runtime.h"
-#include "runtime/debug_log.h"
-#include "config/emulator_options.h"
-#include "config/emulator_settings.h"
-#include "runtime/runtime_log.h"
-#include "frontend/sdl_audio.h"
-#include "frontend/sdl_frontend.h"
-#include "platform_services.h"
+#include "shared/game/game_runtime.h"
+#include "shared/game/game_paths.h"
+#include "config/cheats/cheat_runtime.h"
+#include "shared/diagnostics/debug_log.h"
+#include "config/settings/emulator_options.h"
+#include "config/settings/emulator_settings.h"
+#include "shared/diagnostics/runtime_log.h"
+#include "frontend/audio/sdl_audio.h"
+#include "frontend/shell/frontend_shell.h"
+#include "frontend/video/framebuffer.h"
+#include "shared/platform/storage_services.h"
+#include "shared/platform/lifecycle_services.h"
+#include "shared/platform/automation_services.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,8 +53,8 @@ static void applyStartupDebugSettings(EmulatorSettings* settings, bool externalD
 static void shutdownApplication(void)
 {
     frontendShutdown();
-    platformAndroidRequestApplicationExit();
-    mixerPrepareApplicationExit();
+    platformRequestApplicationExit();
+    audioOutputPrepareApplicationExit();
 }
 
 static bool stopGameRuntimeForTransition(void)
@@ -70,14 +73,14 @@ static bool stopGameRuntimeForTransition(void)
 static void exitAfterRuntimeStopTimeout(void)
 {
     printf("main: runtime stop timed out; requesting controlled process exit\n");
-    platformAndroidRequestApplicationExit();
+    platformRequestApplicationExit();
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     _exit(1);
 }
 
 extern "C" int SDL_main(int, char*[])
 {
-    std::string logDirectory = platformAndroidGetLogDirectory();
+    std::string logDirectory = platformGetLogDirectory();
     if (!logDirectory.empty())
     {
         std::string stdoutPath = logDirectory + "/dingoopie-native.log";
@@ -105,15 +108,16 @@ extern "C" int SDL_main(int, char*[])
     }
     cheatRuntimeSetEnabled(settings.cheatsEnabled || emulatorEnvEnabled("DINGOO_PIE_CHEATS"));
     emulatorApplySharedRuntimeSettings(settings);
-    mixerSetValidationCaptureEnabled(
-        platformAndroidConsumeAudioValidationAutomationEnabled());
+    framebufferSetProfileEnabled(runtimeLogProfileEnabled());
+    audioOutputSetValidationCaptureEnabled(
+        platformConsumeAudioValidationAutomationEnabled());
 
-    std::string selectedGamePath = platformAndroidConsumeGameAutomationPath();
+    std::string selectedGamePath = platformConsumeGameAutomationPath();
     bool gameAutomation = !selectedGamePath.empty();
     bool cheatManagerAutomation = false;
     if (selectedGamePath.empty())
     {
-        selectedGamePath = platformAndroidConsumeCheatManagerAutomationGamePath();
+        selectedGamePath = platformConsumeCheatManagerAutomationGamePath();
         cheatManagerAutomation = !selectedGamePath.empty();
     }
     if (selectedGamePath.empty())

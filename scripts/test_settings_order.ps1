@@ -19,8 +19,8 @@ function Assert-OrderedText {
     }
 }
 
-$settingsHeader = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/emulator_settings.h') -Raw
-$settingsSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/emulator_settings.cpp') -Raw
+$settingsHeader = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/settings/emulator_settings.h') -Raw
+$settingsSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/settings/emulator_settings.cpp') -Raw
 foreach ($removedRecentSymbol in @(
         'EMULATOR_RECENT_GAME_LIMIT', 'lastGamePath', 'recentGamePaths',
         'emulatorRememberRecentGame', 'emulatorRemoveRecentGame',
@@ -56,6 +56,7 @@ $inputFields = @(
     'int virtualControlScalePercent;',
     'VirtualDpadType virtualDpadType;',
     'std::string controllerMapping;',
+    'std::string controllerCalibration;',
     'std::string keyboardMapping;'
 )
 $runtimeFields = @(
@@ -132,6 +133,31 @@ $runtimeRows = @(
     'ANDROID_SETTINGS_BACK,',
     'ANDROID_SETTINGS_ROW_COUNT'
 )
+$controllerMappingRows = @(
+    'ANDROID_CONTROLLER_MAPPING_MENU = 0,',
+    'ANDROID_CONTROLLER_MAPPING_A,',
+    'ANDROID_CONTROLLER_MAPPING_B,',
+    'ANDROID_CONTROLLER_MAPPING_X,',
+    'ANDROID_CONTROLLER_MAPPING_Y,',
+    'ANDROID_CONTROLLER_MAPPING_START,',
+    'ANDROID_CONTROLLER_MAPPING_SELECT,',
+    'ANDROID_CONTROLLER_MAPPING_LEFT_SHOULDER,',
+    'ANDROID_CONTROLLER_MAPPING_RIGHT_SHOULDER,',
+    'ANDROID_CONTROLLER_MAPPING_DPAD_UP,',
+    'ANDROID_CONTROLLER_MAPPING_DPAD_DOWN,',
+    'ANDROID_CONTROLLER_MAPPING_DPAD_LEFT,',
+    'ANDROID_CONTROLLER_MAPPING_DPAD_RIGHT,',
+    'ANDROID_CONTROLLER_MAPPING_RESET,',
+    'ANDROID_CONTROLLER_MAPPING_BACK,',
+    'ANDROID_CONTROLLER_MAPPING_ROW_COUNT'
+)
+$controllerMenuMapping = @(
+    'static const uint32_t kControllerMenuActionMask = 1u << kControllerMenuActionBit;',
+    'targetMask | (sourceMask & kControllerMenuActionMask)',
+    'spec += "=Menu";',
+    'uint32_t gameplayMask = mappingMask & ~kControllerMenuActionMask;',
+    'updateGameControllerMenuAction();'
+)
 $noiseReductionValues = @(
     'DIGITAL_NOISE_REDUCTION_HIGH = 0,',
     'DIGITAL_NOISE_REDUCTION_MEDIUM,',
@@ -145,10 +171,10 @@ $noiseReductionText = @(
     'ANDROID_TEXT_AUDIO_DIGITAL_NOISE_REDUCTION_LOW,'
 )
 $audioApply = @(
-    'mixerSetMasterVolumePercent(settings.audioVolumePercent);',
-    'mixerSetBufferSamples(settings.audioBufferSamples);',
-    'mixerSetAudioEffect(settings.audioEffect);',
-    'mixerSetDigitalNoiseReduction(settings.digitalNoiseReduction);'
+    'audioOutputSetMasterVolumePercent(settings.audioVolumePercent);',
+    'audioOutputSetBufferSamples(settings.audioBufferSamples);',
+    'audioOutputSetEffect(settings.audioEffect);',
+    'audioOutputSetNoiseReduction(settings.digitalNoiseReduction);'
 )
 $managedIniSections = @(
     '"video", "audio", "input", "runtime", "cheats", "ui", "debug"'
@@ -195,25 +221,27 @@ $runtimeIniLoad = @(
     'readIniBool("runtime", "cheats_enabled"'
 )
 
-Assert-OrderedText 'native\core\config\emulator_settings.h' $noiseReductionValues
-Assert-OrderedText 'native\core\config\emulator_settings.h' $cpuClockValues
-Assert-OrderedText 'native\core\config\emulator_settings.h' $videoFields
-Assert-OrderedText 'native\core\config\emulator_settings.h' $audioFields
-Assert-OrderedText 'native\core\config\emulator_settings.h' $inputFields
-Assert-OrderedText 'native\core\config\emulator_settings.h' $runtimeFields
-Assert-OrderedText 'native\core\config\emulator_settings.cpp' $audioDefaults
-Assert-OrderedText 'native\core\config\emulator_settings.cpp' $audioIniLoad
-Assert-OrderedText 'native\core\config\emulator_settings.cpp' $managedIniSections
-Assert-OrderedText 'native\core\config\emulator_settings.cpp' $videoIniWrite
-Assert-OrderedText 'native\core\config\emulator_settings.cpp' $audioIniWrite
-Assert-OrderedText 'native\core\config\emulator_settings.cpp' $inputIniWrite
-Assert-OrderedText 'native\core\config\emulator_settings.cpp' $runtimeIniLoad
-Assert-OrderedText 'native\core\config\emulator_settings.cpp' $runtimeIniWrite
-Assert-OrderedText 'native\core\frontend\menu_model.h' $videoRows
-Assert-OrderedText 'native\core\frontend\menu_model.h' $audioRows
-Assert-OrderedText 'native\core\frontend\menu_model.h' $inputRows
-Assert-OrderedText 'native\core\frontend\menu_model.h' $runtimeRows
-Assert-OrderedText 'native\core\frontend\menu_strings.h' $noiseReductionText
-Assert-OrderedText 'native\core\frontend\sdl_frontend.cpp' $audioApply
+Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $noiseReductionValues
+Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $cpuClockValues
+Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $videoFields
+Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $audioFields
+Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $inputFields
+Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $runtimeFields
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $audioDefaults
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $audioIniLoad
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $managedIniSections
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $videoIniWrite
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $audioIniWrite
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $inputIniWrite
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $runtimeIniLoad
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $runtimeIniWrite
+Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $videoRows
+Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $audioRows
+Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $inputRows
+Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $controllerMappingRows
+Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $runtimeRows
+Assert-OrderedText 'native\core\frontend\menu\menu_strings.h' $noiseReductionText
+Assert-OrderedText 'native\core\frontend\shell\frontend_shell.cpp' $audioApply
+Assert-OrderedText 'native\core\frontend\shell\frontend_shell.cpp' $controllerMenuMapping
 
 Write-Host 'Settings, INI, enum, and menu order validation passed.'

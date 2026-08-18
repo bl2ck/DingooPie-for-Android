@@ -235,8 +235,8 @@ $armTest = Join-Path $resolvedOutputDirectory 'cc-arm-interpreter-test-x86_64'
 & $compiler -std=c++11 -O2 -Wall -Wextra -Werror -static-libstdc++ `
     -I (Join-Path $projectRoot 'native\core') `
     (Join-Path $projectRoot 'tests\cc_arm_interpreter_test.cpp') `
-    (Join-Path $projectRoot 'native\core\cc\arm32_interpreter.cpp') `
-    (Join-Path $projectRoot 'native\core\guest\guest_package.cpp') `
+    (Join-Path $projectRoot 'native\core\cc\cpu\arm32_interpreter.cpp') `
+    (Join-Path $projectRoot 'native\core\shared\services\guest_package.cpp') `
     -o $armTest
 if ($LASTEXITCODE -ne 0) {
     throw 'CC ARM interpreter regression test compilation failed.'

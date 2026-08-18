@@ -1,4 +1,4 @@
-#include "runtime/thread_join.h"
+#include "shared/execution/thread_join.h"
 
 #include <chrono>
 #include <pthread.h>

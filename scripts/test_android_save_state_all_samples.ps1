@@ -81,66 +81,6 @@ function Get-ChangedPixelRatio {
     }
 }
 
-function Wait-UiText {
-    param([string]$Text, [int]$TimeoutSeconds = 20)
-    $dumpPath = '/sdcard/dingoopie-save-state-window.xml'
-    $hostDumpPath = Join-Path $OutputDirectory 'window.xml'
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
-        Invoke-Adb shell uiautomator dump $dumpPath | Out-Null
-        Invoke-Adb pull $dumpPath $hostDumpPath | Out-Null
-        $content = Get-Content -LiteralPath $hostDumpPath -Raw
-        $pattern = 'text="' + [regex]::Escape($Text) +
-            '"[^>]*bounds="(\[\d+,\d+\]\[\d+,\d+\])"'
-        $match = [regex]::Match($content, $pattern)
-        if ($match.Success) {
-            return $match.Groups[1].Value
-        }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    throw "Timed out waiting for dialog text: $Text"
-}
-
-function Tap-UiText {
-    param([string]$Text, [int]$TimeoutSeconds = 20)
-    $bounds = Wait-UiText -Text $Text -TimeoutSeconds $TimeoutSeconds
-    if ($bounds -notmatch '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$') {
-        throw "Invalid bounds for dialog text '$Text': $bounds"
-    }
-    $x = [int](($Matches[1] + $Matches[3]) / 2)
-    $y = [int](($Matches[2] + $Matches[4]) / 2)
-    Invoke-Adb shell input tap $x $y | Out-Null
-}
-
-function Tap-FirstUiText {
-    param([string[]]$Texts, [int]$TimeoutSeconds = 20)
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
-        $dumpPath = '/sdcard/dingoopie-save-state-window.xml'
-        $hostDumpPath = Join-Path $OutputDirectory 'window.xml'
-        Invoke-Adb shell uiautomator dump $dumpPath | Out-Null
-        Invoke-Adb pull $dumpPath $hostDumpPath | Out-Null
-        $content = Get-Content -LiteralPath $hostDumpPath -Raw
-        foreach ($text in $Texts) {
-            $pattern = 'text="' + [regex]::Escape($text) +
-                '"[^>]*bounds="(\[\d+,\d+\]\[\d+,\d+\])"'
-            $match = [regex]::Match($content, $pattern)
-            if ($match.Success) {
-                $bounds = $match.Groups[1].Value
-                if ($bounds -notmatch '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$') {
-                    throw "Invalid bounds for dialog text '$text': $bounds"
-                }
-                $x = [int](($Matches[1] + $Matches[3]) / 2)
-                $y = [int](($Matches[2] + $Matches[4]) / 2)
-                Invoke-Adb shell input tap $x $y | Out-Null
-                return $text
-            }
-        }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    throw "Timed out waiting for any dialog text: $($Texts -join ', ')"
-}
-
 function Wait-UiResource {
     param([string]$ResourceId, [int]$TimeoutSeconds = 60)
     $dumpPath = '/sdcard/dingoopie-save-state-window.xml'
@@ -171,17 +111,6 @@ function Tap-UiResource {
     $x = [int](($Matches[1] + $Matches[3]) / 2)
     $y = [int](($Matches[2] + $Matches[4]) / 2)
     Invoke-Adb shell input tap $x $y | Out-Null
-}
-
-function Wait-LogText {
-    param([string]$Text, [int]$TimeoutSeconds = 20)
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
-        $log = (& $AdbPath -s $Serial logcat -d 2>&1) -join "`n"
-        if ($log.Contains($Text)) { return }
-        Start-Sleep -Milliseconds 500
-    } while ((Get-Date) -lt $deadline)
-    throw "Timed out waiting for log text: $Text"
 }
 
 function Invoke-SampleTest {

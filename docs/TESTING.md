@@ -248,8 +248,8 @@ execution failure and is validated through the native runtime log instead.
 
 ## Menu Structure
 
-`native/core/frontend/menu_model.h` is the source of truth for visible menu row
-indices. When a menu changes, verify the same order in `menu_overlay.inl`, the
+`native/core/frontend/menu/menu_model.h` is the source of truth for visible menu row
+indices. When a menu changes, verify the same order in `native/core/frontend/menu/menu_overlay.cpp`, the
 selection handler, `EmulatorSettings`, INI load/save tracing, and both UI
 languages. `-VerifySharedSettings` provides the runtime-side ordering and value
 application check.
@@ -278,6 +278,7 @@ Repository text files must be UTF-8 without BOM, use CRLF line endings, and end 
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_text_format.ps1
+powershell -ExecutionPolicy Bypass -File scripts/check_core_architecture.ps1
 ```
 
 Use `-Fix` to normalize detected text files before the final validation.

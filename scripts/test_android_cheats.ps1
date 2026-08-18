@@ -106,8 +106,8 @@ $testBinary = Join-Path $env:TEMP 'dingoopie-cheat-engine-test'
 & $compiler '-std=c++11' '-O2' '-static-libstdc++' '-I' `
     (Join-Path $projectRoot 'native\core') `
     (Join-Path $projectRoot 'tests\cheat_engine_test.cpp') `
-    (Join-Path $projectRoot 'native\core\config\cheat_engine.cpp') `
-    (Join-Path $projectRoot 'native\core\game\game_paths.cpp') `
+    (Join-Path $projectRoot 'native\core\config\cheats\cheat_engine.cpp') `
+    (Join-Path $projectRoot 'native\core\shared\game\game_paths.cpp') `
     '-o' $testBinary
 if ($LASTEXITCODE -ne 0) {
     throw 'Failed to compile the Android cheat engine test.'

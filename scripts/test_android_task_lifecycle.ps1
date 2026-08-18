@@ -38,7 +38,7 @@ $null = New-Item -ItemType Directory -Force -Path $outputDirectory
 $nativeTest = Join-Path $outputDirectory 'task-thread-lifecycle-test-x86_64'
 $includeRoot = Join-Path $projectRoot 'native\core'
 $testSource = Join-Path $projectRoot 'tests\task_thread_lifecycle_test.cpp'
-$lifecycleSource = Join-Path $projectRoot 'native\core\app\task_thread_lifecycle.cpp'
+$lifecycleSource = Join-Path $projectRoot 'native\core\app\hle\app_task_lifecycle.cpp'
 
 & $compiler -std=c++17 -O2 -pthread -static-libstdc++ `
     -I $includeRoot $testSource $lifecycleSource -o $nativeTest

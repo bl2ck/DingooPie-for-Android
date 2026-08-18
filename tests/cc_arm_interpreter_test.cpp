@@ -1,6 +1,6 @@
-#include "guest/guest_package.h"
-#include "cc/arm32_interpreter.h"
-#include "cc/cc_package_layout.h"
+#include "shared/services/guest_package.h"
+#include "cc/cpu/arm32_interpreter.h"
+#include "cc/memory/cc_memory_layout.h"
 
 #include <stdio.h>
 #include <stdlib.h>

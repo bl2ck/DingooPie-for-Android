@@ -34,9 +34,12 @@ $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $AdbPath = (Resolve-Path -LiteralPath $AdbPath).Path
 $profileBackupPath = Join-Path $OutputDirectory 'settings-backup.ini'
 $profileDevicePath = '/data/local/tmp/dingoopie-cc-3d-profile.ini'
+$profileDeviceBackupPath = 'files/DingooPie.profile-backup.ini'
 
 function Set-DebugProfile {
     if (!$EnableProfile) { return }
+    Invoke-Adb shell run-as com.dingoopie.android cp `
+        files/DingooPie.ini $profileDeviceBackupPath | Out-Null
     $settings = (Invoke-Adb shell run-as com.dingoopie.android cat files/DingooPie.ini) -join "`r`n"
     [System.IO.File]::WriteAllText($profileBackupPath, $settings,
         [System.Text.UTF8Encoding]::new($false))
@@ -50,11 +53,12 @@ function Set-DebugProfile {
 
 function Restore-DebugProfile {
     if (!$EnableProfile -or !(Test-Path -LiteralPath $profileBackupPath)) { return }
-    $restoreDevicePath = '/data/local/tmp/dingoopie-cc-3d-profile-restore.ini'
     try {
-        Invoke-Adb push $profileBackupPath $restoreDevicePath | Out-Null
-        Invoke-Adb shell run-as com.dingoopie.android cp $restoreDevicePath files/DingooPie.ini | Out-Null
-        Invoke-Adb shell rm $restoreDevicePath $profileDevicePath | Out-Null
+        Invoke-Adb shell run-as com.dingoopie.android cp `
+            $profileDeviceBackupPath files/DingooPie.ini | Out-Null
+        Invoke-Adb shell run-as com.dingoopie.android rm `
+            $profileDeviceBackupPath | Out-Null
+        Invoke-Adb shell rm $profileDevicePath | Out-Null
     } catch {
         Write-Warning "Could not restore DingooPie.ini after profile run: $($_.Exception.Message)"
     }

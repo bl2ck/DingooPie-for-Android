@@ -28,7 +28,7 @@ $nativeTest = Join-Path $outputDirectory 'thread-join-test-x86_64'
 & $compiler -std=c++17 -O2 -pthread -static-libstdc++ `
     -I (Join-Path $projectRoot 'native\core') `
     (Join-Path $projectRoot 'tests\thread_join_test.cpp') `
-    (Join-Path $projectRoot 'native\core\runtime\thread_join.cpp') `
+    (Join-Path $projectRoot 'native\core\shared\execution\thread_join.cpp') `
     -o $nativeTest
 if ($LASTEXITCODE -ne 0) { throw 'Thread join regression compilation failed.' }
 

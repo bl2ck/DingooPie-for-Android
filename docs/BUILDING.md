@@ -87,4 +87,5 @@ Repository text files use UTF-8 without a byte-order mark, CRLF line endings, an
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_text_format.ps1
+powershell -ExecutionPolicy Bypass -File scripts/check_core_architecture.ps1
 ```

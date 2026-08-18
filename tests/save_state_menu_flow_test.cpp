@@ -1,4 +1,4 @@
-#include "frontend/menu_model.h"
+#include "frontend/menu/menu_model.h"
 
 static_assert(!androidSaveStateActionReturnsToGame(true, true),
     "saving a state must keep the save-state menu open");

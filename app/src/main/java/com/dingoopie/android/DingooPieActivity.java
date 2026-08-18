@@ -1576,6 +1576,8 @@ public final class DingooPieActivity extends SDLActivity {
                     if (parent == null || (!parent.exists() && !parent.mkdirs())) {
                         return -1;
                     }
+                } else if (!file.isFile()) {
+                    return -1;
                 }
                 try (java.io.RandomAccessFile random = new java.io.RandomAccessFile(
                         file, writing ? "rw" : "r")) {
