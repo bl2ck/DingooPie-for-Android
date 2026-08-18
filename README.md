@@ -99,7 +99,7 @@ adb shell am start -n com.dingoopie.android/.DingooPieActivity `
 
 ### 菜单与配置
 
-- `游戏库`：添加游戏目录、导入单个游戏、启动游戏、移除条目和刷新扫描结果。
+- `游戏库`：添加、启动、移除及刷新游戏；方向键可循环选择或按住滚动，停止后确认运行。
 - `主菜单`：选项、设置、关于、退出应用和返回。
 - `暂停菜单`：即时存档、切换游戏、重启游戏、选项、设置、退出应用和返回游戏。
 - `选项`：视频、音频、输入、恢复默认设置和返回。
@@ -303,7 +303,7 @@ token. Addresses in the `192.168.*` range are listed first.
 
 ### Menu And Configuration
 
-- `Game Library`: add folders, import a game, launch games, remove entries, and refresh scans.
+- `Game Library`: add, launch, remove, and refresh games. Use directional keys to select or hold to scroll, then confirm after scrolling stops.
 - `Main Menu`: Options, Settings, About, Exit App, and Back.
 - `Pause Menu`: instant saves, switch game, restart, options, settings, exit, and return to the game.
 - `Options`: Video, Audio, Input, Restore Default Settings, and Back.

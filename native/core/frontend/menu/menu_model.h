@@ -29,6 +29,30 @@ constexpr bool androidSaveStateActionReturnsToGame(bool saving, bool succeeded)
     return !saving && succeeded;
 }
 
+constexpr int androidDirectionalSelectionRow(
+    int selectedRow, int rowCount, int direction, bool selectionVisible)
+{
+    if (rowCount <= 0 || direction == 0)
+    {
+        return -1;
+    }
+    if (!selectionVisible || selectedRow < 0 || selectedRow >= rowCount)
+    {
+        return direction < 0 ? rowCount - 1 : 0;
+    }
+    if (direction < 0)
+    {
+        return selectedRow == 0 ? rowCount - 1 : selectedRow - 1;
+    }
+    return selectedRow + 1 == rowCount ? 0 : selectedRow + 1;
+}
+
+constexpr bool androidNavigationCanActivate(
+    bool directionHeld, bool scrollDragging, bool scrollMoving)
+{
+    return !directionHeld && !scrollDragging && !scrollMoving;
+}
+
 enum AndroidMainMenuRow
 {
     ANDROID_MAIN_OPTIONS = 0,

@@ -108,6 +108,8 @@ static const uint32_t kMinimizedThrottleLoopDelayMs = 50;
 static const uint64_t kIdlePresentIntervalUs = 16667;
 static const uint64_t kIdleWakeMarginUs = 2000;
 static const uint32_t kIdleMaxWaitMs = 4;
+static const uint64_t kAndroidNavigationRepeatDelayMs = 350;
+static const uint64_t kAndroidNavigationRepeatIntervalMs = 80;
 static const int kBlurredBackdropWidth = SCREEN_WIDTH / 4;
 static const int kBlurredBackdropHeight = SCREEN_HEIGHT / 4;
 static const double kPi = 3.14159265358979323846;
@@ -727,6 +729,8 @@ std::vector<std::string> g_androidGamePaths;
 static bool g_androidGameImportPending = false;
 static bool g_androidGameLibraryScanWasActive = false;
 static int g_androidLibraryScrollOffset = 0;
+static int g_androidLibrarySelectedRow = 0;
+static bool g_androidLibrarySelectionHighlightVisible = false;
 static bool g_androidLibraryScrollDragging = false;
 static bool g_androidLibraryScrollMoved = false;
 static int g_androidLibraryScrollStartY = 0;
@@ -740,6 +744,19 @@ static int g_androidMenuScrollStartY = 0;
 static int g_androidMenuScrollStartOffset = 0;
 int g_androidMenuSelectedRow = 0;
 bool g_androidMenuSelectionHighlightVisible = false;
+
+struct AndroidNavigationRepeatState
+{
+    int direction;
+    bool fromController;
+    SDL_Scancode scancode;
+    SDL_GameControllerButton button;
+    uint64_t nextTicks;
+};
+
+static AndroidNavigationRepeatState g_androidNavigationRepeat = {
+    0, false, SDL_SCANCODE_UNKNOWN, SDL_CONTROLLER_BUTTON_INVALID, 0
+};
 
 struct AndroidSystemTextTexture
 {
@@ -1645,6 +1662,33 @@ static void clampAndroidLibraryScroll(int width, int height)
     if (g_androidLibraryScrollOffset > maxScroll) g_androidLibraryScrollOffset = maxScroll;
 }
 
+static void ensureAndroidLibrarySelectionVisible(void)
+{
+    if (!g_renderer || g_androidGamePaths.empty())
+    {
+        return;
+    }
+
+    int width = 0;
+    int height = 0;
+    SDL_GetRendererOutputSize(g_renderer, &width, &height);
+    AndroidLibraryLayout layout = androidLibraryLayout(width, height);
+    int rowTop = g_androidLibrarySelectedRow * layout.rowStep;
+    int rowBottom = rowTop + layout.rowHeight;
+    int viewportTop = g_androidLibraryScrollOffset;
+    int viewportBottom = viewportTop + layout.viewportHeight;
+    if (rowTop < viewportTop)
+    {
+        g_androidLibraryScrollOffset = rowTop;
+    }
+    else if (rowBottom > viewportBottom)
+    {
+        g_androidLibraryScrollOffset = rowBottom - layout.viewportHeight;
+    }
+    clampAndroidLibraryScroll(width, height);
+    g_androidLibraryScrollVelocity = 0.0f;
+}
+
 static void updateAndroidLibraryScrollInertia(int width, int height)
 {
     if (g_androidLibraryScrollDragging || fabs(g_androidLibraryScrollVelocity) < 0.05f)
@@ -1852,7 +1896,16 @@ static void refreshAndroidGameLibrary(void)
 {
     g_androidGamePaths.clear();
     appendAndroidPersistedGamePaths();
-
+    if (g_androidGamePaths.empty())
+    {
+        g_androidLibrarySelectedRow = 0;
+        g_androidLibrarySelectionHighlightVisible = false;
+        g_androidLibraryScrollOffset = 0;
+    }
+    else if (g_androidLibrarySelectedRow >= (int)g_androidGamePaths.size())
+    {
+        g_androidLibrarySelectedRow = (int)g_androidGamePaths.size() - 1;
+    }
 }
 
 static std::string androidGameDisplayName(const std::string& path)
@@ -2127,8 +2180,12 @@ static bool drawAndroidLibraryScreen(void)
         for (int i = firstRow; i < lastRow; ++i)
         {
             SDL_Rect card = androidLibraryRowRect(width, height, i);
-            drawAndroidRect(card, itemBackground);
-            drawAndroidOutline(card, itemBackgroundBorder);
+            bool selected = g_androidLibrarySelectionHighlightVisible &&
+                i == g_androidLibrarySelectedRow;
+            drawAndroidRect(card, selected ? SDL_Color{ 50, 112, 180, 255 } :
+                itemBackground);
+            drawAndroidOutline(card, selected ? SDL_Color{ 150, 215, 255, 255 } :
+                itemBackgroundBorder);
             int iconSize = std::max(32 * scale, card.h - 16 * scale);
             SDL_Rect icon = { card.x + 10 * scale, card.y + (card.h - iconSize) / 2,
                 iconSize, iconSize };
@@ -2301,11 +2358,6 @@ static void hideAndroidMenuSelectionHighlight(void)
 
 static void moveAndroidMenuSelection(int direction)
 {
-    if (!g_androidMenuSelectionHighlightVisible)
-    {
-        selectAndroidMenuRow(0, true);
-        return;
-    }
     if (g_androidMenuScreen == ANDROID_MENU_ABOUT)
     {
         selectAndroidMenuRow(ANDROID_ABOUT_BACK, true);
@@ -2316,12 +2368,42 @@ static void moveAndroidMenuSelection(int direction)
     {
         return;
     }
-    int nextRow = (g_androidMenuSelectedRow + direction) % rowCount;
+    int nextRow = androidDirectionalSelectionRow(g_androidMenuSelectedRow,
+        rowCount, direction, g_androidMenuSelectionHighlightVisible);
+    if (nextRow >= 0)
+    {
+        selectAndroidMenuRow(nextRow, true);
+    }
+}
+
+static void hideAndroidLibrarySelectionHighlight(void)
+{
+    g_androidLibrarySelectionHighlightVisible = false;
+}
+
+static void moveAndroidLibrarySelection(int direction)
+{
+    int nextRow = androidDirectionalSelectionRow(g_androidLibrarySelectedRow,
+        (int)g_androidGamePaths.size(), direction,
+        g_androidLibrarySelectionHighlightVisible);
     if (nextRow < 0)
     {
-        nextRow += rowCount;
+        return;
     }
-    selectAndroidMenuRow(nextRow, true);
+    g_androidLibrarySelectedRow = nextRow;
+    g_androidLibrarySelectionHighlightVisible = true;
+    ensureAndroidLibrarySelectionVisible();
+}
+
+static void activateAndroidLibrarySelection(void)
+{
+    if (isAndroidGameLibraryScanning() || g_androidGamePaths.empty())
+    {
+        return;
+    }
+    g_androidLibrarySelectedRow = std::max(0, std::min(
+        (int)g_androidGamePaths.size() - 1, g_androidLibrarySelectedRow));
+    requestAndroidGame(g_androidGamePaths[(size_t)g_androidLibrarySelectedRow]);
 }
 
 static void activateAndroidMenuSelection(void)
@@ -2368,55 +2450,227 @@ static void activateAndroidMenuSelection(void)
     }
 }
 
+static int androidNavigationDirection(SDL_Scancode scancode)
+{
+    if (scancode == SDL_SCANCODE_UP || scancode == SDL_SCANCODE_LEFT)
+    {
+        return -1;
+    }
+    if (scancode == SDL_SCANCODE_DOWN || scancode == SDL_SCANCODE_RIGHT)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static int androidNavigationDirection(SDL_GameControllerButton button)
+{
+    if (button == SDL_CONTROLLER_BUTTON_DPAD_UP ||
+        button == SDL_CONTROLLER_BUTTON_DPAD_LEFT)
+    {
+        return -1;
+    }
+    if (button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ||
+        button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static void moveAndroidNavigationSelection(int direction)
+{
+    if (g_androidMenuScreen == ANDROID_MENU_LIBRARY)
+    {
+        moveAndroidLibrarySelection(direction);
+    }
+    else
+    {
+        moveAndroidMenuSelection(direction);
+    }
+}
+
+static void resetAndroidNavigationRepeat(void)
+{
+    g_androidNavigationRepeat = {
+        0, false, SDL_SCANCODE_UNKNOWN, SDL_CONTROLLER_BUTTON_INVALID, 0
+    };
+}
+
+static void beginAndroidNavigationRepeat(
+    int direction, SDL_Scancode scancode)
+{
+    g_androidNavigationRepeat.direction = direction;
+    g_androidNavigationRepeat.fromController = false;
+    g_androidNavigationRepeat.scancode = scancode;
+    g_androidNavigationRepeat.button = SDL_CONTROLLER_BUTTON_INVALID;
+    g_androidNavigationRepeat.nextTicks = SDL_GetTicks64() +
+        kAndroidNavigationRepeatDelayMs;
+}
+
+static void beginAndroidNavigationRepeat(
+    int direction, SDL_GameControllerButton button)
+{
+    g_androidNavigationRepeat.direction = direction;
+    g_androidNavigationRepeat.fromController = true;
+    g_androidNavigationRepeat.scancode = SDL_SCANCODE_UNKNOWN;
+    g_androidNavigationRepeat.button = button;
+    g_androidNavigationRepeat.nextTicks = SDL_GetTicks64() +
+        kAndroidNavigationRepeatDelayMs;
+}
+
+static void updateAndroidNavigationRepeat(void)
+{
+    if (g_androidNavigationRepeat.direction == 0)
+    {
+        return;
+    }
+    if (g_androidMenuScreen == ANDROID_MENU_NONE || g_controllerMappingPending ||
+        g_controllerCalibrationStage != CONTROLLER_CALIBRATION_IDLE)
+    {
+        resetAndroidNavigationRepeat();
+        return;
+    }
+
+    uint64_t now = SDL_GetTicks64();
+    if (now < g_androidNavigationRepeat.nextTicks)
+    {
+        return;
+    }
+    moveAndroidNavigationSelection(g_androidNavigationRepeat.direction);
+    g_androidNavigationRepeat.nextTicks = now + kAndroidNavigationRepeatIntervalMs;
+}
+
+static bool canActivateAndroidNavigationSelection(void)
+{
+    bool library = g_androidMenuScreen == ANDROID_MENU_LIBRARY;
+    return androidNavigationCanActivate(
+        g_androidNavigationRepeat.direction != 0,
+        library && g_androidLibraryScrollDragging,
+        library && fabs(g_androidLibraryScrollVelocity) >= 0.05f);
+}
+
+static void activateAndroidNavigationSelection(void)
+{
+    if (!canActivateAndroidNavigationSelection())
+    {
+        return;
+    }
+    if (g_androidMenuScreen == ANDROID_MENU_LIBRARY)
+    {
+        activateAndroidLibrarySelection();
+    }
+    else
+    {
+        activateAndroidMenuSelection();
+    }
+}
+
 static bool handleAndroidMenuNavigationEvent(const SDL_Event& ev)
 {
-    if (g_androidMenuScreen == ANDROID_MENU_NONE ||
-        g_androidMenuScreen == ANDROID_MENU_LIBRARY)
+    if (g_androidMenuScreen == ANDROID_MENU_NONE)
     {
+        resetAndroidNavigationRepeat();
         return false;
     }
     if (g_controllerMappingPending ||
         g_controllerCalibrationStage != CONTROLLER_CALIBRATION_IDLE)
     {
+        resetAndroidNavigationRepeat();
         return false;
     }
-    if (ev.type == SDL_CONTROLLERBUTTONDOWN &&
+    if ((ev.type == SDL_CONTROLLERBUTTONDOWN ||
+            ev.type == SDL_CONTROLLERBUTTONUP) &&
         ev.cbutton.which != activeGameControllerInstanceId())
     {
         return false;
     }
 
-    bool pressed = ev.type == SDL_KEYDOWN || ev.type == SDL_CONTROLLERBUTTONDOWN;
-    if (!pressed || (ev.type == SDL_KEYDOWN && ev.key.repeat))
+    if (ev.type == SDL_KEYUP)
+    {
+        int direction = androidNavigationDirection(ev.key.keysym.scancode);
+        if (direction == 0)
+        {
+            return false;
+        }
+        if (!g_androidNavigationRepeat.fromController &&
+            ev.key.keysym.scancode == g_androidNavigationRepeat.scancode)
+        {
+            resetAndroidNavigationRepeat();
+        }
+        return true;
+    }
+    if (ev.type == SDL_CONTROLLERBUTTONUP)
+    {
+        SDL_GameControllerButton button =
+            (SDL_GameControllerButton)ev.cbutton.button;
+        int direction = androidNavigationDirection(button);
+        if (direction == 0)
+        {
+            return false;
+        }
+        if (g_androidNavigationRepeat.fromController &&
+            button == g_androidNavigationRepeat.button)
+        {
+            resetAndroidNavigationRepeat();
+        }
+        return true;
+    }
+    if (ev.type == SDL_KEYDOWN)
+    {
+        SDL_Scancode scancode = ev.key.keysym.scancode;
+        int direction = androidNavigationDirection(scancode);
+        if (direction != 0)
+        {
+            if (!ev.key.repeat)
+            {
+                moveAndroidNavigationSelection(direction);
+                beginAndroidNavigationRepeat(direction, scancode);
+            }
+            return true;
+        }
+        if (ev.key.repeat)
+        {
+            return true;
+        }
+        if (scancode == SDL_SCANCODE_RETURN || scancode == SDL_SCANCODE_SPACE ||
+            scancode == SDL_SCANCODE_A)
+        {
+            activateAndroidNavigationSelection();
+        }
+        else if (scancode == SDL_SCANCODE_B || scancode == SDL_SCANCODE_ESCAPE ||
+            scancode == SDL_SCANCODE_AC_BACK)
+        {
+            if (g_androidMenuScreen == ANDROID_MENU_LIBRARY) return false;
+            navigateBackAndroidMenu();
+        }
+        else return false;
+        return true;
+    }
+    if (ev.type != SDL_CONTROLLERBUTTONDOWN)
     {
         return false;
     }
 
-    if (ev.type == SDL_KEYDOWN)
+    SDL_GameControllerButton button =
+        (SDL_GameControllerButton)ev.cbutton.button;
+    int direction = androidNavigationDirection(button);
+    if (direction != 0)
     {
-        SDL_Scancode scancode = ev.key.keysym.scancode;
-        if (scancode == SDL_SCANCODE_UP) moveAndroidMenuSelection(-1);
-        else if (scancode == SDL_SCANCODE_DOWN) moveAndroidMenuSelection(1);
-        else if (scancode == SDL_SCANCODE_LEFT) moveAndroidMenuSelection(-1);
-        else if (scancode == SDL_SCANCODE_RIGHT) moveAndroidMenuSelection(1);
-        else if (scancode == SDL_SCANCODE_RETURN || scancode == SDL_SCANCODE_SPACE ||
-            scancode == SDL_SCANCODE_A) activateAndroidMenuSelection();
-        else if (scancode == SDL_SCANCODE_B || scancode == SDL_SCANCODE_ESCAPE ||
-            scancode == SDL_SCANCODE_AC_BACK) navigateBackAndroidMenu();
-        else return false;
+        moveAndroidNavigationSelection(direction);
+        beginAndroidNavigationRepeat(direction, button);
         return true;
     }
-
-    switch ((SDL_GameControllerButton)ev.cbutton.button)
+    if (button == SDL_CONTROLLER_BUTTON_A)
     {
-    case SDL_CONTROLLER_BUTTON_DPAD_UP: moveAndroidMenuSelection(-1); break;
-    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: moveAndroidMenuSelection(1); break;
-    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: moveAndroidMenuSelection(-1); break;
-    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: moveAndroidMenuSelection(1); break;
-    case SDL_CONTROLLER_BUTTON_A: activateAndroidMenuSelection(); break;
-    case SDL_CONTROLLER_BUTTON_B: navigateBackAndroidMenu(); break;
-    default: return false;
+        activateAndroidNavigationSelection();
     }
+    else if (button == SDL_CONTROLLER_BUTTON_B)
+    {
+        if (g_androidMenuScreen == ANDROID_MENU_LIBRARY) return false;
+        navigateBackAndroidMenu();
+    }
+    else return false;
     return true;
 }
 
@@ -3923,6 +4177,8 @@ static bool handleAndroidMenuEvent(const SDL_Event& ev)
     if (!frontendGameRunning() && g_androidMenuScreen == ANDROID_MENU_LIBRARY &&
         ev.type == SDL_MOUSEWHEEL)
     {
+        resetAndroidNavigationRepeat();
+        hideAndroidLibrarySelectionHighlight();
         int width = 0;
         int height = 0;
         SDL_GetRendererOutputSize(g_renderer, &width, &height);
@@ -3936,6 +4192,7 @@ static bool handleAndroidMenuEvent(const SDL_Event& ev)
     }
     if (androidMenuScreenHasSettingsList() && ev.type == SDL_MOUSEWHEEL)
     {
+        resetAndroidNavigationRepeat();
         int width = 0;
         int height = 0;
         SDL_GetRendererOutputSize(g_renderer, &width, &height);
@@ -3952,6 +4209,10 @@ static bool handleAndroidMenuEvent(const SDL_Event& ev)
     {
         return g_androidMenuScreen != ANDROID_MENU_NONE &&
             (ev.type == SDL_FINGERMOTION || ev.type == SDL_MOUSEMOTION);
+    }
+    if (!released && (ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_FINGERDOWN))
+    {
+        resetAndroidNavigationRepeat();
     }
 
     int width = 0;
@@ -3986,6 +4247,11 @@ static bool handleAndroidMenuEvent(const SDL_Event& ev)
     }
     if (!frontendGameRunning() && g_androidMenuScreen == ANDROID_MENU_LIBRARY)
     {
+        if (ev.type == SDL_MOUSEWHEEL || ev.type == SDL_MOUSEBUTTONDOWN ||
+            ev.type == SDL_FINGERDOWN)
+        {
+            hideAndroidLibrarySelectionHighlight();
+        }
         AndroidLibraryLayout layout = androidLibraryLayout(width, height);
         const int viewportHeight = layout.viewportHeight;
         SDL_Rect viewport = { 0, layout.top, width, viewportHeight };
@@ -6086,6 +6352,7 @@ static void handleGameControllerDeviceRemoved(SDL_JoystickID instanceId)
     {
         return;
     }
+    resetAndroidNavigationRepeat();
     if (g_controllerMappingPending)
     {
         cancelControllerMapping();
@@ -7672,6 +7939,7 @@ void frontendRunLoop(const EmulatorOptions& options)
                             (unsigned int)ev.window.event);
                     }
                     releaseFrontendInputControls();
+                    resetAndroidNavigationRepeat();
                     if (ev.window.event == SDL_WINDOWEVENT_MINIMIZED &&
                         frontendGameRunning() &&
                         currentMinimizedBehavior() == MINIMIZED_BEHAVIOR_PAUSE)
@@ -7746,6 +8014,8 @@ void frontendRunLoop(const EmulatorOptions& options)
             SDL_Delay(1);
             continue;
         }
+
+        updateAndroidNavigationRepeat();
 
         if (frontendGamePaused()
             && g_androidMenuScreen == ANDROID_MENU_NONE
