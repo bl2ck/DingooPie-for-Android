@@ -15,9 +15,45 @@ CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM
 1. 安装 `DingooPie.apk` 并启动。
 2. 在游戏库中添加游戏目录，或导入单个 `.app` / `.cc` 文件。
 3. 授予 Android 文件访问权限，等待扫描完成后点击游戏启动。
-4. 游戏中按 Android 返回键打开暂停菜单，可恢复、重启、切换游戏或调整设置。
+4. 游戏中按 Android 返回键打开暂停菜单，可即时存档、切换游戏、重启、进入选项或设置、退出应用，或返回游戏。
 从可写目录导入的游戏会优先把存档保存在游戏旁边。单文件导入、只读目录或
 目录授权失效时，模拟器会改用应用私有存档目录。移除游戏库条目不会删除原始游戏文件。
+
+### 外部模拟器前端调用
+
+DingooPie 支持由天马 G、Daijishō、Pegasus、自动化工具及其他能够发送 Android
+Intent 的模拟器前端直接启动 `.app` / `.cc` 游戏。前端应配置以下组件：
+
+- 包名：`com.dingoopie.android`
+- Activity：`com.dingoopie.android.DingooPieActivity`
+- 推荐方式：使用 `android.intent.action.VIEW` 传入 `file://` 或 `content://` URI。
+- 显式调用：使用 `com.dingoopie.android.action.LAUNCH_GAME`，并通过 `gamePath`、
+  `path`、`rom`、`ROM`、`game`、`GAME`、`file`、`FILE`、`filename` 或 `fullPath`
+  传入游戏路径。
+- 自定义 URI：使用 `dingoopie://launch?path=<编码后的路径>`；查询参数也可使用
+  `gamePath` 或 `rom`。
+- `content://` URI 必须授予临时或持久读取权限。
+- 游戏运行中收到新的外部启动请求时，会正常停止当前游戏并在同一 Activity 中启动新游戏。
+
+RetroArch 通过 libretro 核心加载游戏，而 DingooPie 当前是独立 Android 应用，
+不是 libretro 核心，因此标准 RetroArch 不能直接加载或调用 DingooPie。
+只有能够额外发送上述 Android Intent 的定制版本或配套启动工具才能调用。
+
+示例：
+
+```powershell
+adb shell am start -n com.dingoopie.android/.DingooPieActivity `
+  -a android.intent.action.VIEW `
+  -d "file:///storage/emulated/0/Games/demo.app"
+
+adb shell am start -n com.dingoopie.android/.DingooPieActivity `
+  -a com.dingoopie.android.action.LAUNCH_GAME `
+  --es gamePath "/storage/emulated/0/Games/demo.cc"
+```
+
+配置第三方前端时，将示例路径替换为前端提供的游戏文件占位符。通过 Android
+文档提供器访问文件时，应优先使用前端提供的 URI 占位符。
+
 ### 局域网文件管理
 
 点击游戏库左侧的文件夹按钮才会启动文件管理服务；正常启动模拟器不会自动开启。
@@ -64,11 +100,13 @@ CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM
 ### 菜单与配置
 
 - `游戏库`：添加游戏目录、导入单个游戏、启动游戏、移除条目和刷新扫描结果。
+- `主菜单`：选项、设置、关于、退出应用和返回。
 - `暂停菜单`：即时存档、切换游戏、重启游戏、选项、设置、退出应用和返回游戏。
+- `选项`：视频、音频、输入、恢复默认设置和返回。
 - `选项 > 视频`：抗锯齿、滤镜、亮度、对比度、伽马、饱和度、最小化时、屏幕方向、画面填充和显示 FPS。
 - `选项 > 音频`：主音量、音频缓冲、音频效果、数字降噪和禁用音频。
-- `选项 > 输入`：禁用系统输入法、显示虚拟按键、虚拟按键大小、方向键类型和手柄按键映射。
-- `设置`：CPU 执行模式、CPU 时钟、游戏速度、系统延迟比例、金手指管理器、语言和恢复默认设置。
+- `选项 > 输入`：禁用系统输入法、显示虚拟按键、虚拟按键大小、方向键类型、手柄按键映射和手柄校准。
+- `设置`：CPU 执行模式、CPU 时钟、游戏速度、系统延迟比例、金手指管理器、语言、恢复默认设置和返回。
 - `关于`：版本、支持格式和软件信息。
 
 设置会自动保存到应用私有目录中的 `DingooPie.ini`。
@@ -78,7 +116,8 @@ CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM
 触摸屏默认显示虚拟方向键、A/B/X/Y、START、SELECT 和肩键，并支持多点触控与组合按键。
 支持 SDL GameController 兼容手柄，可在 `选项 > 输入 > 手柄按键映射` 中设置按键。
 
-连接物理键盘时使用以下默认映射：
+连接 USB 或蓝牙物理键盘时使用以下默认映射。表中的 Home 指物理键盘导航区的
+Home 键，不是 Android 系统主页键：
 
 | 键盘按键 | 丁果 A320 / 歌美 X760+ / 歌美 A330 控制 |
 | --- | --- |
@@ -140,17 +179,17 @@ powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1 `
 
 发布前必须确认 APK 签名验证、文本格式检查和相关回归测试全部通过。
 
-### ????
+### 代码架构
 
-?????? `native/core/`?????????
+原生模拟器核心按职责划分到 `native/core/`：
 
-- `app/`?APP/MIPS ????CPU????HLE ? APP ???
-- `cc/`?CC/ARM32 ???????? Dynarmic????HLE ? CC ???
-- `shared/`??????????????????????????????????????
-- `frontend/`?SDL shell?video?input?audio?menu ? library ?????
-- `config/`?`settings/`?`compatibility/` ? `cheats/` ?????
+- `app/`：APP/MIPS 运行时、CPU 后端、HLE 和 APP 存档。
+- `cc/`：CC/ARM32 运行时、解释器、Dynarmic 后端、HLE 和 CC 存档。
+- `shared/`：格式选择、执行协调、访客服务、存档、诊断和平台接口。
+- `frontend/`：SDL 外壳、视频、输入、音频、菜单和游戏库界面。
+- `config/`：设置、兼容性配置和金手指。
 
-???????????? `docs/ARCHITECTURE.md`?
+完整架构和依赖边界见 `docs/ARCHITECTURE.md`。
 
 ## English
 
@@ -171,11 +210,51 @@ by the dedicated APP MIPS and CC ARM32 runtimes, respectively.
 1. Install and launch `DingooPie.apk`.
 2. Add a game folder or import one `.app` / `.cc` file from the game library.
 3. Grant Android file access and wait for the library scan to finish.
-4. Tap a game to start it. Press Android Back during play to open the pause menu.
+4. Tap a game to start it. Press Android Back during play to open the pause menu,
+   then use instant saves, switch game, restart, options, settings, exit, or return.
 
 Games imported from a writable folder keep saves beside the game. Single-file imports,
 read-only locations, and expired grants use application-private save storage. Removing
 an entry never deletes the game.
+
+### External Emulator Frontends
+
+DingooPie accepts `.app` and `.cc` launch requests from Tianma G, Daijishō,
+Pegasus-based frontends, automation tools, and other Android emulator frontends
+that can send Android intents.
+Use package `com.dingoopie.android` and activity
+`com.dingoopie.android.DingooPieActivity`.
+
+- Preferred: send `android.intent.action.VIEW` with a `file://` or `content://` URI.
+- Explicit launchers may send action `com.dingoopie.android.action.LAUNCH_GAME`
+  with a path extra named `gamePath`, `path`, `rom`, `ROM`, `game`, `GAME`, `file`,
+  `FILE`, `filename`, or `fullPath`.
+- The URI form `dingoopie://launch?path=<encoded-path>` is also supported; its query
+  key may be `path`, `gamePath`, or `rom`.
+- Content URIs must include temporary or persistable read permission.
+- A new request received while a game is running stops the current game cleanly and
+  launches the requested APP or CC game in the same activity.
+
+RetroArch loads games through libretro cores, while DingooPie is currently a standalone
+Android application rather than a libretro core. Standard RetroArch therefore cannot
+directly load or invoke DingooPie; only a custom build or companion launcher that emits
+the Android intents above can do so.
+
+Example commands:
+
+```powershell
+adb shell am start -n com.dingoopie.android/.DingooPieActivity `
+  -a android.intent.action.VIEW `
+  -d "file:///storage/emulated/0/Games/demo.app"
+
+adb shell am start -n com.dingoopie.android/.DingooPieActivity `
+  -a com.dingoopie.android.action.LAUNCH_GAME `
+  --es gamePath "/storage/emulated/0/Games/demo.cc"
+```
+
+When configuring a third-party frontend, substitute its ROM placeholder for the
+example path. Prefer its URI placeholder when Android storage access is provided
+through a document provider.
 
 ### LAN File Management
 
@@ -225,35 +304,53 @@ token. Addresses in the `192.168.*` range are listed first.
 ### Menu And Configuration
 
 - `Game Library`: add folders, import a game, launch games, remove entries, and refresh scans.
+- `Main Menu`: Options, Settings, About, Exit App, and Back.
 - `Pause Menu`: instant saves, switch game, restart, options, settings, exit, and return to the game.
+- `Options`: Video, Audio, Input, Restore Default Settings, and Back.
 - `Options > Video`: Anti-aliasing, Filter, Brightness, Contrast, Gamma, Saturation, When Minimized, Screen Orientation, Screen Fill, and Show FPS.
 - `Options > Audio`: master volume, buffer size, audio effect, digital noise reduction, and audio disable.
-- `Options > Input`: Disable System IME, Show Virtual Controls, Virtual Control Size, D-pad Type, and Controller Mapping.
-- `Settings`: CPU Execution Mode, CPU Clock, Game Speed, System Delay Scale, Cheat Manager, Language, and Restore Default Settings.
+- `Options > Input`: Disable System IME, Show Virtual Controls, Virtual Control Size, D-pad Type, Controller Mapping, and Controller Calibration.
+- `Settings`: CPU Execution Mode, CPU Clock, Game Speed, System Delay Scale, Cheat Manager, Language, Restore Default Settings, and Back.
 - `About`: version, supported formats, and software information.
 
 Settings are saved automatically in the application-private `DingooPie.ini`.
 
 ### Keyboard Mapping
 
-Virtual controls are enabled by default and support multi-touch holds and combinations.
-SDL GameController-compatible devices can be remapped under `Options > Input`.
+The touch screen shows a virtual D-pad, A/B/X/Y, START, SELECT, and shoulder buttons
+by default, with multi-touch holds and combinations.
+SDL GameController-compatible devices can be remapped under
+`Options > Input > Controller Mapping`.
+USB and Bluetooth physical keyboards use the defaults below. Home means the
+physical keyboard navigation key, not the Android system Home button.
 
 | Keyboard | Dingoo control |
 | --- | --- |
 | Arrow keys / WASD | D-pad |
-| L / K / I / J | A / B / X / Y |
+| L | A |
+| K | B |
+| I | X |
+| J | Y |
 | 1 / Q | SELECT |
 | 0 / O | START |
-| Left / Right Shift | Left / right shoulder |
+| Left Shift | Left shoulder |
+| Right Shift | Right shoulder |
 | Backspace / Home | POWER |
 | Android Back | Open the pause menu |
 
 ### Cheats
 
-Cheats are disabled by default. `Game.app.cht` and `Game.cc.cht` are preferred;
-`Game.cht` is used only when the format-specific file is absent. Use
-`Settings > Cheat Manager` to select, apply, disable, or refresh cheat features.
+Cheats are disabled by default and prefer a matching format-specific file:
+
+```text
+Game.app -> Game.app.cht
+Game.cc  -> Game.cc.cht
+```
+
+`Game.cht` is used only when the format-specific file is absent, so APP and CC
+games with the same base name keep separate cheat files and selections. Under
+`Settings > Cheat Manager`, cheats can be enabled, selected, enabled all, disabled
+all, applied, or refreshed. Cheats remain unavailable when no compatible file exists.
 
 ### Instant Saves
 
@@ -264,7 +361,8 @@ game phase differs from the saved phase, return to the same scene before loading
 
 ### Build
 
-Requires PowerShell, JDK 17, Android SDK Platform 35, and NDK `26.3.11579264`.
+Requires Windows PowerShell 5.1 or PowerShell 7, JDK 17, Android SDK Platform 35,
+and Android NDK `26.3.11579264`.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/bootstrap_android.ps1
@@ -274,8 +372,9 @@ powershell -ExecutionPolicy Bypass -File scripts/test_settings_order.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_text_format.ps1
 ```
 
-Start with `docs/README.md`. See `docs/BUILDING.md`, `docs/TESTING.md`,
-`docs/ARCHITECTURE.md`, and `docs/RELEASE_SIGNING.md` for maintained details.
+Start with `docs/README.md`. See `docs/BUILDING.md` and `docs/RELEASE_SIGNING.md`
+for release builds and signing. See `docs/TESTING.md` for the test matrix, emulator
+compatibility, audio, cheats, IME, and save-state automation.
 
 Build a signed release and copy it to the desktop with:
 
@@ -285,3 +384,15 @@ powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1 `
 ```
 
 Before publishing, verify the APK signature, text format, and relevant regressions.
+
+### Code Architecture
+
+The native emulator core is organized by responsibility under `native/core/`:
+
+- `app/`: APP/MIPS runtime, CPU backends, HLE, and APP save states.
+- `cc/`: CC/ARM32 runtime, interpreter, Dynarmic backend, HLE, and CC save states.
+- `shared/`: format selection, execution coordination, guest services, saves, diagnostics, and platform interfaces.
+- `frontend/`: SDL shell, video, input, audio, menus, and game-library presentation.
+- `config/`: settings, compatibility configuration, and cheats.
+
+See `docs/ARCHITECTURE.md` for the complete architecture and dependency boundaries.

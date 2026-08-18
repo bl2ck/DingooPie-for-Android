@@ -1426,7 +1426,7 @@ static void hookMemoryRoutine(NativeRuntime* runtime, uint64_t address, uint32_t
         return;
     }
 
-    trackFramebufferWrite(dstPtr, count);
+    framebufferTrackWrite(dstPtr, count);
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_V0, &dstPtr);
     uint32_t returnPc = readRegister32(runtime, RUNTIME_REG_RA);
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_PC, &returnPc);
@@ -1543,7 +1543,7 @@ static void hookRowCopyLoop(NativeRuntime* runtime, uint64_t address, uint32_t s
         }
 
         memmove(dest, source, kLinearRgb565FrameBytes);
-        trackFramebufferWrite(destPtr, kLinearRgb565FrameBytes);
+        framebufferTrackWrite(destPtr, kLinearRgb565FrameBytes);
         framebufferRequestUpdate();
 
         writeLe32(object + 0x0c, destPtr);
@@ -1634,7 +1634,7 @@ static void hookRowCopyLoop(NativeRuntime* runtime, uint64_t address, uint32_t s
     uint32_t updatedDest = destPtr + destStrideBytes * rows;
     writeLe32(object + 0x18, updatedSource);
     writeLe32(object + 0x1c, updatedDest);
-    trackFramebufferWrite(destPtr, destStrideBytes * rows);
+    framebufferTrackWrite(destPtr, destStrideBytes * rows);
 
     uint32_t returnPc = readRegister32(runtime, RUNTIME_REG_RA);
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_PC, &returnPc);
@@ -1745,7 +1745,7 @@ static void hookCompactTransparentBlit16(NativeRuntime* runtime, uint64_t addres
     uint32_t updatedDest = destPtr + destStridePixels * rows * sizeof(uint16_t);
     writeLe32(object + 0x18, updatedSource);
     writeLe32(object + 0x1c, updatedDest);
-    trackFramebufferWrite(destPtr, destStridePixels * rows * sizeof(uint16_t));
+    framebufferTrackWrite(destPtr, destStridePixels * rows * sizeof(uint16_t));
 
     uint32_t returnPc = readRegister32(runtime, RUNTIME_REG_RA);
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_PC, &returnPc);
@@ -1833,7 +1833,7 @@ static void hookIndexedBlit8ToRgb565(NativeRuntime* runtime, uint64_t address, u
     uint32_t updatedSource = sourcePtr + sourceStride * rows;
     writeLe32(object + 0x1c, updatedDest);
     writeLe32(object + 0x24, updatedSource);
-    trackFramebufferWrite(destPtr, destStride * rows * sizeof(uint16_t));
+    framebufferTrackWrite(destPtr, destStride * rows * sizeof(uint16_t));
 
     uint32_t returnPc = readRegister32(runtime, RUNTIME_REG_RA);
     nativeRuntimeWriteRegister(runtime, RUNTIME_REG_PC, &returnPc);
@@ -1938,7 +1938,7 @@ static void hookIndexedTransformBlit16(NativeRuntime* runtime, uint64_t address,
         dest += kColumns;
     }
 
-    trackFramebufferWrite(destPtr, kDestBytes);
+    framebufferTrackWrite(destPtr, kDestBytes);
     gpr[RUNTIME_REG_A1] = sourcePtr;
     gpr[RUNTIME_REG_A2] = destPtr + kDestBytes;
     gpr[RUNTIME_REG_A3] = sourcePtr + kSourceBytes;
@@ -1983,7 +1983,7 @@ static void hookPixelLoop16(NativeRuntime* runtime, uint64_t address, uint32_t s
         }
 
         memmove(dst, src, copyBytes);
-        trackFramebufferWrite(dstPtr, copyBytes);
+        framebufferTrackWrite(dstPtr, copyBytes);
         uint32_t updatedDst = dstPtr + count * 2u;
         uint32_t updatedSrc = srcPtr + count * 2u;
         nativeRuntimeWriteRegister(runtime, RUNTIME_REG_A0, &updatedDst);
@@ -2028,7 +2028,7 @@ static void hookPixelLoop16(NativeRuntime* runtime, uint64_t address, uint32_t s
         {
             dst[count - 1 - i] = (uint16_t)color;
         }
-        trackFramebufferWrite(basePtr + sizeof(uint16_t), writes * sizeof(uint16_t));
+        framebufferTrackWrite(basePtr + sizeof(uint16_t), writes * sizeof(uint16_t));
         uint32_t finalA1 = basePtr;
         uint32_t zero = 0;
         uint32_t finalA3 = readRegister32(runtime, RUNTIME_REG_A3) >> 3;

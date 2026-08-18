@@ -96,8 +96,7 @@ $extension = [System.IO.Path]::GetExtension($GamePath).ToLowerInvariant()
 if ($extension -notin @('.app', '.cc')) {
     throw 'Audio validation supports APP and CC games.'
 }
-$deviceGameName = [System.IO.Path]::GetFileName($GamePath)
-$deviceGamePath = "/sdcard/Download/$deviceGameName"
+$deviceGamePath = "/sdcard/Download/dingoopie-audio-validation$extension"
 Invoke-Adb -Arguments @('push', (Resolve-Path -LiteralPath $GamePath).Path, $deviceGamePath) | Out-Null
 Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.dingoopie.android') | Out-Null
 Invoke-Adb -Arguments @(

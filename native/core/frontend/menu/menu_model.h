@@ -1,6 +1,10 @@
 #ifndef DINGOO_PIE_FRONTEND_MENU_MENU_MODEL_H
 #define DINGOO_PIE_FRONTEND_MENU_MENU_MODEL_H
 
+#include <stdint.h>
+
+static constexpr uint32_t kControllerMenuActionBit = 30;
+
 // Row values are render and selection indices; keep each enum in visible order.
 enum AndroidMenuScreen
 {

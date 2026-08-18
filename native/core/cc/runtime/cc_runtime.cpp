@@ -616,7 +616,7 @@ static void noteFramebufferWrite(CcRuntimeContext* runtime, uint32_t address, si
         offset += chunkSize;
         remaining -= chunkSize;
     }
-    trackFramebufferWrite(address, (uint32_t)std::min<size_t>(size, UINT32_MAX));
+    framebufferTrackWrite(address, (uint32_t)std::min<size_t>(size, UINT32_MAX));
 }
 
 static bool busRead(void* userData, uint32_t address, void* output, size_t size)
@@ -894,9 +894,9 @@ static uint32_t mapInputForRuntime(const CcRuntimeContext* runtime, uint32_t inp
 {
     if (ccUsesRetailInputMapping(runtime->package->origin))
     {
-        return mapInputToRetailLayout(input);
+        return ccMapInputToRetailLayout(input);
     }
-    return mapInputToHomebrewLayout(input);
+    return ccMapInputToHomebrewLayout(input);
 }
 
 static uint32_t findExport(const GuestPackage* package, const char* name)
@@ -1953,13 +1953,13 @@ static void profileCcRuntime(CcRuntimeContext* runtime)
     }
     uint64_t intervalInstructions = runtime->stats->instructions -
         runtime->profileLastInstructions;
-    uint64_t submittedFrames = consumeFramebufferSubmittedCount();
-    uint64_t framebufferCopyMicros = consumeFramebufferCopyMicros();
+    uint64_t submittedFrames = framebufferConsumeSubmittedCount();
+    uint64_t framebufferCopyMicros = framebufferConsumeCopyMicros();
     uint64_t totalFrameIntervalMicros = 0;
     uint64_t maxFrameIntervalMicros = 0;
     uint64_t frameIntervalsOver25ms = 0;
     uint64_t frameIntervalsOver33ms = 0;
-    consumeFramebufferTimingStats(&totalFrameIntervalMicros, &maxFrameIntervalMicros,
+    framebufferConsumeTimingStats(&totalFrameIntervalMicros, &maxFrameIntervalMicros,
         &frameIntervalsOver25ms, &frameIntervalsOver33ms);
     uint64_t averageFrameIntervalMicros = submittedFrames ?
         totalFrameIntervalMicros / submittedFrames : 0;

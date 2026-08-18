@@ -21,6 +21,9 @@ Android implementations remain in `native/android/`. Core code includes only the
 - `frontend` never includes APP or CC headers; it uses `shared/game/game_runtime.h` and shared save-slot APIs.
 - `config` never includes frontend or format-specific runtime headers.
 - Android platform code may implement shared platform interfaces and compose native modules.
+- Core `.cpp` files are independent compilation units and must never be included from another source file.
+
+Menu rendering and actions are compiled from `frontend/menu/menu_overlay.cpp`. Its public menu operations are declared in `menu_overlay.h`; the explicit shell integration boundary is declared in `menu_overlay_internal.h`.
 
 The runtime facade owns start, stop, pause, settings application, runtime capabilities, diagnostics, and save-state capture/restore dispatch. Format-specific state structures remain private to APP and CC implementations.
 
@@ -40,4 +43,4 @@ Run:
 powershell -ExecutionPolicy Bypass -File scripts/check_core_architecture.ps1
 ```
 
-The script rejects forbidden include directions, legacy ambiguous file names, and revived files under the obsolete `native/core/game`, `guest`, or `runtime` directories.
+The script rejects forbidden include directions, source-file includes, legacy ambiguous file names, and revived files under the obsolete `native/core/game`, `guest`, or `runtime` directories.

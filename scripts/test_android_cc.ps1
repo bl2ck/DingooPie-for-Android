@@ -329,13 +329,21 @@ if ($VerifyDoudizhuExit) {
         -HostPath $exitSelectionScreenshot
     Invoke-VirtualControlHold -X $buttonAX -Y $buttonAY
 
+    $guestExitPattern =
+        'cc-runtime: guest completed; returning to library|cc-arm: guest exit requested by (TaskMediaFunStop|OSTaskDel|vxGoHome|abort|av_end_thread|av_queue_abort)'
+    $runtimeStoppedPattern = 'cc-arm: stopped ok=1'
+    $frontendExitPattern = 'frontend: game exit requested; returning to library'
+    $runtimeStopFailurePattern =
+        'game-runtime: CC runtime thread did not stop within|game-runtime: CC runtime thread join failed|main: runtime stop timed out'
     $exitNativeLogText = ''
     for ($attempt = 0; $attempt -lt 20; ++$attempt) {
         Start-Sleep -Milliseconds 500
         $exitNativeLogText = (Invoke-Adb -Arguments @(
             'shell', 'run-as', 'com.dingoopie.android',
             'cat', 'logs/dingoopie-native.log')) -join "`r`n"
-        if ($exitNativeLogText -match 'game-runtime: CC runtime thread joined') {
+        if ($exitNativeLogText -match $guestExitPattern -and
+            $exitNativeLogText -match $runtimeStoppedPattern -and
+            $exitNativeLogText -match $frontendExitPattern) {
             break
         }
     }
@@ -352,10 +360,10 @@ if ($VerifyDoudizhuExit) {
     [System.IO.File]::WriteAllText(
         $exitNativeLogPath, $exitNativeLogText, [System.Text.UTF8Encoding]::new($false))
 
-    if ($exitNativeLogText -notmatch
-        'cc-runtime: guest completed; returning to library|cc-arm: guest exit requested by (TaskMediaFunStop|OSTaskDel|vxGoHome|abort|av_end_thread|av_queue_abort)' -or
-        $exitNativeLogText -notmatch 'frontend: game exit requested; returning to library' -or
-        $exitNativeLogText -notmatch 'game-runtime: CC runtime thread joined') {
+    if ($exitNativeLogText -notmatch $guestExitPattern -or
+        $exitNativeLogText -notmatch $runtimeStoppedPattern -or
+        $exitNativeLogText -notmatch $frontendExitPattern -or
+        $exitNativeLogText -match $runtimeStopFailurePattern) {
         throw "CC in-game exit did not complete through the shared frontend path. See $exitNativeLogPath"
     }
     $normalizedExitOcr = [regex]::Replace($exitOcrText, '[^\p{L}\p{N}]', '')
@@ -523,7 +531,7 @@ profile=1
             'cc-arm: compatibility mode uses base ARM32 execution paths',
             'frontend: video settings anti_aliasing=low effect=sepia brightness=125 contrast=90 gamma=110 saturation=150 minimized_behavior=throttle screen_orientation=landscape screen_fill=aspect portrait=0 show_fps=1',
             'frontend: audio settings volume=75 buffer_samples=4096 effect=bass_boost digital_noise_reduction=high audio_disabled=1',
-            'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_dpad_type=joystick controller_mapping=A=B keyboard_mapping=space=A',
+            'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_dpad_type=joystick controller_mapping=A=B controller_calibration=(default) keyboard_mapping=space=A',
             'cheat: loaded 1 code(s), parse_errors=0, enabled=1, sha_mismatch=0, source=dingoopie-cc-automation.cc.cht',
             'cc-arm: game settings cheats_enabled=1 cheats_available=1 cheat_entries=1 cheat_startup_applied=1'
         )
@@ -541,7 +549,7 @@ profile=1
                 'execution backend effective: compatibility',
                 'frontend: video settings anti_aliasing=low effect=sepia brightness=125 contrast=90 gamma=110 saturation=150 minimized_behavior=throttle screen_orientation=landscape screen_fill=aspect portrait=0 show_fps=1',
                 'frontend: audio settings volume=75 buffer_samples=4096 effect=bass_boost digital_noise_reduction=high audio_disabled=1',
-                'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_dpad_type=joystick controller_mapping=A=B keyboard_mapping=space=A',
+                'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_dpad_type=joystick controller_mapping=A=B controller_calibration=(default) keyboard_mapping=space=A',
                 'hle: runtime speed scale 0.800 env',
                 'hle: host delay scale 0.750 env'
             )

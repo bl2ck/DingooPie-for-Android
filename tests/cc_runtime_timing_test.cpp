@@ -44,25 +44,25 @@ int main()
         uint32_t homebrewLayout;
     };
     static const InputMapping mappings[] = {
-        { CC_INPUT_SOURCE_UP, 0x00100000u, 0x00100000u },
-        { CC_INPUT_SOURCE_DOWN, 0x08000000u, 0x08000000u },
-        { CC_INPUT_SOURCE_LEFT, 0x10000000u, 0x10000000u },
-        { CC_INPUT_SOURCE_RIGHT, 0x00040000u, 0x00040000u },
         { CC_INPUT_SOURCE_A, 0x80000000u, 0x80000000u },
         { CC_INPUT_SOURCE_B, 0x00001000u, 0x00001000u },
         { CC_INPUT_SOURCE_X, 0x00010000u, 0x20000000u },
         { CC_INPUT_SOURCE_Y, 0x20000000u, 0x00010000u },
-        { CC_INPUT_SOURCE_L, 0x00020000u, 0x00020000u },
-        { CC_INPUT_SOURCE_R, 0x40000000u, 0x40000000u },
         { CC_INPUT_SOURCE_START, 0x00008000u, 0x00000080u },
         { CC_INPUT_SOURCE_SELECT, 0x00800000u, 0x00004000u },
+        { CC_INPUT_SOURCE_L, 0x00020000u, 0x00020000u },
+        { CC_INPUT_SOURCE_R, 0x40000000u, 0x40000000u },
+        { CC_INPUT_SOURCE_UP, 0x00100000u, 0x00100000u },
+        { CC_INPUT_SOURCE_DOWN, 0x08000000u, 0x08000000u },
+        { CC_INPUT_SOURCE_LEFT, 0x10000000u, 0x10000000u },
+        { CC_INPUT_SOURCE_RIGHT, 0x00040000u, 0x00040000u },
         { CC_INPUT_SOURCE_POWER, 0x00000080u, 0x00000001u },
     };
     for (size_t i = 0; i < sizeof(mappings) / sizeof(mappings[0]); ++i)
     {
-        if (mapInputToRetailLayout(mappings[i].source) !=
+        if (ccMapInputToRetailLayout(mappings[i].source) !=
                 mappings[i].retailLayout ||
-            mapInputToHomebrewLayout(mappings[i].source) !=
+            ccMapInputToHomebrewLayout(mappings[i].source) !=
                 mappings[i].homebrewLayout)
         {
             fprintf(stderr, "CC input mapping regression failed at index %u.\n",
@@ -74,9 +74,9 @@ int main()
         ccUsesRetailInputMapping(kCcHomebrewProgramOrigin) ||
         ccPackageUsesRetailLayout(0x13000000u) ||
         ccPackageUsesHomebrewLayout(0x13000000u) ||
-        mapInputToRetailLayout(CC_INPUT_SOURCE_Y | CC_INPUT_SOURCE_R) !=
+        ccMapInputToRetailLayout(CC_INPUT_SOURCE_Y | CC_INPUT_SOURCE_R) !=
             0x60000000u ||
-        mapInputToRetailLayout(CC_INPUT_SOURCE_X) != 0x00010000u)
+        ccMapInputToRetailLayout(CC_INPUT_SOURCE_X) != 0x00010000u)
     {
         fprintf(stderr, "CC input layout mapping regression failed.\n");
         return 6;

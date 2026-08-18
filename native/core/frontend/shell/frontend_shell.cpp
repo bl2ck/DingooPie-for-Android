@@ -9,8 +9,10 @@
 #include "frontend/video/framebuffer.h"
 #include "shared/execution/pause_gate.h"
 #include "shared/platform/storage_services.h"
+#include "shared/platform/external_launch_services.h"
 #include "frontend/audio/sdl_audio.h"
 #include "frontend/menu/menu_model.h"
+#include "frontend/menu/menu_overlay.h"
 #include "frontend/menu/menu_strings.h"
 #include "shared/diagnostics/runtime_log.h"
 #include "jni_local_ref.h"
@@ -30,7 +32,7 @@
 #include <jni.h>
 
 static SDL_Window* g_window = NULL;
-static SDL_Renderer* g_renderer = NULL;
+SDL_Renderer* g_renderer = NULL;
 static SDL_Texture* g_frameTexture = NULL;
 static SDL_Texture* g_blurredBackdropTexture = NULL;
 static SDL_Texture* g_fpsOverlayTexture = NULL;
@@ -50,8 +52,8 @@ static bool g_gameControllerMenuActionActive = false;
 static Sint16 g_gameControllerAxes[SDL_CONTROLLER_AXIS_MAX];
 static uint32_t g_gameControllerButtonMap[SDL_CONTROLLER_BUTTON_MAX];
 static uint32_t g_gameControllerAxisMap[SDL_CONTROLLER_AXIS_MAX][2];
-static bool g_controllerMappingPending = false;
-static uint32_t g_controllerMappingTarget = 0;
+bool g_controllerMappingPending = false;
+uint32_t g_controllerMappingTarget = 0;
 static bool g_controllerMappingInitialized = false;
 static std::string g_appliedControllerMapping;
 struct ControllerAxisCalibration
@@ -88,18 +90,18 @@ static bool g_androidBackgroundActive = false;
 static SDL_atomic_t g_androidBackgroundRequested;
 static bool g_androidRendererRestorePending = false;
 static uint32_t g_androidForegroundStablePumps = 0;
-static EmulatorSettings* g_frontendSettings = NULL;
-static std::string g_frontendCurrentGamePath;
-static std::string g_androidCheatManagerGamePath;
+EmulatorSettings* g_frontendSettings = NULL;
+std::string g_frontendCurrentGamePath;
+std::string g_androidCheatManagerGamePath;
 static std::string g_frontendPendingGamePath;
-static int g_androidSaveStateSelectedSlot = 1;
-static bool g_androidSaveStateBusy = false;
-static SaveStateProgress g_androidSaveStateProgress = { SAVE_STATE_PROGRESS_COMPRESS, 0 };
-static std::string g_androidSaveStateStatus;
-static SDL_Texture* g_androidSaveStateThumbnail = NULL;
-static bool g_androidSaveStateSlotExists[kSaveStateSlotCount] = {};
-static uint64_t g_androidSaveStateSlotModifiedTime[kSaveStateSlotCount] = {};
-static std::string g_androidSaveStateSlotCacheGamePath;
+int g_androidSaveStateSelectedSlot = 1;
+bool g_androidSaveStateBusy = false;
+SaveStateProgress g_androidSaveStateProgress = { SAVE_STATE_PROGRESS_COMPRESS, 0 };
+std::string g_androidSaveStateStatus;
+SDL_Texture* g_androidSaveStateThumbnail = NULL;
+bool g_androidSaveStateSlotExists[kSaveStateSlotCount] = {};
+uint64_t g_androidSaveStateSlotModifiedTime[kSaveStateSlotCount] = {};
+std::string g_androidSaveStateSlotCacheGamePath;
 
 static const uint64_t kMinimizedThrottlePresentIntervalMs = 250;
 static const uint32_t kMinimizedThrottleLoopDelayMs = 50;
@@ -114,12 +116,12 @@ static uint32_t g_blurredBackdropUpdateCounter = 0;
 static bool inputTraceEnabled(void);
 static void openFirstGameController(void);
 static void cancelControllerMapping(void);
-static void resetControllerMapping(void);
-static void beginControllerCalibration(void);
-static void resetControllerCalibration(void);
+void resetControllerMapping(void);
+void beginControllerCalibration(void);
+void resetControllerCalibration(void);
 static void cancelControllerCalibration(void);
 static void updateControllerCalibration(void);
-static std::string controllerCalibrationStatusText(void);
+std::string controllerCalibrationStatusText(void);
 static std::string trimString(const std::string& text);
 static void releaseVirtualPointerControls(void);
 static void updateVirtualPointerControls(uint32_t newMask);
@@ -128,10 +130,6 @@ static bool createGameFrameTexture(void);
 static bool createBlurredBackdropTexture(void);
 static bool textureLinearSamplingEnabled(const EmulatorSettings& settings);
 static void releaseGameVideoResources(void);
-static void refreshAndroidSaveStateSlots(void);
-static void refreshAndroidSaveStateSlotInfo(int slot);
-static void invalidateAndroidSaveStateThumbnail(void);
-static void refreshAndroidSaveStateThumbnail(void);
 
 static const char* sdlLogCategoryName(int category)
 {
@@ -191,12 +189,11 @@ static void SDLCALL frontendSdlLogOutput(void* userdata, int category,
         message ? message : "");
 }
 
-static uint32_t controlMask(uint32_t controlBit)
+uint32_t controlMask(uint32_t controlBit)
 {
     return 1u << controlBit;
 }
 
-static const uint32_t kControllerMenuActionBit = 30;
 static const uint32_t kControllerMenuActionMask = 1u << kControllerMenuActionBit;
 
 static bool confirmExitRequested(void)
@@ -375,7 +372,7 @@ static bool frontendPostRestoreInputBlocked(void)
     return false;
 }
 
-static bool virtualControlsVisible(void)
+bool virtualControlsVisible(void)
 {
     return g_frontendSettings && g_frontendSettings->showVirtualControls;
 }
@@ -411,7 +408,7 @@ static VirtualDpadType virtualDpadType(void)
     return g_frontendSettings->virtualDpadType;
 }
 
-static bool portraitModeEnabled(void)
+bool portraitModeEnabled(void)
 {
     return g_frontendSettings && g_frontendSettings->portraitMode;
 }
@@ -703,12 +700,12 @@ static void drawRendererText(const char* text, int x, int y, int scale, SDL_Colo
     }
 }
 
-static const int kAndroidMenuRowTop = 66;
-static const int kAndroidMenuRowHeight = 46;
-static const int kAndroidMenuRowGap = 6;
+extern const int kAndroidMenuRowTop = 66;
+extern const int kAndroidMenuRowHeight = 46;
+extern const int kAndroidMenuRowGap = 6;
 static const int kAndroidMenuRowHorizontalInset = 24;
 static const int kAndroidMenuListBottomInset = 16;
-static bool androidMenuScreenUsesOverlay(AndroidMenuScreen menuScreen)
+bool androidMenuScreenUsesOverlay(AndroidMenuScreen menuScreen)
 {
     return menuScreen == ANDROID_MENU_MAIN || menuScreen == ANDROID_MENU_OPTIONS ||
         menuScreen == ANDROID_MENU_SAVE_STATE ||
@@ -720,13 +717,13 @@ static bool androidMenuScreenUsesOverlay(AndroidMenuScreen menuScreen)
         menuScreen == ANDROID_MENU_CHEAT_MANAGER;
 }
 
-static AndroidMenuScreen g_androidMenuScreen = ANDROID_MENU_LIBRARY;
+AndroidMenuScreen g_androidMenuScreen = ANDROID_MENU_LIBRARY;
 static AndroidMenuScreen g_androidMenuScreenAfterGameRestart = ANDROID_MENU_NONE;
 static bool g_androidMenuOpeningMouseReleasePending = false;
 static bool g_androidMenuOpeningFingerReleasePending = false;
 static SDL_FingerID g_androidMenuOpeningFingerId = 0;
 static std::string g_androidMenuGameRestartPath;
-static std::vector<std::string> g_androidGamePaths;
+std::vector<std::string> g_androidGamePaths;
 static bool g_androidGameImportPending = false;
 static bool g_androidGameLibraryScanWasActive = false;
 static int g_androidLibraryScrollOffset = 0;
@@ -736,13 +733,13 @@ static int g_androidLibraryScrollStartY = 0;
 static int g_androidLibraryScrollStartOffset = 0;
 static float g_androidLibraryScrollVelocity = 0.0f;
 static uint64_t g_androidLibraryScrollLastMotionTicks = 0;
-static int g_androidMenuScrollOffset = 0;
+int g_androidMenuScrollOffset = 0;
 static bool g_androidMenuScrollDragging = false;
 static bool g_androidMenuScrollMoved = false;
 static int g_androidMenuScrollStartY = 0;
 static int g_androidMenuScrollStartOffset = 0;
-static int g_androidMenuSelectedRow = 0;
-static bool g_androidMenuSelectionHighlightVisible = false;
+int g_androidMenuSelectedRow = 0;
+bool g_androidMenuSelectionHighlightVisible = false;
 
 struct AndroidSystemTextTexture
 {
@@ -763,7 +760,7 @@ static uint32_t androidTextColor(SDL_Color color)
         ((uint32_t)color.g << 8) | (uint32_t)color.b;
 }
 
-static void clearAndroidSystemTextTextures(void)
+void clearAndroidSystemTextTextures(void)
 {
     for (size_t i = 0; i < g_androidSystemTextTextures.size(); ++i)
     {
@@ -882,7 +879,7 @@ static void drawAndroidSystemTextBold(
     SDL_RenderCopy(g_renderer, entry->texture, NULL, &destination);
 }
 
-static void drawAndroidSystemTextCentered(
+void drawAndroidSystemTextCentered(
     const char* text, const SDL_Rect& rect, int pixelSize, SDL_Color color)
 {
     AndroidSystemTextTexture* entry = androidSystemTextTexture(text, pixelSize, color);
@@ -900,7 +897,7 @@ static void drawAndroidSystemTextCentered(
     SDL_RenderCopy(g_renderer, entry->texture, NULL, &destination);
 }
 
-static void drawAndroidSystemTextLeftCentered(
+void drawAndroidSystemTextLeftCentered(
     const char* text, const SDL_Rect& rect, int leftInset, int pixelSize, SDL_Color color)
 {
     AndroidSystemTextTexture* entry = androidSystemTextTexture(text, pixelSize, color);
@@ -918,7 +915,7 @@ static void drawAndroidSystemTextLeftCentered(
     SDL_RenderCopy(g_renderer, entry->texture, NULL, &destination);
 }
 
-static void drawAndroidSystemTextRightCentered(
+void drawAndroidSystemTextRightCentered(
     const char* text, const SDL_Rect& rect, int rightInset, int pixelSize, SDL_Color color)
 {
     AndroidSystemTextTexture* entry = androidSystemTextTexture(text, pixelSize, color);
@@ -936,21 +933,21 @@ static void drawAndroidSystemTextRightCentered(
     SDL_RenderCopy(g_renderer, entry->texture, NULL, &destination);
 }
 
-static bool androidChineseUi(void)
+bool androidChineseUi(void)
 {
     return !g_frontendSettings || g_frontendSettings->uiLanguage != UI_LANGUAGE_ENGLISH;
 }
 
-static const char* kZhBack = u8"\u8fd4\u56de";
+const char* kZhBack = u8"\u8fd4\u56de";
 static const char* kZhAddGame = u8"\u6dfb\u52a0\u6e38\u620f";
 static const char* kZhNoGames = u8"\u6682\u65e0\u6e38\u620f";
 static const char* kZhRemove = u8"\u79fb\u9664";
 static const char* kZhRemoveGame = u8"\u79fb\u9664\u6e38\u620f";
 static const char* kZhCancel = u8"\u53d6\u6d88";
-static const char* kZhMenu = u8"\u83dc\u5355";
-static const char* kZhGameMenu = u8"\u6e38\u620f\u83dc\u5355";
-static const char* kZhSwitchGame = u8"\u5207\u6362\u6e38\u620f";
-static const char* kZhExitApp = u8"\u9000\u51fa\u5e94\u7528";
+const char* kZhMenu = u8"\u83dc\u5355";
+const char* kZhGameMenu = u8"\u6e38\u620f\u83dc\u5355";
+const char* kZhSwitchGame = u8"\u5207\u6362\u6e38\u620f";
+const char* kZhExitApp = u8"\u9000\u51fa\u5e94\u7528";
 
 static ScreenOrientationMode normalizeScreenOrientationMode(int mode)
 {
@@ -961,7 +958,7 @@ static ScreenOrientationMode normalizeScreenOrientationMode(int mode)
     return (ScreenOrientationMode)mode;
 }
 
-static ScreenOrientationMode androidScreenOrientationMode(void)
+ScreenOrientationMode androidScreenOrientationMode(void)
 {
     return g_frontendSettings ?
         normalizeScreenOrientationMode((int)g_frontendSettings->screenOrientationMode) :
@@ -993,7 +990,7 @@ static bool androidCurrentScreenIsPortrait(void)
     return portrait;
 }
 
-static void androidSetScreenOrientationMode(ScreenOrientationMode mode)
+void androidSetScreenOrientationMode(ScreenOrientationMode mode)
 {
     mode = normalizeScreenOrientationMode((int)mode);
     if (g_frontendSettings)
@@ -1020,7 +1017,7 @@ static void androidSetScreenOrientationMode(ScreenOrientationMode mode)
     if (activityClass) env->DeleteLocalRef(activityClass);
 }
 
-static void syncAndroidScreenOrientation(void)
+void syncAndroidScreenOrientation(void)
 {
     if (!g_frontendSettings)
     {
@@ -1032,7 +1029,7 @@ static void syncAndroidScreenOrientation(void)
         (mode == SCREEN_ORIENTATION_AUTO && androidCurrentScreenIsPortrait());
 }
 
-static std::string androidAppVersionName(void)
+std::string androidAppVersionName(void)
 {
     static const std::string cachedVersion = []()
     {
@@ -1101,13 +1098,13 @@ static void showAndroidMessageDialog(
     if (activityClass) env->DeleteLocalRef(activityClass);
 }
 
-static void showAndroidMessageDialog(const std::string& title, const std::string& body)
+void showAndroidMessageDialog(const std::string& title, const std::string& body)
 {
     showAndroidMessageDialog(title, body,
         androidChineseUi() ? u8"\u786e\u5b9a" : "OK");
 }
 
-static bool showAndroidConfirmationDialog(
+bool showAndroidConfirmationDialog(
     const std::string& title,
     const std::string& body,
     const std::string& positiveButton,
@@ -1364,7 +1361,7 @@ static int androidUiScale(void)
     return scale;
 }
 
-static int androidUiMetric(int value)
+int androidUiMetric(int value)
 {
     int width = 0;
     int height = 0;
@@ -1391,7 +1388,7 @@ static int androidFpsOverlayScale(void)
     return scale;
 }
 
-static SDL_Rect androidMenuButtonRect(int width)
+SDL_Rect androidMenuButtonRect(int width)
 {
     VirtualControlButton buttons[kVirtualControlButtonCapacity];
     int count = buildVirtualControls(buttons, kVirtualControlButtonCapacity);
@@ -1407,7 +1404,7 @@ static SDL_Rect androidMenuButtonRect(int width)
     return SDL_Rect{ width / 2 - 52, 12, 104, 42 };
 }
 
-static int virtualCompactButtonTextSize(const SDL_Rect& rect)
+int virtualCompactButtonTextSize(const SDL_Rect& rect)
 {
     const int scalePercent = virtualControlScalePercent();
     const int minimumSize = std::max(1,
@@ -1466,7 +1463,7 @@ static int androidMenuListContentHeight(int rowCount)
     return (rowCount - 1) * androidMenuRowStep() + androidMenuRowHeight();
 }
 
-static SDL_Rect androidPanelRect(int width, int height)
+SDL_Rect androidPanelRect(int width, int height)
 {
     int horizontalMargin = androidUiMetric(24);
     int verticalMargin = androidUiMetric(24);
@@ -1494,7 +1491,7 @@ static SDL_Rect androidPanelRect(int width, int height)
         panelWidth, panelHeight };
 }
 
-static SDL_Rect androidPanelRowRect(const SDL_Rect& panel, int row)
+SDL_Rect androidPanelRowRect(const SDL_Rect& panel, int row)
 {
     int horizontalInset = androidUiMetric(kAndroidMenuRowHorizontalInset);
     return SDL_Rect{ panel.x + horizontalInset,
@@ -1504,14 +1501,14 @@ static SDL_Rect androidPanelRowRect(const SDL_Rect& panel, int row)
         androidMenuRowHeight() };
 }
 
-static SDL_Rect androidMenuRowRect(const SDL_Rect& panel, int row)
+SDL_Rect androidMenuRowRect(const SDL_Rect& panel, int row)
 {
     SDL_Rect rect = androidPanelRowRect(panel, row);
     rect.y -= g_androidMenuScrollOffset;
     return rect;
 }
 
-static bool androidMenuScreenHasSettingsList(void)
+bool androidMenuScreenHasSettingsList(void)
 {
     return g_androidMenuScreen == ANDROID_MENU_MAIN ||
         g_androidMenuScreen == ANDROID_MENU_OPTIONS ||
@@ -1524,7 +1521,7 @@ static bool androidMenuScreenHasSettingsList(void)
         g_androidMenuScreen == ANDROID_MENU_CHEAT_MANAGER;
 }
 
-static SDL_Rect androidMenuViewportRect(const SDL_Rect& panel)
+SDL_Rect androidMenuViewportRect(const SDL_Rect& panel)
 {
     int horizontalInset = androidUiMetric(16);
     return SDL_Rect{ panel.x + horizontalInset,
@@ -1534,13 +1531,13 @@ static SDL_Rect androidMenuViewportRect(const SDL_Rect& panel)
             androidUiMetric(kAndroidMenuRowTop + kAndroidMenuListBottomInset)) };
 }
 
-static int androidMenuMaxScroll(const SDL_Rect& panel, int rowCount)
+int androidMenuMaxScroll(const SDL_Rect& panel, int rowCount)
 {
     int contentHeight = androidMenuListContentHeight(rowCount);
     return std::max(0, contentHeight - androidMenuViewportRect(panel).h);
 }
 
-static void clampAndroidMenuScroll(const SDL_Rect& panel, int rowCount)
+void clampAndroidMenuScroll(const SDL_Rect& panel, int rowCount)
 {
     int maxScroll = androidMenuMaxScroll(panel, rowCount);
     if (g_androidMenuScrollOffset < 0) g_androidMenuScrollOffset = 0;
@@ -1730,14 +1727,14 @@ static SDL_Rect androidLibraryAddButtonRect(int width)
     return SDL_Rect{ width - margin - buttonWidth, kAndroidLibraryActionTop * scale,
         buttonWidth, kAndroidLibraryHeaderHeight * scale };
 }
-static void drawAndroidRect(const SDL_Rect& rect, SDL_Color color)
+void drawAndroidRect(const SDL_Rect& rect, SDL_Color color)
 {
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
     SDL_RenderFillRect(g_renderer, &rect);
 }
 
-static void drawAndroidOutline(const SDL_Rect& rect, SDL_Color color)
+void drawAndroidOutline(const SDL_Rect& rect, SDL_Color color)
 {
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
@@ -1919,7 +1916,7 @@ static bool confirmAndroidGameRemoval(const std::string& path)
     return showAndroidConfirmationDialog("Remove Game", body, "Remove", "Cancel");
 }
 
-static void requestAndroidGame(const std::string& path,
+void requestAndroidGame(const std::string& path,
     AndroidMenuScreen screenAfterRestart = ANDROID_MENU_NONE)
 {
     if (SDL_AtomicGet(&g_frontendGameLaunchPending) != 0)
@@ -1957,7 +1954,7 @@ static void requestAndroidGame(const std::string& path,
     releaseVirtualPointerControls();
 }
 
-static bool saveAndroidSettings(void)
+bool saveAndroidSettings(void)
 {
     if (!g_frontendSettings)
     {
@@ -1973,7 +1970,7 @@ static bool saveAndroidSettings(void)
     return saved;
 }
 
-static void openAndroidMenu(AndroidMenuScreen screen)
+void openAndroidMenu(AndroidMenuScreen screen)
 {
     if (g_androidMenuScreen == ANDROID_MENU_SAVE_STATE &&
         screen != ANDROID_MENU_SAVE_STATE && g_androidSaveStateThumbnail)
@@ -2005,7 +2002,7 @@ static void openAndroidMenu(AndroidMenuScreen screen)
     releaseVirtualPointerControls();
 }
 
-static void navigateBackAndroidMenu(void)
+void navigateBackAndroidMenu(void)
 {
     if (g_androidMenuScreen == ANDROID_MENU_PAUSE)
     {
@@ -2061,8 +2058,6 @@ static void drawAndroidLibraryBrand(const char* title, int width)
             (kAndroidLibraryHeaderHeight - kAndroidLibraryBrandTextSize) / 2) * scale,
         kAndroidLibraryBrandTextSize * scale, titleColor);
 }
-
-static void drawAndroidMenuOverlay(void);
 
 static bool drawAndroidLibraryScreen(void)
 {
@@ -2221,7 +2216,7 @@ static bool drawAndroidLibraryScreen(void)
     return true;
 }
 
-static int androidSettingsMenuRowCount(void)
+int androidSettingsMenuRowCount(void)
 {
     switch (g_androidMenuScreen)
     {
@@ -2242,16 +2237,6 @@ static int androidSettingsMenuRowCount(void)
     }
 }
 
-static void handleAndroidMainMenuSelection(int row);
-static void handleAndroidOptionsSelection(int row);
-static void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row);
-static void requestAndroidSwitchGame(void);
-static void requestAndroidRestartGame(void);
-static void requestAndroidExitApplication(void);
-static void refreshAndroidSaveStateSlotInfo(int slot);
-static void refreshAndroidSaveStateThumbnail(void);
-static void performAndroidSaveStateAction(bool saving);
-static void deleteAndroidSaveState(void);
 static SDL_JoystickID activeGameControllerInstanceId(void);
 
 static int androidMenuSelectionRowCount(void)
@@ -2435,45 +2420,7 @@ static bool handleAndroidMenuNavigationEvent(const SDL_Event& ev)
     return true;
 }
 
-template <size_t Count>
-static int nextAndroidIntPreset(int current, const int (&values)[Count], int fallback)
-{
-    for (size_t index = 0; index < Count; ++index)
-    {
-        if (values[index] == current)
-        {
-            return values[(index + 1) % Count];
-        }
-    }
-    return fallback;
-}
-
-static int nextAndroidEnumValue(int current, int count, int fallback)
-{
-    if (current < 0 || current >= count)
-    {
-        current = fallback;
-    }
-    return (current + 1) % count;
-}
-
-template <size_t Count>
-static std::string nextAndroidStringPreset(const std::string& current,
-    const char* const (&values)[Count])
-{
-    for (size_t index = 0; index < Count; ++index)
-    {
-        if (current == values[index])
-        {
-            return values[(index + 1) % Count];
-        }
-    }
-    return values[0];
-}
-
-static bool drawFrame(uint16_t* pixels, int displayedFps);
-
-#include "frontend/menu/menu_overlay.cpp"
+bool drawFrame(uint16_t* pixels, int displayedFps);
 
 bool frontendRunCheatManagerFileSwitchAutomation(void)
 {
@@ -5400,7 +5347,7 @@ static void cancelControllerCalibration(void)
     }
 }
 
-static void resetControllerCalibration(void)
+void resetControllerCalibration(void)
 {
     cancelControllerCalibration();
     setDefaultControllerCalibration();
@@ -5415,7 +5362,7 @@ static void resetControllerCalibration(void)
     releaseGameControllerControls();
 }
 
-static void beginControllerCalibration(void)
+void beginControllerCalibration(void)
 {
     openFirstGameController();
     if (!g_gameController)
@@ -5522,7 +5469,7 @@ static void updateControllerCalibration(void)
     }
 }
 
-static std::string controllerCalibrationStatusText(void)
+std::string controllerCalibrationStatusText(void)
 {
     if (g_controllerCalibrationStage == CONTROLLER_CALIBRATION_CENTER)
     {
@@ -5975,7 +5922,7 @@ static void cancelControllerMapping(void)
     clearAndroidSystemTextTextures();
 }
 
-static void resetControllerMapping(void)
+void resetControllerMapping(void)
 {
     cancelControllerMapping();
     applyGameControllerMappingSettings("");
@@ -7251,7 +7198,7 @@ static bool renderBlurredBackdropEdges(const SDL_Rect& foregroundRect)
     return true;
 }
 
-static bool drawFrame(uint16_t* pixels, int displayedFps)
+bool drawFrame(uint16_t* pixels, int displayedFps)
 {
     if (!g_renderer || !g_frameTexture || !pixels)
     {
@@ -7564,12 +7511,25 @@ void frontendRunLoop(const EmulatorOptions& options)
     uint64_t lastPresentTicks = 0;
     uint64_t lastIdlePresentCounter = 0;
     uint64_t performanceFrequency = SDL_GetPerformanceFrequency();
+    uint64_t nextExternalLaunchPollTicks = 0;
     bool pendingFrameRequest = false;
     uint16_t frameCopy[SCREEN_WIDTH * SCREEN_HEIGHT];
     while (running && SDL_AtomicGet(&g_frontendLoopExitRequested) == 0 &&
         !SDL_AtomicGet(&g_quitRequested))
     {
         uint64_t loopNow = SDL_GetTicks64();
+        if (loopNow >= nextExternalLaunchPollTicks)
+        {
+            nextExternalLaunchPollTicks = loopNow + 50;
+            std::string externalGamePath = platformConsumeExternalGameLaunchPath();
+            if (!externalGamePath.empty())
+            {
+                printf("frontend: external frontend requested game=%s\n",
+                    externalGamePath.c_str());
+                requestAndroidGame(externalGamePath);
+                continue;
+            }
+        }
         uint64_t loopElapsed = loopNow - startTicks;
         runAutoVirtualClickActions(autotestVirtualClickEvents,
             autotestVirtualClickCount, loopElapsed);

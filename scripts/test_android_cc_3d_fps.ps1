@@ -37,13 +37,15 @@ $profileDevicePath = '/data/local/tmp/dingoopie-cc-3d-profile.ini'
 $profileDeviceBackupPath = 'files/DingooPie.profile-backup.ini'
 
 function Set-DebugProfile {
-    if (!$EnableProfile) { return }
     Invoke-Adb shell run-as com.dingoopie.android cp `
         files/DingooPie.ini $profileDeviceBackupPath | Out-Null
     $settings = (Invoke-Adb shell run-as com.dingoopie.android cat files/DingooPie.ini) -join "`r`n"
     [System.IO.File]::WriteAllText($profileBackupPath, $settings,
         [System.Text.UTF8Encoding]::new($false))
-    $profileSettings = $settings -replace '(?m)^profile=.*$', 'profile=1'
+    $profileSettings = $settings -replace '(?m)^show_fps=.*$', 'show_fps=1'
+    if ($EnableProfile) {
+        $profileSettings = $profileSettings -replace '(?m)^profile=.*$', 'profile=1'
+    }
     $profileHostPath = Join-Path $OutputDirectory 'settings-profile.ini'
     [System.IO.File]::WriteAllText($profileHostPath, $profileSettings,
         [System.Text.UTF8Encoding]::new($false))
@@ -52,7 +54,7 @@ function Set-DebugProfile {
 }
 
 function Restore-DebugProfile {
-    if (!$EnableProfile -or !(Test-Path -LiteralPath $profileBackupPath)) { return }
+    if (!(Test-Path -LiteralPath $profileBackupPath)) { return }
     try {
         Invoke-Adb shell run-as com.dingoopie.android cp `
             $profileDeviceBackupPath files/DingooPie.ini | Out-Null
@@ -404,6 +406,20 @@ function Test-TiandiDaoDialogueText {
         '\u7533\u5143\u9053|\u5929\u7f6a\u5f1f\u5b50|\u4e3a\u5e08|\u4fee\u4e3a\u5c1a\u6d45'
 }
 
+function Test-TiandiDaoEffectPrompt {
+    param([string]$Text)
+    $normalized = ($Text -replace '\s+', '')
+    return $normalized -match
+        '\u9ed8\u8ba4.*\u5f00.*\u66f4\u52a0\u6d41\u7545|\u6e38\u620f\u8bbe\u7f6e\u9009\u9879.*\u8fdb\u884c\u6e38\u620f'
+}
+
+function Dismiss-TiandiDaoEffectPrompt {
+    for ($index = 0; $index -lt 3; ++$index) {
+        Press-NamedControl 'A'
+        Start-Sleep -Seconds 2
+    }
+}
+
 function Test-TutorialMenuPrompt {
     param([string]$Text)
     $normalized = ($Text -replace '\s+', '')
@@ -484,6 +500,11 @@ for ($attempt = 1; $attempt -le 24 -and !$interactive; ++$attempt) {
     $precheck = Save-Screenshot ('scene-{0}-precheck' -f $attempt)
     $precheckOcr = Get-WindowsOcrText $precheck
     if ($Game -eq 'tiandidao' -and
+        (Test-TiandiDaoEffectPrompt $precheckOcr)) {
+        Dismiss-TiandiDaoEffectPrompt
+        continue
+    }
+    if ($Game -eq 'tiandidao' -and
         (Test-TutorialMenuPrompt $precheckOcr)) {
         Press-NamedControl 'A'
         Start-Sleep -Seconds 2
@@ -502,6 +523,11 @@ for ($attempt = 1; $attempt -le 24 -and !$interactive; ++$attempt) {
     }
     $before = Save-Screenshot "scene-$attempt-before"
     $beforeOcr = Get-WindowsOcrText $before
+    if ($Game -eq 'tiandidao' -and
+        (Test-TiandiDaoEffectPrompt $beforeOcr)) {
+        Dismiss-TiandiDaoEffectPrompt
+        continue
+    }
     if ($Game -eq 'tiandidao' -and (Test-TiandiDaoDialogueText $beforeOcr)) {
         Press-NamedControl 'A'
         Start-Sleep -Seconds 2
@@ -514,6 +540,11 @@ for ($attempt = 1; $attempt -le 24 -and !$interactive; ++$attempt) {
     Start-Sleep -Seconds 1
     $after = Save-Screenshot "scene-$attempt-after"
     $afterOcr = Get-WindowsOcrText $after
+    if ($Game -eq 'tiandidao' -and
+        (Test-TiandiDaoEffectPrompt $afterOcr)) {
+        Dismiss-TiandiDaoEffectPrompt
+        continue
+    }
     if ($Game -eq 'tiandidao' -and (Test-TiandiDaoDialogueText $afterOcr)) {
         Press-NamedControl 'A'
         Start-Sleep -Seconds 2
@@ -546,6 +577,11 @@ for ($attempt = 1; $attempt -le 24 -and !$interactive; ++$attempt) {
     Start-Sleep -Seconds 1
     $afterSecond = Save-Screenshot ('scene-{0}-after-second' -f $attempt)
     $afterSecondOcr = Get-WindowsOcrText $afterSecond
+    if ($Game -eq 'tiandidao' -and
+        (Test-TiandiDaoEffectPrompt $afterSecondOcr)) {
+        Dismiss-TiandiDaoEffectPrompt
+        continue
+    }
     if (Test-BlockingSceneText $afterSecondOcr) {
         continue
     }

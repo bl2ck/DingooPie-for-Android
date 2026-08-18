@@ -11,6 +11,7 @@
 #include "shared/platform/storage_services.h"
 #include "shared/platform/lifecycle_services.h"
 #include "shared/platform/automation_services.h"
+#include "shared/platform/external_launch_services.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,8 +113,14 @@ extern "C" int SDL_main(int, char*[])
     audioOutputSetValidationCaptureEnabled(
         platformConsumeAudioValidationAutomationEnabled());
 
-    std::string selectedGamePath = platformConsumeGameAutomationPath();
-    bool gameAutomation = !selectedGamePath.empty();
+    std::string selectedGamePath = platformConsumeExternalGameLaunchPath();
+    bool externalLaunch = !selectedGamePath.empty();
+    bool gameAutomation = false;
+    if (selectedGamePath.empty())
+    {
+        selectedGamePath = platformConsumeGameAutomationPath();
+        gameAutomation = !selectedGamePath.empty();
+    }
     bool cheatManagerAutomation = false;
     if (selectedGamePath.empty())
     {
@@ -126,8 +133,9 @@ extern "C" int SDL_main(int, char*[])
     }
     else
     {
-        printf("main: %s automation startup game=%s\n",
-            gameAutomation ? "game" : "cheat manager", selectedGamePath.c_str());
+        const char* launchSource = externalLaunch ? "external frontend" :
+            (gameAutomation ? "game automation" : "cheat manager automation");
+        printf("main: %s startup game=%s\n", launchSource, selectedGamePath.c_str());
         platformChangeToGameDirectory(selectedGamePath);
     }
 

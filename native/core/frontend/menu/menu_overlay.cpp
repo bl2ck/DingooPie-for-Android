@@ -1,11 +1,58 @@
-#ifndef DINGOO_PIE_FRONTEND_MENU_OVERLAY_INL
-#define DINGOO_PIE_FRONTEND_MENU_OVERLAY_INL
+#include "frontend/menu/menu_overlay_internal.h"
+
+#include "config/cheats/cheat_runtime.h"
+#include "frontend/input/input_controls.h"
+#include "frontend/shell/frontend_shell.h"
+#include "frontend/video/framebuffer.h"
+#include "shared/game/game_runtime.h"
+#include "shared/platform/storage_services.h"
+
+#include <algorithm>
+#include <stdio.h>
+#include <stdlib.h>
+#include <vector>
 
 struct AndroidMenuRowContent
 {
     std::string label;
     std::string value;
 };
+
+template <size_t Count>
+static int nextAndroidIntPreset(int current, const int (&values)[Count], int fallback)
+{
+    for (size_t index = 0; index < Count; ++index)
+    {
+        if (values[index] == current)
+        {
+            return values[(index + 1) % Count];
+        }
+    }
+    return fallback;
+}
+
+static int nextAndroidEnumValue(int current, int count, int fallback)
+{
+    if (current < 0 || current >= count)
+    {
+        current = fallback;
+    }
+    return (current + 1) % count;
+}
+
+template <size_t Count>
+static std::string nextAndroidStringPreset(const std::string& current,
+    const char* const (&values)[Count])
+{
+    for (size_t index = 0; index < Count; ++index)
+    {
+        if (current == values[index])
+        {
+            return values[(index + 1) % Count];
+        }
+    }
+    return values[0];
+}
 
 template <size_t Count>
 static int androidNormalizedIntPreset(int value, const int (&values)[Count], int fallback)
@@ -34,7 +81,7 @@ static std::string androidNormalizedStringPreset(
     return "";
 }
 
-static std::string androidMenuString(AndroidMenuTextId id)
+std::string androidMenuString(AndroidMenuTextId id)
 {
     UiLanguage language = g_frontendSettings ?
         g_frontendSettings->uiLanguage : UI_LANGUAGE_CHINESE;
@@ -202,7 +249,7 @@ static void loadAndroidCheatManagerGamePath(const std::string& gamePath)
     }
 }
 
-static void prepareAndroidCheatManagerGamePath(void)
+void prepareAndroidCheatManagerGamePath(void)
 {
     if (!g_frontendCurrentGamePath.empty())
     {
@@ -229,7 +276,7 @@ static void prepareAndroidCheatManagerGamePath(void)
     cheatRuntimeLoadForConfiguration(NULL, std::vector<std::string>());
 }
 
-static bool selectNextAndroidCheatManagerGamePath(void)
+bool selectNextAndroidCheatManagerGamePath(void)
 {
     if (!g_frontendCurrentGamePath.empty() || g_androidGamePaths.empty())
     {
@@ -272,7 +319,7 @@ static bool saveAndroidCheatManagerSelection(const CheatRuntimeStatus& status)
     return true;
 }
 
-static bool setAndroidCheatManagerGlobalEnabled(bool enabled)
+bool setAndroidCheatManagerGlobalEnabled(bool enabled)
 {
     if (!g_frontendSettings)
     {
@@ -294,7 +341,7 @@ static bool setAndroidCheatManagerGlobalEnabled(bool enabled)
     return saved;
 }
 
-static bool setAndroidCheatManagerFeatureEnabled(size_t index, bool enabled)
+bool setAndroidCheatManagerFeatureEnabled(size_t index, bool enabled)
 {
     if (!cheatRuntimeSetEntryEnabled(index, enabled))
     {
@@ -309,7 +356,7 @@ static bool setAndroidCheatManagerFeatureEnabled(size_t index, bool enabled)
     return saved;
 }
 
-static bool setAllAndroidCheatManagerFeaturesEnabled(bool enabled)
+bool setAllAndroidCheatManagerFeaturesEnabled(bool enabled)
 {
     CheatRuntimeStatus status = cheatRuntimeGetStatus();
     if (!status.available)
@@ -599,7 +646,7 @@ static AndroidMenuRowContent androidMenuRowContent(int row)
     return AndroidMenuRowContent{};
 }
 
-static void requestAndroidSwitchGame(void)
+void requestAndroidSwitchGame(void)
 {
     if (showAndroidConfirmationDialog(
         androidMenuString(ANDROID_TEXT_CONFIRM_SWITCH_GAME_TITLE),
@@ -611,7 +658,7 @@ static void requestAndroidSwitchGame(void)
     }
 }
 
-static void requestAndroidRestartGame(void)
+void requestAndroidRestartGame(void)
 {
     if (!frontendGameRunning() || g_frontendCurrentGamePath.empty())
     {
@@ -628,7 +675,7 @@ static void requestAndroidRestartGame(void)
     }
 }
 
-static void requestAndroidExitApplication(void)
+void requestAndroidExitApplication(void)
 {
     if (showAndroidConfirmationDialog(
         androidMenuString(ANDROID_TEXT_CONFIRM_EXIT_TITLE),
@@ -774,7 +821,7 @@ static bool validateAndroidSaveStateRuntimeCount(
     return true;
 }
 
-static void refreshAndroidSaveStateSlotInfo(int slot)
+void refreshAndroidSaveStateSlotInfo(int slot)
 {
     if (slot < 1 || slot > kSaveStateSlotCount ||
         g_frontendCurrentGamePath.empty())
@@ -787,7 +834,7 @@ static void refreshAndroidSaveStateSlotInfo(int slot)
     g_androidSaveStateSlotModifiedTime[slot - 1] = info.modifiedTime;
 }
 
-static void refreshAndroidSaveStateSlots(void)
+void refreshAndroidSaveStateSlots(void)
 {
     if (g_frontendCurrentGamePath.empty())
     {
@@ -808,7 +855,7 @@ static void refreshAndroidSaveStateSlots(void)
     g_androidSaveStateSlotCacheGamePath = g_frontendCurrentGamePath;
 }
 
-static void invalidateAndroidSaveStateThumbnail(void)
+void invalidateAndroidSaveStateThumbnail(void)
 {
     if (g_androidSaveStateThumbnail)
     {
@@ -817,7 +864,7 @@ static void invalidateAndroidSaveStateThumbnail(void)
     }
 }
 
-static void refreshAndroidSaveStateThumbnail(void)
+void refreshAndroidSaveStateThumbnail(void)
 {
     invalidateAndroidSaveStateThumbnail();
     if (!g_renderer || g_frontendCurrentGamePath.empty())
@@ -880,7 +927,7 @@ static bool loadAndroidSaveState(SaveStateGameFormat format, int slot,
         androidSaveStateProgressCallback, NULL);
 }
 
-static void performAndroidSaveStateAction(bool saving)
+void performAndroidSaveStateAction(bool saving)
 {
     if (g_androidSaveStateBusy || g_frontendCurrentGamePath.empty())
     {
@@ -957,7 +1004,7 @@ static void performAndroidSaveStateAction(bool saving)
     }
 }
 
-static void deleteAndroidSaveState(void)
+void deleteAndroidSaveState(void)
 {
     if (g_androidSaveStateBusy || g_frontendCurrentGamePath.empty()) return;
     SaveStateGameFormat format = androidCurrentSaveStateFormat();
@@ -989,7 +1036,7 @@ static void deleteAndroidSaveState(void)
             (chinese ? u8"\u65e0\u6cd5\u5220\u9664\u5b58\u6863\u3002" : "Could not delete state."));
 }
 
-static SDL_Rect androidSaveStateSlotRect(const SDL_Rect& panel, int slot)
+SDL_Rect androidSaveStateSlotRect(const SDL_Rect& panel, int slot)
 {
     int gap = androidUiMetric(6);
     int horizontalInset = androidUiMetric(24);
@@ -1030,7 +1077,7 @@ static SDL_Rect androidSaveStatePreviewRect(const SDL_Rect& panel)
         top, previewWidth, previewHeight };
 }
 
-static SDL_Rect androidSaveStateActionRect(const SDL_Rect& panel, int index)
+SDL_Rect androidSaveStateActionRect(const SDL_Rect& panel, int index)
 {
     int gap = androidUiMetric(kAndroidMenuRowGap);
     int horizontalInset = androidUiMetric(24);
@@ -1076,7 +1123,7 @@ static std::string androidSaveStateTimeText(uint64_t timestamp)
     return text;
 }
 
-static void handleAndroidMainMenuSelection(int row)
+void handleAndroidMainMenuSelection(int row)
 {
     switch (row)
     {
@@ -1102,7 +1149,7 @@ static void handleAndroidMainMenuSelection(int row)
 
 static void requestAndroidRestoreDefaultSettings(void);
 
-static void handleAndroidOptionsSelection(int row)
+void handleAndroidOptionsSelection(int row)
 {
     switch (row)
     {
@@ -1169,7 +1216,7 @@ static void requestAndroidRestoreDefaultSettings(void)
     showAndroidMessageDialog(title, saved ? success : saveFailed);
 }
 
-static void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row)
+void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row)
 {
     if ((screen == ANDROID_MENU_VIDEO && row == ANDROID_VIDEO_BACK) ||
         (screen == ANDROID_MENU_AUDIO && row == ANDROID_AUDIO_BACK) ||
@@ -1471,7 +1518,7 @@ static void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row)
     }
 }
 
-static void drawAndroidMenuOverlay(void)
+void drawAndroidMenuOverlay(void)
 {
     if (!g_renderer || (!frontendGameRunning() &&
         !androidMenuScreenUsesOverlay(g_androidMenuScreen)))
@@ -1742,5 +1789,3 @@ static void drawAndroidMenuOverlay(void)
         }
     }
 }
-
-#endif

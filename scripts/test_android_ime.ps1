@@ -1,5 +1,6 @@
 param(
     [string]$AndroidSdkRoot,
+    [string]$AdbPath,
     [string]$Serial
 )
 
@@ -25,7 +26,11 @@ if (!$AndroidSdkRoot) {
 }
 
 $resolvedSdkRoot = (Resolve-Path -LiteralPath $AndroidSdkRoot).Path
-$adb = Join-Path $resolvedSdkRoot 'platform-tools\adb.exe'
+$adb = if ($AdbPath) {
+    (Resolve-Path -LiteralPath $AdbPath).Path
+} else {
+    Join-Path $resolvedSdkRoot 'platform-tools\adb.exe'
+}
 if (!(Test-Path -LiteralPath $adb)) {
     throw "ADB was not found: $adb"
 }

@@ -704,14 +704,14 @@ static void ppssppShimProfileTick()
     uint64_t tickDelta = g_ppssppLastProfileCoreTicks ? coreTicks - g_ppssppLastProfileCoreTicks : 0;
     unsigned guestMhz = elapsedMs ? (unsigned)(tickDelta / elapsedMs / 1000) : 0;
 
-    uint64_t submittedFrames = consumeFramebufferSubmittedCount();
-    uint64_t framebufferCopyMicros = consumeFramebufferCopyMicros();
+    uint64_t submittedFrames = framebufferConsumeSubmittedCount();
+    uint64_t framebufferCopyMicros = framebufferConsumeCopyMicros();
 
     uint64_t totalFrameIntervalMicros = 0;
     uint64_t maxFrameIntervalMicros = 0;
     uint64_t frameIntervalsOver25ms = 0;
     uint64_t frameIntervalsOver33ms = 0;
-    consumeFramebufferTimingStats(&totalFrameIntervalMicros, &maxFrameIntervalMicros,
+    framebufferConsumeTimingStats(&totalFrameIntervalMicros, &maxFrameIntervalMicros,
         &frameIntervalsOver25ms, &frameIntervalsOver33ms);
     uint64_t avgFrameIntervalMicros = submittedFrames ? totalFrameIntervalMicros / submittedFrames : 0;
     bool throttleEnabled = g_irjitThrottleEnabled.load();
@@ -2330,7 +2330,7 @@ void ppssppShimWrite8(uint32_t address, uint32_t value)
     {
         *ptr = (uint8_t)value;
         notifyRuntimeWrite(address, 1, value & 0xffu);
-        trackFramebufferWrite(address, 1);
+        framebufferTrackWrite(address, 1);
         return;
     }
 
@@ -2342,7 +2342,7 @@ void ppssppShimWrite8(uint32_t address, uint32_t value)
     else
     {
         notifyRuntimeWrite(address, 1, value & 0xffu);
-        trackFramebufferWrite(address, sizeof(byte));
+        framebufferTrackWrite(address, sizeof(byte));
     }
 }
 
@@ -2354,7 +2354,7 @@ void ppssppShimWrite16(uint32_t address, uint32_t value)
     {
         storeFastLe16(ptr, value);
         notifyRuntimeWrite(address, 2, value & 0xffffu);
-        trackFramebufferWrite(address, 2);
+        framebufferTrackWrite(address, 2);
         return;
     }
 
@@ -2368,7 +2368,7 @@ void ppssppShimWrite16(uint32_t address, uint32_t value)
     else
     {
         notifyRuntimeWrite(address, 2, value & 0xffffu);
-        trackFramebufferWrite(address, sizeof(bytes));
+        framebufferTrackWrite(address, sizeof(bytes));
     }
 }
 
@@ -2381,7 +2381,7 @@ void ppssppShimWrite32(uint32_t address, uint32_t value)
         rememberEmuHackOriginal(address, value);
         storeLe32(ptr, value);
         notifyRuntimeWrite(address, 4, value);
-        trackFramebufferWrite(address, 4);
+        framebufferTrackWrite(address, 4);
         return;
     }
 
@@ -2395,7 +2395,7 @@ void ppssppShimWrite32(uint32_t address, uint32_t value)
     else
     {
         notifyRuntimeWrite(address, 4, value);
-        trackFramebufferWrite(address, sizeof(bytes));
+        framebufferTrackWrite(address, sizeof(bytes));
     }
 }
 
@@ -2427,7 +2427,7 @@ void ppssppShimWrite64(uint32_t address, uint64_t value)
     {
         storeFastLe64(ptr, value);
         notifyRuntimeWrite(address, 8, (int64_t)value);
-        trackFramebufferWrite(address, 8);
+        framebufferTrackWrite(address, 8);
         return;
     }
 
@@ -2441,7 +2441,7 @@ void ppssppShimWrite64(uint32_t address, uint64_t value)
     else
     {
         notifyRuntimeWrite(address, 8, (int64_t)value);
-        trackFramebufferWrite(address, sizeof(bytes));
+        framebufferTrackWrite(address, sizeof(bytes));
     }
 }
 
@@ -2467,7 +2467,7 @@ void ppssppShimWriteBlock(uint32_t address, const void* in, uint32_t size)
     {
         g_ppssppWrites++;
         notifyRuntimeWrite(address, (int)size, 0);
-        trackFramebufferWrite(address, size);
+        framebufferTrackWrite(address, size);
     }
 }
 

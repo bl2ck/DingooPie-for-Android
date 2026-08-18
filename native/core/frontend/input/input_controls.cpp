@@ -1,10 +1,9 @@
 #include "frontend/input/input_controls.h"
+#include "frontend/input/keyboard_mapping.h"
 
 #include <memory.h>
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string>
 
 struct InputState
 {
@@ -59,314 +58,14 @@ static bool inputTraceEnabled(void)
     return enabled;
 }
 
-struct KeyboardBinding
-{
-    uint32_t controlBit;
-    SDL_Scancode scancode;
-};
-
-// The frontend uses a polling-only whitelist so unmapped host keys can never
-// modify the emulated Dingoo button state.
-static const KeyboardBinding kDefaultKeyboardBindings[] =
-{
-    { CONTROL_DPAD_UP, SDL_SCANCODE_W },
-    { CONTROL_DPAD_UP, SDL_SCANCODE_UP },
-    { CONTROL_DPAD_DOWN, SDL_SCANCODE_S },
-    { CONTROL_DPAD_DOWN, SDL_SCANCODE_DOWN },
-    { CONTROL_DPAD_LEFT, SDL_SCANCODE_A },
-    { CONTROL_DPAD_LEFT, SDL_SCANCODE_LEFT },
-    { CONTROL_DPAD_RIGHT, SDL_SCANCODE_D },
-    { CONTROL_DPAD_RIGHT, SDL_SCANCODE_RIGHT },
-    { CONTROL_BUTTON_X, SDL_SCANCODE_I },
-    { CONTROL_BUTTON_B, SDL_SCANCODE_K },
-    { CONTROL_BUTTON_Y, SDL_SCANCODE_J },
-    { CONTROL_BUTTON_A, SDL_SCANCODE_L },
-    { CONTROL_BUTTON_START, SDL_SCANCODE_O },
-    { CONTROL_BUTTON_START, SDL_SCANCODE_0 },
-    { CONTROL_BUTTON_SELECT, SDL_SCANCODE_Q },
-    { CONTROL_BUTTON_SELECT, SDL_SCANCODE_1 },
-    { CONTROL_TRIGGER_LEFT, SDL_SCANCODE_LSHIFT },
-    { CONTROL_TRIGGER_RIGHT, SDL_SCANCODE_RSHIFT },
-    { CONTROL_POWER, SDL_SCANCODE_BACKSPACE },
-    { CONTROL_POWER, SDL_SCANCODE_HOME },
-};
-
-static const size_t kMaxKeyboardBindings = 64;
-static KeyboardBinding g_keyboardBindings[kMaxKeyboardBindings];
-static size_t g_keyboardBindingCount = 0;
-static bool g_keyboardMappingInitialized = false;
-static std::string g_appliedKeyboardMapping;
-
-static std::string trimString(const std::string& text)
-{
-    size_t begin = 0;
-    size_t end = text.size();
-    while (begin < end && (text[begin] == ' ' || text[begin] == '\t' ||
-        text[begin] == '\r' || text[begin] == '\n'))
-    {
-        begin++;
-    }
-    while (end > begin && (text[end - 1] == ' ' || text[end - 1] == '\t' ||
-        text[end - 1] == '\r' || text[end - 1] == '\n'))
-    {
-        end--;
-    }
-    return text.substr(begin, end - begin);
-}
-
-static std::string normalizeMappingName(const std::string& text)
-{
-    std::string out;
-    std::string trimmed = trimString(text);
-    for (size_t i = 0; i < trimmed.size(); ++i)
-    {
-        unsigned char ch = (unsigned char)trimmed[i];
-        if (ch == ' ' || ch == '\t' || ch == '_' || ch == '-')
-        {
-            continue;
-        }
-        out.push_back((char)tolower(ch));
-    }
-    return out;
-}
-
-static bool parseKeyboardControlName(const std::string& name, uint32_t* outControlBit)
-{
-    if (!outControlBit)
-    {
-        return false;
-    }
-    std::string normalized = normalizeMappingName(name);
-    if (normalized == "a" || normalized == "buttona")
-    {
-        *outControlBit = CONTROL_BUTTON_A;
-        return true;
-    }
-    if (normalized == "b" || normalized == "buttonb")
-    {
-        *outControlBit = CONTROL_BUTTON_B;
-        return true;
-    }
-    if (normalized == "x" || normalized == "buttonx")
-    {
-        *outControlBit = CONTROL_BUTTON_X;
-        return true;
-    }
-    if (normalized == "y" || normalized == "buttony")
-    {
-        *outControlBit = CONTROL_BUTTON_Y;
-        return true;
-    }
-    if (normalized == "start")
-    {
-        *outControlBit = CONTROL_BUTTON_START;
-        return true;
-    }
-    if (normalized == "select")
-    {
-        *outControlBit = CONTROL_BUTTON_SELECT;
-        return true;
-    }
-    if (normalized == "l" || normalized == "leftshoulder" ||
-        normalized == "triggerleft")
-    {
-        *outControlBit = CONTROL_TRIGGER_LEFT;
-        return true;
-    }
-    if (normalized == "r" || normalized == "rightshoulder" ||
-        normalized == "triggerright")
-    {
-        *outControlBit = CONTROL_TRIGGER_RIGHT;
-        return true;
-    }
-    if (normalized == "up" || normalized == "dpadup")
-    {
-        *outControlBit = CONTROL_DPAD_UP;
-        return true;
-    }
-    if (normalized == "down" || normalized == "dpaddown")
-    {
-        *outControlBit = CONTROL_DPAD_DOWN;
-        return true;
-    }
-    if (normalized == "left" || normalized == "dpadleft")
-    {
-        *outControlBit = CONTROL_DPAD_LEFT;
-        return true;
-    }
-    if (normalized == "right" || normalized == "dpadright")
-    {
-        *outControlBit = CONTROL_DPAD_RIGHT;
-        return true;
-    }
-    if (normalized == "power")
-    {
-        *outControlBit = CONTROL_POWER;
-        return true;
-    }
-    return false;
-}
-
-static bool parseKeyboardSourceName(const std::string& name, SDL_Scancode* outScancode)
-{
-    if (!outScancode)
-    {
-        return false;
-    }
-    std::string normalized = normalizeMappingName(name);
-    if (normalized.empty() || normalized == "none" || normalized == "off" ||
-        normalized == "unmapped" || normalized == "disabled" || normalized == "0")
-    {
-        *outScancode = SDL_SCANCODE_UNKNOWN;
-        return true;
-    }
-    if (normalized == "up" || normalized == "arrowup") { *outScancode = SDL_SCANCODE_UP; return true; }
-    if (normalized == "down" || normalized == "arrowdown") { *outScancode = SDL_SCANCODE_DOWN; return true; }
-    if (normalized == "left" || normalized == "arrowleft") { *outScancode = SDL_SCANCODE_LEFT; return true; }
-    if (normalized == "right" || normalized == "arrowright") { *outScancode = SDL_SCANCODE_RIGHT; return true; }
-    if (normalized == "lshift" || normalized == "leftshift") { *outScancode = SDL_SCANCODE_LSHIFT; return true; }
-    if (normalized == "rshift" || normalized == "rightshift") { *outScancode = SDL_SCANCODE_RSHIFT; return true; }
-    if (normalized == "space") { *outScancode = SDL_SCANCODE_SPACE; return true; }
-    if (normalized == "enter" || normalized == "return") { *outScancode = SDL_SCANCODE_RETURN; return true; }
-    if (normalized == "esc" || normalized == "escape") { *outScancode = SDL_SCANCODE_ESCAPE; return true; }
-    if (normalized == "backspace") { *outScancode = SDL_SCANCODE_BACKSPACE; return true; }
-    if (normalized == "home") { *outScancode = SDL_SCANCODE_HOME; return true; }
-
-    SDL_Scancode scancode = SDL_GetScancodeFromName(name.c_str());
-    if (scancode != SDL_SCANCODE_UNKNOWN)
-    {
-        *outScancode = scancode;
-        return true;
-    }
-    if (normalized.size() == 1)
-    {
-        char ch = (char)normalized[0];
-        if (ch >= 'a' && ch <= 'z')
-        {
-            *outScancode = (SDL_Scancode)(SDL_SCANCODE_A + (ch - 'a'));
-            return true;
-        }
-        if (ch >= '0' && ch <= '9')
-        {
-            *outScancode = ch == '0' ? SDL_SCANCODE_0 : (SDL_Scancode)(SDL_SCANCODE_1 + (ch - '1'));
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool addKeyboardBinding(uint32_t controlBit, SDL_Scancode scancode)
-{
-    if (scancode == SDL_SCANCODE_UNKNOWN || g_keyboardBindingCount >= kMaxKeyboardBindings)
-    {
-        return false;
-    }
-    g_keyboardBindings[g_keyboardBindingCount].controlBit = controlBit;
-    g_keyboardBindings[g_keyboardBindingCount].scancode = scancode;
-    g_keyboardBindingCount++;
-    return true;
-}
-
-static void setDefaultKeyboardMapping(void)
-{
-    g_keyboardBindingCount = 0;
-    for (size_t i = 0; i < sizeof(kDefaultKeyboardBindings) / sizeof(kDefaultKeyboardBindings[0]); ++i)
-    {
-        if (g_keyboardBindingCount < kMaxKeyboardBindings)
-        {
-            g_keyboardBindings[g_keyboardBindingCount++] = kDefaultKeyboardBindings[i];
-        }
-    }
-}
-
-static void removeKeyboardSource(SDL_Scancode scancode)
-{
-    if (scancode == SDL_SCANCODE_UNKNOWN)
-    {
-        return;
-    }
-    size_t out = 0;
-    for (size_t i = 0; i < g_keyboardBindingCount; ++i)
-    {
-        if (g_keyboardBindings[i].scancode == scancode)
-        {
-            continue;
-        }
-        g_keyboardBindings[out++] = g_keyboardBindings[i];
-    }
-    g_keyboardBindingCount = out;
-}
-
-static void applyKeyboardMappingToken(const std::string& token)
-{
-    std::string trimmed = trimString(token);
-    if (trimmed.empty())
-    {
-        return;
-    }
-    size_t separator = trimmed.find('=');
-    if (separator == std::string::npos)
-    {
-        separator = trimmed.find(':');
-    }
-    if (separator == std::string::npos)
-    {
-        printf("input: invalid keyboard mapping token='%s'\n", trimmed.c_str());
-        return;
-    }
-    std::string sourceName = trimString(trimmed.substr(0, separator));
-    std::string targetName = trimString(trimmed.substr(separator + 1));
-    SDL_Scancode scancode = SDL_SCANCODE_UNKNOWN;
-    if (!parseKeyboardSourceName(sourceName, &scancode))
-    {
-        printf("input: unknown keyboard mapping source='%s'\n", sourceName.c_str());
-        return;
-    }
-    removeKeyboardSource(scancode);
-
-    uint32_t controlBit = 0;
-    std::string normalizedTarget = normalizeMappingName(targetName);
-    if (normalizedTarget.empty() || normalizedTarget == "none" || normalizedTarget == "off" ||
-        normalizedTarget == "unmapped" || normalizedTarget == "disabled" || normalizedTarget == "0")
-    {
-        return;
-    }
-    if (!parseKeyboardControlName(targetName, &controlBit))
-    {
-        printf("input: unknown keyboard mapping target='%s'\n", targetName.c_str());
-        return;
-    }
-    addKeyboardBinding(controlBit, scancode);
-}
-
 void inputApplyKeyboardMapping(const std::string& mapping)
 {
-    if (g_keyboardMappingInitialized && mapping == g_appliedKeyboardMapping)
+    if (keyboardMappingIsCurrent(mapping))
     {
         return;
     }
-
     inputClearControls();
-
-    setDefaultKeyboardMapping();
-    size_t begin = 0;
-    while (begin <= mapping.size())
-    {
-        size_t comma = mapping.find_first_of(",;\n", begin);
-        std::string token = comma == std::string::npos ?
-            mapping.substr(begin) : mapping.substr(begin, comma - begin);
-        applyKeyboardMappingToken(token);
-        if (comma == std::string::npos)
-        {
-            break;
-        }
-        begin = comma + 1;
-    }
-
-    g_appliedKeyboardMapping = mapping;
-    g_keyboardMappingInitialized = true;
-    printf("input: keyboard mapping applied spec='%s'\n",
-        mapping.empty() ? "(default)" : mapping.c_str());
+    keyboardMappingApply(mapping);
 }
 
 void _kbd_get_status(GuestKeyStatus* ks)
@@ -470,7 +169,7 @@ static void updateKeyLocked(int pressed, uint32_t key)
 
 static void ensureKeyboardMappingInitialized(void)
 {
-    if (!g_keyboardMappingInitialized)
+    if (!keyboardMappingInitialized())
     {
         inputApplyKeyboardMapping("");
     }
@@ -487,11 +186,13 @@ static bool updateBindingFromScancode(bool pressed, SDL_Scancode scancode)
     bool handled = false;
     lockInput();
     InputState before = g_inputState;
-    for (size_t i = 0; i < g_keyboardBindingCount; ++i)
+    size_t bindingCount = 0;
+    const KeyboardBinding* bindings = keyboardMappingBindings(&bindingCount);
+    for (size_t i = 0; i < bindingCount; ++i)
     {
-        if (bindingMatchesScancode(g_keyboardBindings[i], scancode))
+        if (bindingMatchesScancode(bindings[i], scancode))
         {
-            updateKeyLocked(pressed ? 1 : 0, g_keyboardBindings[i].controlBit);
+            updateKeyLocked(pressed ? 1 : 0, bindings[i].controlBit);
             handled = true;
         }
     }
@@ -636,11 +337,13 @@ void inputPollKeyboardState(void)
     InputState before = g_inputState;
     uint32_t referencedControls = 0;
     uint32_t activeControls = 0;
-    for (size_t i = 0; i < g_keyboardBindingCount; ++i)
+    size_t bindingCount = 0;
+    const KeyboardBinding* bindings = keyboardMappingBindings(&bindingCount);
+    for (size_t i = 0; i < bindingCount; ++i)
     {
-        uint32_t mask = (1u << g_keyboardBindings[i].controlBit);
+        uint32_t mask = (1u << bindings[i].controlBit);
         referencedControls |= mask;
-        if (isBindingDown(keys, g_keyboardBindings[i]) || (g_syntheticStatus & mask) != 0)
+        if (isBindingDown(keys, bindings[i]) || (g_syntheticStatus & mask) != 0)
         {
             activeControls |= mask;
         }

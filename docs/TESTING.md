@@ -73,7 +73,7 @@ For a diagnostic run without manually editing the emulator settings, pass
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test_android_cc_3d_fps.ps1 `
-    -Game qiye -GamePath "C:\Games\cc\?????.cc" `
+    -Game qiye -GamePath "C:\Games\cc\sample.cc" `
     -EnableProfile
 ```
 
@@ -213,7 +213,8 @@ with 16 concurrent host threads.
 
 ## Android Resource Regressions
 
-Run the host-side USB identifier and staged-upload comparisons:
+Run the host-side USB identifier, staged-upload, and external-launch request
+comparisons:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test_android_resource_regressions.ps1
@@ -222,7 +223,23 @@ powershell -ExecutionPolicy Bypass -File scripts/test_android_resource_regressio
 The USB test verifies that the previous first-device value of zero is replaced
 by stable positive identifiers. The upload test reproduces direct-write target
 corruption after an incomplete request and verifies that staging preserves the
-existing file until the full request body has arrived.
+existing file until the full request body has arrived. The external-launch test
+verifies APP/CC extension recognition, quoted path handling, and `file://` URI
+normalization used by emulator frontends.
+
+## Android Physical Keyboard Mapping
+
+Run the host-side default mapping and Android SDL input-chain regression:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_keyboard_mapping.ps1
+```
+
+The test verifies every documented default keyboard binding, checks that SDL's
+Android key table maps the required Android key codes to the expected SDL
+scancodes, and confirms that keyboard down/up events reach SDL native input.
+This is a code-level regression; final USB and Bluetooth keyboard acceptance
+still requires an Android device or emulator with physical-keyboard input.
 
 ## File Manager Socket Queue Regression
 

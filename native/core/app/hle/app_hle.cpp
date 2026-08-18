@@ -152,8 +152,8 @@ void bridge_profile_tick(void)
 
 static void profilePrintHleAndReset(void)
 {
-    uint64_t fbWrites = consumeFramebufferWriteCount();
-    uint64_t fbWriteBytes = consumeFramebufferWriteBytes();
+    uint64_t fbWrites = framebufferConsumeWriteCount();
+    uint64_t fbWriteBytes = framebufferConsumeWriteBytes();
     uint64_t profile[HLE_PROFILE_COUNTER_COUNT] = {};
     for (int index = 0; index < HLE_PROFILE_COUNTER_COUNT; ++index)
     {

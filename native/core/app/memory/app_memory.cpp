@@ -166,8 +166,8 @@ static void freeVmHeapBlock(void* pointer, uint32_t length)
         (char*)pointer + length > s_legacyHeapEnd ||
         (char*)pointer + length <= s_legacyHeapBase)
     {
-        printf("memory: invalid heap free\n");
-        printf("pointer=%" PRIXPTR ", length=%u, base=%" PRIXPTR ", end=%" PRIXPTR "\n",
+        printf("memory: invalid heap free pointer=0x%" PRIXPTR
+            " length=%u base=0x%" PRIXPTR " end=0x%" PRIXPTR "\n",
             (size_t)pointer, length, (size_t)s_legacyHeapBase, (size_t)s_legacyHeapEnd);
         return;
     }
@@ -316,7 +316,7 @@ static void* allocateTrackedVmHeapBlock(uint32_t len)
     }
     if (len > UINT32_MAX - 15)
     {
-        printf("allocateTrackedVmHeapBlock invalid memory request: len %08x\n", len);
+        printf("memory: invalid tracked heap allocation length=0x%08x\n", len);
         return NULL;
     }
 
@@ -561,7 +561,7 @@ void* toHostPtrRange(uint32_t addr, uint32_t size)
         }
     }
 
-    printf("ERR: toHostPtr 0x%08x\n", addr);
+    printf("memory: failed to translate VM address address=0x%08x\n", addr);
     return NULL;
 }
 
@@ -640,6 +640,6 @@ uint32_t toVmPtr(void* ptr)
     {
         return framebufferPtr;
     }
-    printf("ERR: toVmPtr %p\n", ptr);
+    printf("memory: failed to translate host pointer pointer=%p\n", ptr);
     return 0;
 }

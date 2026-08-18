@@ -119,8 +119,41 @@ $inputRows = @(
     'ANDROID_INPUT_VIRTUAL_CONTROL_SCALE,',
     'ANDROID_INPUT_VIRTUAL_DPAD_TYPE,',
     'ANDROID_INPUT_CONTROLLER_MAPPING,',
+    'ANDROID_INPUT_CONTROLLER_CALIBRATION,',
     'ANDROID_INPUT_BACK,',
     'ANDROID_INPUT_ROW_COUNT'
+)
+$inputControlBits = @(
+    'enum InputControlBit : uint32_t',
+    'CONTROL_BUTTON_A = 31,',
+    'CONTROL_BUTTON_B = 21,',
+    'CONTROL_BUTTON_X = 16,',
+    'CONTROL_BUTTON_Y = 6,',
+    'CONTROL_BUTTON_START = 11,',
+    'CONTROL_BUTTON_SELECT = 10,',
+    'CONTROL_TRIGGER_LEFT = 8,',
+    'CONTROL_TRIGGER_RIGHT = 29,',
+    'CONTROL_DPAD_UP = 20,',
+    'CONTROL_DPAD_DOWN = 27,',
+    'CONTROL_DPAD_LEFT = 28,',
+    'CONTROL_DPAD_RIGHT = 18,',
+    'CONTROL_POWER = 7'
+)
+$ccInputSourceMasks = @(
+    'enum CcInputSourceMask : uint32_t',
+    'CC_INPUT_SOURCE_A = 0x80000000u,',
+    'CC_INPUT_SOURCE_B = 0x00200000u,',
+    'CC_INPUT_SOURCE_X = 0x00010000u,',
+    'CC_INPUT_SOURCE_Y = 0x00000040u,',
+    'CC_INPUT_SOURCE_START = 0x00000800u,',
+    'CC_INPUT_SOURCE_SELECT = 0x00000400u,',
+    'CC_INPUT_SOURCE_L = 0x00000100u,',
+    'CC_INPUT_SOURCE_R = 0x20000000u,',
+    'CC_INPUT_SOURCE_UP = 0x00100000u,',
+    'CC_INPUT_SOURCE_DOWN = 0x08000000u,',
+    'CC_INPUT_SOURCE_LEFT = 0x10000000u,',
+    'CC_INPUT_SOURCE_RIGHT = 0x00040000u,',
+    'CC_INPUT_SOURCE_POWER = 0x00000080u'
 )
 $runtimeRows = @(
     'ANDROID_SETTINGS_EXECUTION_MODE = 0,',
@@ -150,6 +183,21 @@ $controllerMappingRows = @(
     'ANDROID_CONTROLLER_MAPPING_RESET,',
     'ANDROID_CONTROLLER_MAPPING_BACK,',
     'ANDROID_CONTROLLER_MAPPING_ROW_COUNT'
+)
+$controllerMappingControls = @(
+    'kControllerMenuActionBit,',
+    'CONTROL_BUTTON_A,',
+    'CONTROL_BUTTON_B,',
+    'CONTROL_BUTTON_X,',
+    'CONTROL_BUTTON_Y,',
+    'CONTROL_BUTTON_START,',
+    'CONTROL_BUTTON_SELECT,',
+    'CONTROL_TRIGGER_LEFT,',
+    'CONTROL_TRIGGER_RIGHT,',
+    'CONTROL_DPAD_UP,',
+    'CONTROL_DPAD_DOWN,',
+    'CONTROL_DPAD_LEFT,',
+    'CONTROL_DPAD_RIGHT'
 )
 $controllerMenuMapping = @(
     'static const uint32_t kControllerMenuActionMask = 1u << kControllerMenuActionBit;',
@@ -239,6 +287,9 @@ Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $videoRows
 Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $audioRows
 Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $inputRows
 Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $controllerMappingRows
+Assert-OrderedText 'native\core\frontend\input\input_controls.h' $inputControlBits
+Assert-OrderedText 'native\core\cc\hle\cc_input_mapping.h' $ccInputSourceMasks
+Assert-OrderedText 'native\core\frontend\menu\menu_overlay.cpp' $controllerMappingControls
 Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $runtimeRows
 Assert-OrderedText 'native\core\frontend\menu\menu_strings.h' $noiseReductionText
 Assert-OrderedText 'native\core\frontend\shell\frontend_shell.cpp' $audioApply

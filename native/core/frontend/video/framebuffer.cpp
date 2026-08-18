@@ -539,17 +539,17 @@ int framebufferConsumeUpdateRequest(void)
     return s_updateRequested.exchange(0, std::memory_order_acq_rel);
 }
 
-uint64_t consumeFramebufferSubmittedCount(void)
+uint64_t framebufferConsumeSubmittedCount(void)
 {
     return s_profileSubmittedFrameCount.exchange(0, std::memory_order_acq_rel);
 }
 
-uint64_t consumeFramebufferCopyMicros(void)
+uint64_t framebufferConsumeCopyMicros(void)
 {
     return s_copyMicros.exchange(0, std::memory_order_acq_rel);
 }
 
-void consumeFramebufferTimingStats(uint64_t* totalIntervalMicros, uint64_t* maxIntervalMicros,
+void framebufferConsumeTimingStats(uint64_t* totalIntervalMicros, uint64_t* maxIntervalMicros,
     uint64_t* over25msCount, uint64_t* over33msCount)
 {
     if (totalIntervalMicros)
@@ -570,7 +570,7 @@ void consumeFramebufferTimingStats(uint64_t* totalIntervalMicros, uint64_t* maxI
     }
 }
 
-void trackFramebufferWrite(uint32_t address, uint32_t size)
+void framebufferTrackWrite(uint32_t address, uint32_t size)
 {
     if (!framebufferWriteProfileEnabled())
     {
@@ -600,12 +600,12 @@ bool framebufferAddressOverlaps(uint32_t address, uint32_t size)
     return false;
 }
 
-uint64_t consumeFramebufferWriteCount(void)
+uint64_t framebufferConsumeWriteCount(void)
 {
     return s_writeCount.exchange(0, std::memory_order_acq_rel);
 }
 
-uint64_t consumeFramebufferWriteBytes(void)
+uint64_t framebufferConsumeWriteBytes(void)
 {
     return s_writeBytes.exchange(0, std::memory_order_acq_rel);
 }

@@ -1,6 +1,7 @@
 #include "shared/platform/storage_services.h"
 #include "shared/platform/lifecycle_services.h"
 #include "shared/platform/automation_services.h"
+#include "shared/platform/external_launch_services.h"
 #include "frontend/shell/frontend_shell.h"
 #include "shared/services/guest_filesystem.h"
 #include "app/hle/app_hle.h"
@@ -89,7 +90,7 @@ static int openAndroidGameSiblingDescriptor(const std::string& gamePath,
     return descriptor;
 }
 
-std::string platformConsumeCheatManagerAutomationGamePath(void)
+static std::string consumeAndroidActivityString(const char* methodName)
 {
     JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
     JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
@@ -101,7 +102,7 @@ std::string platformConsumeCheatManagerAutomationGamePath(void)
     std::string result;
     jclass activityClass = env->GetObjectClass(activity);
     jmethodID method = activityClass ? env->GetMethodID(activityClass,
-        "consumeCheatManagerAutomationGamePath", "()Ljava/lang/String;") : NULL;
+        methodName, "()Ljava/lang/String;") : NULL;
     jstring pathText = method ? (jstring)env->CallObjectMethod(activity, method) : NULL;
     if (!env->ExceptionCheck() && pathText)
     {
@@ -122,37 +123,19 @@ std::string platformConsumeCheatManagerAutomationGamePath(void)
     return result;
 }
 
+std::string platformConsumeCheatManagerAutomationGamePath(void)
+{
+    return consumeAndroidActivityString("consumeCheatManagerAutomationGamePath");
+}
+
 std::string platformConsumeGameAutomationPath(void)
 {
-    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
-    JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
-    if (!env || !activity)
-    {
-        return std::string();
-    }
+    return consumeAndroidActivityString("consumeGameAutomationPath");
+}
 
-    std::string result;
-    jclass activityClass = env->GetObjectClass(activity);
-    jmethodID method = activityClass ? env->GetMethodID(activityClass,
-        "consumeGameAutomationPath", "()Ljava/lang/String;") : NULL;
-    jstring pathText = method ? (jstring)env->CallObjectMethod(activity, method) : NULL;
-    if (!env->ExceptionCheck() && pathText)
-    {
-        const char* chars = env->GetStringUTFChars(pathText, NULL);
-        if (chars)
-        {
-            result.assign(chars);
-            env->ReleaseStringUTFChars(pathText, chars);
-        }
-    }
-    if (env->ExceptionCheck())
-    {
-        env->ExceptionClear();
-        result.clear();
-    }
-    if (pathText) env->DeleteLocalRef(pathText);
-    if (activityClass) env->DeleteLocalRef(activityClass);
-    return result;
+std::string platformConsumeExternalGameLaunchPath(void)
+{
+    return consumeAndroidActivityString("consumeExternalGameLaunchPath");
 }
 
 bool platformConsumeAudioValidationAutomationEnabled(void)

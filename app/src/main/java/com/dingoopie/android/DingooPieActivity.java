@@ -91,6 +91,10 @@ public final class DingooPieActivity extends SDLActivity {
             "dingoopie.cheat_manager_automation";
     private static final String EXTRA_CHEAT_MANAGER_GAME_NAME =
             "dingoopie.cheat_manager_game_name";
+    private static final String EXTRA_CHEAT_MANAGER_GAME_PATH =
+            "dingoopie.cheat_manager_game_path";
+    private static final String EXTRA_CHEAT_MANAGER_SECONDARY_GAME_PATH =
+            "dingoopie.cheat_manager_secondary_game_path";
     private static final String EXTRA_GAME_AUTOMATION_PATH =
             "dingoopie.game_automation_path";
     private static final String EXTRA_AUDIO_VALIDATION_AUTOMATION =
@@ -107,6 +111,7 @@ public final class DingooPieActivity extends SDLActivity {
     public static final int SCREEN_ORIENTATION_LANDSCAPE = 1;
     public static final int SCREEN_ORIENTATION_PORTRAIT = 2;
     private String selectedGamePath;
+    private final AtomicReference<String> pendingExternalGamePath = new AtomicReference<>();
     private Uri pendingGameFileUri;
     private boolean gameSelectionChinese = true;
     private boolean gameAutomationPathConsumed;
@@ -148,6 +153,7 @@ public final class DingooPieActivity extends SDLActivity {
         scheduleImmersiveMode();
         scheduleImeAutomation(getIntent());
         SaveAutomation.schedule(this, getIntent());
+        handleExternalGameLaunchIntent(getIntent());
     }
 
     @Override
@@ -165,6 +171,7 @@ public final class DingooPieActivity extends SDLActivity {
         setIntent(intent);
         scheduleImeAutomation(intent);
         SaveAutomation.schedule(this, intent);
+        handleExternalGameLaunchIntent(intent);
     }
 
     @Override
@@ -641,6 +648,26 @@ public final class DingooPieActivity extends SDLActivity {
             return "";
         }
         cheatManagerAutomationGameConsumed = true;
+        String requestedPath = intent.getStringExtra(EXTRA_CHEAT_MANAGER_GAME_PATH);
+        if (requestedPath != null && !requestedPath.isEmpty()) {
+            Set<String> paths = new HashSet<>(getSharedPreferences(
+                    GAME_LIBRARY_PREFERENCES, MODE_PRIVATE).getStringSet(
+                    GAME_LIBRARY_PATHS, Collections.emptySet()));
+            paths.add(requestedPath);
+            String secondaryPath = intent.getStringExtra(
+                    EXTRA_CHEAT_MANAGER_SECONDARY_GAME_PATH);
+            if (secondaryPath != null && !secondaryPath.isEmpty()) {
+                paths.add(secondaryPath);
+            }
+            if (getSharedPreferences(GAME_LIBRARY_PREFERENCES, MODE_PRIVATE).edit()
+                    .putStringSet(GAME_LIBRARY_PATHS, paths).commit()) {
+                Log.i(TAG, "CHEAT_MANAGER_AUTOMATION selected_path=" + requestedPath);
+                return requestedPath;
+            }
+            Log.e(TAG, "CHEAT_MANAGER_AUTOMATION path_registration_failed=" +
+                    requestedPath);
+            return "";
+        }
         String requestedName = intent.getStringExtra(EXTRA_CHEAT_MANAGER_GAME_NAME);
         if (requestedName == null || requestedName.isEmpty()) {
             return "";
@@ -662,6 +689,15 @@ public final class DingooPieActivity extends SDLActivity {
 
     private synchronized void completeGameSelection(String path) {
         selectedGamePath = path;
+    }
+
+    public String consumeExternalGameLaunchPath() {
+        String path = pendingExternalGamePath.getAndSet(null);
+        return path == null ? "" : path;
+    }
+
+    private void queueExternalGameLaunch(String path) {
+        pendingExternalGamePath.set(path);
     }
 
     @Override
@@ -1991,6 +2027,122 @@ public final class DingooPieActivity extends SDLActivity {
         String encodedUri = Base64.encodeToString(uri.toString().getBytes(StandardCharsets.UTF_8),
                 Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
         return GAME_PATH_PREFIX + encodedUri + "/" + displayName;
+    }
+
+    private void handleExternalGameLaunchIntent(Intent intent) {
+        String path = resolveExternalGameLaunchPath(intent);
+        if (path.isEmpty()) {
+            return;
+        }
+        Log.i(TAG, "External frontend requested game=" + path);
+        queueExternalGameLaunch(path);
+    }
+
+    private String resolveExternalGameLaunchPath(Intent intent) {
+        if (intent == null) {
+            return "";
+        }
+        Uri dataUri = intent.getData();
+        if (dataUri != null && "dingoopie".equalsIgnoreCase(dataUri.getScheme())) {
+            for (String key : ExternalGameLaunchRequest.URI_QUERY_KEYS) {
+                String path = resolveExternalGameCandidate(dataUri.getQueryParameter(key), intent);
+                if (!path.isEmpty()) {
+                    return path;
+                }
+            }
+        } else {
+            String path = resolveExternalGameUri(dataUri, intent);
+            if (!path.isEmpty()) {
+                return path;
+            }
+        }
+
+        Object stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        if (stream instanceof Uri) {
+            String path = resolveExternalGameUri((Uri) stream, intent);
+            if (!path.isEmpty()) {
+                return path;
+            }
+        }
+        ClipData clipData = intent.getClipData();
+        if (clipData != null && clipData.getItemCount() > 0) {
+            String path = resolveExternalGameUri(clipData.getItemAt(0).getUri(), intent);
+            if (!path.isEmpty()) {
+                return path;
+            }
+        }
+
+        Bundle extras = intent.getExtras();
+        if (extras == null) {
+            return "";
+        }
+        for (String key : ExternalGameLaunchRequest.PATH_EXTRA_KEYS) {
+            Object value = extras.get(key);
+            String path = value instanceof Uri ?
+                    resolveExternalGameUri((Uri) value, intent) :
+                    resolveExternalGameCandidate(value instanceof String ? (String) value : null,
+                            intent);
+            if (!path.isEmpty()) {
+                return path;
+            }
+        }
+        return "";
+    }
+
+    private String resolveExternalGameCandidate(String candidate, Intent intent) {
+        String path = ExternalGameLaunchRequest.normalizeStringPath(candidate);
+        if (path.isEmpty()) {
+            return "";
+        }
+        if (path.startsWith(GAME_PATH_PREFIX)) {
+            return ExternalGameLaunchRequest.isSupportedGameName(path) ? path : "";
+        }
+        Uri uri = Uri.parse(path);
+        if (uri.getScheme() != null) {
+            return resolveExternalGameUri(uri, intent);
+        }
+        return ExternalGameLaunchRequest.isSupportedGameName(path) ? path : "";
+    }
+
+    private String resolveExternalGameUri(Uri uri, Intent intent) {
+        if (uri == null) {
+            return "";
+        }
+        String scheme = uri.getScheme();
+        if (scheme == null || scheme.isEmpty()) {
+            return resolveExternalGameCandidate(uri.toString(), intent);
+        }
+        if ("file".equalsIgnoreCase(scheme)) {
+            String path = ExternalGameLaunchRequest.normalizeStringPath(uri.toString());
+            return ExternalGameLaunchRequest.isSupportedGameName(path) ? path : "";
+        }
+        if (!"content".equalsIgnoreCase(scheme)) {
+            return "";
+        }
+
+        String displayName = queryDisplayName(uri);
+        if (!ExternalGameLaunchRequest.isSupportedGameName(displayName)) {
+            return "";
+        }
+        try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
+            if (descriptor == null) {
+                return "";
+            }
+        } catch (IOException | SecurityException exception) {
+            Log.e(TAG, "Unable to open externally requested game URI", exception);
+            return "";
+        }
+        if ((intent.getFlags() & Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) != 0 &&
+                (intent.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
+            try {
+                getContentResolver().takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (SecurityException exception) {
+                Log.w(TAG, "External game URI permission is temporary", exception);
+            }
+        }
+        displayName = displayName.replaceAll("[^\\p{L}\\p{N}._ -]", "_");
+        return buildGamePath(uri, displayName);
     }
 
     public synchronized String consumeGameAutomationPath() {

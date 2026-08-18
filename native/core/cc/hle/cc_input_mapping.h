@@ -5,26 +5,30 @@
 
 #include <stdint.h>
 
-static const uint32_t CC_INPUT_SOURCE_POWER = 0x00000080u;
-static const uint32_t CC_INPUT_SOURCE_Y = 0x00000040u;
-static const uint32_t CC_INPUT_SOURCE_L = 0x00000100u;
-static const uint32_t CC_INPUT_SOURCE_SELECT = 0x00000400u;
-static const uint32_t CC_INPUT_SOURCE_START = 0x00000800u;
-static const uint32_t CC_INPUT_SOURCE_X = 0x00010000u;
-static const uint32_t CC_INPUT_SOURCE_RIGHT = 0x00040000u;
-static const uint32_t CC_INPUT_SOURCE_UP = 0x00100000u;
-static const uint32_t CC_INPUT_SOURCE_B = 0x00200000u;
-static const uint32_t CC_INPUT_SOURCE_DOWN = 0x08000000u;
-static const uint32_t CC_INPUT_SOURCE_LEFT = 0x10000000u;
-static const uint32_t CC_INPUT_SOURCE_R = 0x20000000u;
-static const uint32_t CC_INPUT_SOURCE_A = 0x80000000u;
+// Values are CC runtime source masks; keep them explicit when reordering.
+enum CcInputSourceMask : uint32_t
+{
+    CC_INPUT_SOURCE_A = 0x80000000u,
+    CC_INPUT_SOURCE_B = 0x00200000u,
+    CC_INPUT_SOURCE_X = 0x00010000u,
+    CC_INPUT_SOURCE_Y = 0x00000040u,
+    CC_INPUT_SOURCE_START = 0x00000800u,
+    CC_INPUT_SOURCE_SELECT = 0x00000400u,
+    CC_INPUT_SOURCE_L = 0x00000100u,
+    CC_INPUT_SOURCE_R = 0x20000000u,
+    CC_INPUT_SOURCE_UP = 0x00100000u,
+    CC_INPUT_SOURCE_DOWN = 0x08000000u,
+    CC_INPUT_SOURCE_LEFT = 0x10000000u,
+    CC_INPUT_SOURCE_RIGHT = 0x00040000u,
+    CC_INPUT_SOURCE_POWER = 0x00000080u
+};
 
 static inline bool ccUsesRetailInputMapping(uint32_t packageOrigin)
 {
     return ccPackageUsesRetailLayout(packageOrigin);
 }
 
-static inline uint32_t mapInputToRetailLayout(uint32_t input)
+static inline uint32_t ccMapInputToRetailLayout(uint32_t input)
 {
     uint32_t mapped = input & (CC_INPUT_SOURCE_POWER |
         CC_INPUT_SOURCE_RIGHT | CC_INPUT_SOURCE_UP | CC_INPUT_SOURCE_DOWN |
@@ -39,7 +43,7 @@ static inline uint32_t mapInputToRetailLayout(uint32_t input)
     return mapped;
 }
 
-static inline uint32_t mapInputToHomebrewLayout(uint32_t input)
+static inline uint32_t ccMapInputToHomebrewLayout(uint32_t input)
 {
     uint32_t mapped = input &
         (CC_INPUT_SOURCE_UP | CC_INPUT_SOURCE_DOWN | CC_INPUT_SOURCE_LEFT |

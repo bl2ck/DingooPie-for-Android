@@ -25,14 +25,14 @@ void framebufferRequestUpdate(void);
 void framebufferSetTransientPartialProtectionEnabled(bool enabled);
 void framebufferPresentRestoredFrame(void);
 int framebufferConsumeUpdateRequest(void);
-uint64_t consumeFramebufferSubmittedCount(void);
-uint64_t consumeFramebufferCopyMicros(void);
-void consumeFramebufferTimingStats(uint64_t* totalIntervalMicros, uint64_t* maxIntervalMicros,
+uint64_t framebufferConsumeSubmittedCount(void);
+uint64_t framebufferConsumeCopyMicros(void);
+void framebufferConsumeTimingStats(uint64_t* totalIntervalMicros, uint64_t* maxIntervalMicros,
     uint64_t* over25msCount, uint64_t* over33msCount);
-void trackFramebufferWrite(uint32_t address, uint32_t size);
+void framebufferTrackWrite(uint32_t address, uint32_t size);
 bool framebufferAddressOverlaps(uint32_t address, uint32_t size);
-uint64_t consumeFramebufferWriteCount(void);
-uint64_t consumeFramebufferWriteBytes(void);
+uint64_t framebufferConsumeWriteCount(void);
+uint64_t framebufferConsumeWriteBytes(void);
 void framebufferSetProfileEnabled(bool enabled);
 
 #endif

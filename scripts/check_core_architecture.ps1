@@ -36,6 +36,18 @@ Test-Includes 'shared' @('app/', 'cc/', 'frontend/')
 Test-Includes 'frontend' @('app/', 'cc/')
 Test-Includes 'config' @('app/', 'cc/', 'frontend/')
 
+Get-ChildItem $coreRoot -Recurse -File -Include *.h,*.hpp,*.c,*.cc,*.cpp | ForEach-Object {
+    $file = $_
+    $lineNumber = 0
+    Get-Content $file.FullName | ForEach-Object {
+        $lineNumber++
+        if ($_ -match '^\s*#\s*include\s*[<"]([^>"]+\.cpp)[>"]') {
+            $relative = $file.FullName.Substring($ProjectRoot.Length + 1)
+            $violations.Add("${relative}:$lineNumber must not include source file '$($Matches[1])'")
+        }
+    }
+}
+
 $forbiddenNames = @(
     'emulator_core.h', 'emulator_core.cpp',
     'save_state.h', 'save_state.cpp',

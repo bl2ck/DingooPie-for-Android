@@ -91,6 +91,8 @@ LOCAL_SRC_FILES := \
     $(PROJECT_ROOT)/native/core/frontend/audio/audio_validation_capture.cpp \
     $(PROJECT_ROOT)/native/core/frontend/audio/sdl_audio.cpp \
     $(PROJECT_ROOT)/native/core/frontend/input/input_controls.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/input/keyboard_mapping.cpp \
+    $(PROJECT_ROOT)/native/core/frontend/menu/menu_overlay.cpp \
     $(PROJECT_ROOT)/native/core/frontend/menu/menu_strings.cpp \
     $(PROJECT_ROOT)/native/core/frontend/shell/frontend_shell.cpp \
     $(PROJECT_ROOT)/native/core/frontend/video/frame_processor.cpp \

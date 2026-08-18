@@ -3,6 +3,7 @@ param(
     [string]$AdbPath,
     [string]$Serial = '127.0.0.1:7555',
     [string]$GameName = [string]::Concat([char]0x5929, [char]0x5730, [char]0x9053),
+    [string]$GamePath,
     [string]$GameDirectory = '/sdcard/Download/DingooSample',
     [string]$PcCheatSource = 'D:\Project\C++\dingoo-emu\cheats',
     [switch]$SkipBuild,
@@ -81,6 +82,9 @@ $cheatFile = Join-Path $PcCheatSource "$GameName.cht"
 if (!(Test-Path -LiteralPath $cheatFile)) {
     throw "Cheat file was not found: $cheatFile"
 }
+if ($GamePath -and !(Test-Path -LiteralPath $GamePath)) {
+    throw "Game file was not found: $GamePath"
+}
 $shaLine = Get-Content -LiteralPath $cheatFile |
     Where-Object { $_ -match '^app_sha256=([0-9A-Fa-f]{64})$' } |
     Select-Object -First 1
@@ -131,16 +135,41 @@ try {
     Get-ChildItem -LiteralPath $PcCheatSource -Filter '*.cht' | ForEach-Object {
         Invoke-Adb -Arguments @('push', $_.FullName, "$GameDirectory/$($_.Name)") | Out-Null
     }
-    $formatCheatName = "$GameName.app.cht"
+    $automationGameName = if ($GamePath) { 'dingoopie-cheat-test' } else { $GameName }
+    $formatCheatName = "$automationGameName.app.cht"
     Invoke-Adb -Arguments @(
         'push', $cheatFile, "$GameDirectory/$formatCheatName") | Out-Null
+    $secondaryFormatCheatName = "$automationGameName-alternate.app.cht"
+    $automationGamePath = ''
+    $secondaryAutomationGamePath = ''
+    if ($GamePath) {
+        if ([System.IO.Path]::GetExtension($GamePath).ToLowerInvariant() -ne '.app') {
+            throw 'Cheat manager automation currently requires an APP game sample.'
+        }
+        $automationGamePath = "$GameDirectory/$automationGameName.app"
+        $secondaryAutomationGamePath = "$GameDirectory/$automationGameName-alternate.app"
+        Invoke-Adb -Arguments @(
+            'push', (Resolve-Path -LiteralPath $GamePath).Path, $automationGamePath) | Out-Null
+        Invoke-Adb -Arguments @(
+            'push', (Resolve-Path -LiteralPath $GamePath).Path,
+            $secondaryAutomationGamePath) | Out-Null
+        Invoke-Adb -Arguments @(
+            'push', $cheatFile, "$GameDirectory/$secondaryFormatCheatName") | Out-Null
+    }
 
     Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.dingoopie.android') | Out-Null
-    Invoke-Adb -Arguments @(
+    $startArguments = @(
         'shell', 'am', 'start', '-W',
         '-n', 'com.dingoopie.android/.DingooPieActivity',
         '--ez', 'dingoopie.cheat_manager_automation', 'true',
-        '--es', 'dingoopie.cheat_manager_game_name', $GameName) | Out-Null
+        '--es', 'dingoopie.cheat_manager_game_name', $automationGameName)
+    if ($GamePath) {
+        $startArguments += @(
+            '--es', 'dingoopie.cheat_manager_game_path', $automationGamePath,
+            '--es', 'dingoopie.cheat_manager_secondary_game_path',
+            $secondaryAutomationGamePath)
+    }
+    Invoke-Adb -Arguments $startArguments | Out-Null
 
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     $automationLine = $null
@@ -172,6 +201,15 @@ finally {
     if ($formatCheatName) {
         Invoke-Adb -Arguments @(
             'shell', 'rm', '-f', "$GameDirectory/$formatCheatName") | Out-Null
+    }
+    if ($secondaryFormatCheatName) {
+        Invoke-Adb -Arguments @(
+            'shell', 'rm', '-f', "$GameDirectory/$secondaryFormatCheatName") | Out-Null
+    }
+    if ($automationGamePath) {
+        Invoke-Adb -Arguments @(
+            'shell', 'rm', '-f', $automationGamePath,
+            $secondaryAutomationGamePath) | Out-Null
     }
     Invoke-Adb -Arguments @('shell', 'am', 'force-stop', 'com.dingoopie.android') | Out-Null
     Invoke-Adb -Arguments @(

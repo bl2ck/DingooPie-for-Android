@@ -3,8 +3,8 @@
 ## 中文
 
 本目录保存 DingooPie Android 的开发、构建、测试和发行维护文档。面向用户的
-安装、默认设置、菜单、局域网文件管理、按键、金手指和即时存档说明见仓库根目录的
-`README.md`。
+安装、外部模拟器前端调用、默认设置、菜单、局域网文件管理、按键、金手指和即时存档
+说明见仓库根目录的 `README.md`。
 
 ### 文档索引
 
@@ -28,8 +28,8 @@
 
 This directory contains the maintained development, build, test, and release
 documentation for DingooPie Android. See the repository `README.md` for the
-user-facing installation, defaults, menus, LAN file management, controls, cheats,
-and instant-save guide.
+user-facing installation, external emulator frontend integration, defaults, menus,
+LAN file management, controls, cheats, and instant-save guide.
 
 ### Documentation Index
 
