@@ -13,8 +13,8 @@
 static const uint32_t kQueueBackpressureLogIntervalMs = 1000;
 static const uint32_t kAudioQueueDropDisabledMs = 0;
 static const uint32_t kAudioQueueDropMaxMs = 60000;
-static const uint32_t kMaxQueuedAudioMs = 150;
-static const uint32_t kPendingAudioMaxBytes = 512 * 1024;
+static const uint32_t kMaxQueuedAudioMs = 60;
+static const uint32_t kPendingAudioMaxMs = 60;
 static const int kAudioEffectStateChannels = 8;
 static const int kStableHostSampleRate = 48000;
 static const Uint8 kStableHostChannels = 2;
@@ -31,7 +31,7 @@ static SDL_AudioStream* g_audioStream = NULL;
 static SDL_mutex* g_audioMutex = NULL;
 static uint32_t g_volume = 100;
 static int g_masterVolumePercent = 100;
-static int g_bufferSamples = 2048;
+static int g_bufferSamples = 1024;
 static AudioEffectMode g_audioEffect = AUDIO_EFFECT_OFF;
 static DigitalNoiseReductionLevel g_digitalNoiseReduction =
     DIGITAL_NOISE_REDUCTION_HIGH;
@@ -201,6 +201,14 @@ static uint32_t maxQueuedAudioBytesLocked(void)
 {
     uint32_t latencyTarget =
         (audioBytesPerSecondLocked() * kMaxQueuedAudioMs) / 1000;
+    uint32_t deviceBuffer = g_audioSpec.size ? g_audioSpec.size : 4096;
+    return latencyTarget > deviceBuffer ? latencyTarget : deviceBuffer;
+}
+
+static uint32_t maxPendingAudioBytesLocked(void)
+{
+    uint32_t latencyTarget =
+        (audioBytesPerSecondLocked() * kPendingAudioMaxMs) / 1000;
     uint32_t deviceBuffer = g_audioSpec.size ? g_audioSpec.size : 4096;
     return latencyTarget > deviceBuffer ? latencyTarget : deviceBuffer;
 }
@@ -457,10 +465,9 @@ static int normalizeBufferSamples(int samples)
     case 1024:
     case 2048:
     case 4096:
-    case 8192:
         return samples;
     default:
-        return 2048;
+        return 1024;
     }
 }
 
@@ -1255,7 +1262,9 @@ uint32_t audioOutputTryWriteBuffer(char* buffer, int count)
         audioValidationRecordAudio(converted.data(), (uint32_t)converted.size(),
             "pending", SDL_GetQueuedAudioSize(g_audioDevice),
             g_pendingAudioBytes);
-        if (converted.size() <= kPendingAudioMaxBytes - g_pendingAudioBytes)
+        const uint32_t pendingLimit = maxPendingAudioBytesLocked();
+        if (g_pendingAudioBytes <= pendingLimit &&
+            converted.size() <= pendingLimit - g_pendingAudioBytes)
         {
             g_pendingAudio.push_back(std::move(converted));
             g_pendingAudioBytes += (uint32_t)g_pendingAudio.back().size();

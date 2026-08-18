@@ -519,7 +519,7 @@ static AndroidMenuRowContent androidMenuRowContent(int row)
                 g_frontendSettings->audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100)) };
         if (row == ANDROID_AUDIO_BUFFER)
             return { androidMenuString(ANDROID_TEXT_AUDIO_BUFFER), androidAudioBufferValue(androidNormalizedIntPreset(
-                g_frontendSettings->audioBufferSamples, EMULATOR_AUDIO_BUFFER_VALUES, 2048)) };
+                g_frontendSettings->audioBufferSamples, EMULATOR_AUDIO_BUFFER_VALUES, 1024)) };
         if (row == ANDROID_AUDIO_EFFECT)
         {
             int index = (int)g_frontendSettings->audioEffect;
@@ -1376,7 +1376,7 @@ void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row)
             break;
         case ANDROID_AUDIO_BUFFER:
             g_frontendSettings->audioBufferSamples = nextAndroidIntPreset(
-                g_frontendSettings->audioBufferSamples, EMULATOR_AUDIO_BUFFER_VALUES, 2048);
+                g_frontendSettings->audioBufferSamples, EMULATOR_AUDIO_BUFFER_VALUES, 1024);
             break;
         case ANDROID_AUDIO_EFFECT:
             g_frontendSettings->audioEffect =

@@ -21,6 +21,15 @@ function Assert-OrderedText {
 
 $settingsHeader = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/settings/emulator_settings.h') -Raw
 $settingsSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/settings/emulator_settings.cpp') -Raw
+$audioSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/frontend/audio/sdl_audio.cpp') -Raw
+if (!$settingsHeader.Contains(
+        'EMULATOR_AUDIO_BUFFER_VALUES[] = { 512, 1024, 2048, 4096 };')) {
+    throw 'Audio buffer menu values do not match the supported low-latency order.'
+}
+if ($settingsHeader.Contains('8192') -or $settingsSource.Contains('8192') -or
+        $audioSource.Contains('8192')) {
+    throw 'The removed 8192-sample audio buffer is still referenced.'
+}
 foreach ($removedRecentSymbol in @(
         'EMULATOR_RECENT_GAME_LIMIT', 'lastGamePath', 'recentGamePaths',
         'emulatorRememberRecentGame', 'emulatorRemoveRecentGame',
@@ -70,7 +79,7 @@ $runtimeFields = @(
 )
 $audioDefaults = @(
     'settings.audioVolumePercent = 100;',
-    'settings.audioBufferSamples = 2048;',
+    'settings.audioBufferSamples = 1024;',
     'settings.audioEffect = AUDIO_EFFECT_OFF;',
     'settings.digitalNoiseReduction = DIGITAL_NOISE_REDUCTION_HIGH;',
     'settings.audioDisabled = false;'

@@ -438,7 +438,6 @@ static int normalizeAudioBufferSamples(int value, int fallback)
     case 1024:
     case 2048:
     case 4096:
-    case 8192:
         return value;
     default:
         return fallback;
@@ -1049,7 +1048,7 @@ EmulatorSettings emulatorDefaultSettings(void)
     settings.showFps = false;
 
     settings.audioVolumePercent = 100;
-    settings.audioBufferSamples = 2048;
+    settings.audioBufferSamples = 1024;
     settings.audioEffect = AUDIO_EFFECT_OFF;
     settings.digitalNoiseReduction = DIGITAL_NOISE_REDUCTION_HIGH;
     settings.audioDisabled = false;
@@ -1223,7 +1222,7 @@ static bool writeEmulatorSettings(const EmulatorSettings& settings, const std::s
     ok = writeIniBool("video", "show_fps", settings.showFps, path) && ok;
     ok = writeIniInt("audio", "volume_percent", normalizeIntPreset(
         settings.audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100), path) && ok;
-    ok = writeIniInt("audio", "buffer_samples", normalizeAudioBufferSamples(settings.audioBufferSamples, 2048), path) && ok;
+    ok = writeIniInt("audio", "buffer_samples", normalizeAudioBufferSamples(settings.audioBufferSamples, 1024), path) && ok;
     ok = writeIniString("audio", "effect", emulatorAudioEffectName(audioEffect), path) && ok;
     ok = writeIniString("audio", "digital_noise_reduction",
         emulatorDigitalNoiseReductionName(digitalNoiseReduction), path) && ok;
@@ -1413,7 +1412,7 @@ void emulatorTraceSettings(const char* reason, const EmulatorSettings& settings)
         "audio.audio_disabled=%u\n",
         label,
         normalizeIntPreset(settings.audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100),
-        normalizeAudioBufferSamples(settings.audioBufferSamples, 2048),
+        normalizeAudioBufferSamples(settings.audioBufferSamples, 1024),
         emulatorAudioEffectName(audioEffect),
         emulatorDigitalNoiseReductionName(digitalNoiseReduction),
         settings.audioDisabled ? 1u : 0u);

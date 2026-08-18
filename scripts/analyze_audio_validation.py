@@ -309,6 +309,9 @@ def calculate_metrics(audio, events):
     max_wait = max(waits, default=0)
     if max_wait > 250:
         warnings.append(f"maximum queue wait is {max_wait} ms")
+    if len(input_response_ms) >= 3 and input_response_p90 > 200.0:
+        warnings.append(
+            f"estimated input response p90 is {input_response_p90:.1f} ms")
     if wall_duration > 2.0 and not 0.90 <= duration_ratio <= 1.10:
         warnings.append(f"audio/wall duration ratio is {duration_ratio:.3f}")
     if write_events >= 20 and zero_queue_writes / write_events > 0.15:

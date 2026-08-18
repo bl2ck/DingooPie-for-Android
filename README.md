@@ -81,7 +81,7 @@ adb shell am start -n com.dingoopie.android/.DingooPieActivity `
 | 画面填充 | 保持宽高比 |
 | 显示 FPS | 关闭 |
 | 主音量 | 100% |
-| 音频缓冲 | 2048 采样 |
+| 音频缓冲 | 1024 采样 |
 | 音频效果 | 关闭 |
 | 数字降噪 | 高 |
 | 禁用音频 | 关闭 |
@@ -285,7 +285,7 @@ token. Addresses in the `192.168.*` range are listed first.
 | Screen fill | Keep aspect ratio |
 | Show FPS | Off |
 | Master volume | 100% |
-| Audio buffer | 2048 samples |
+| Audio buffer | 1024 samples |
 | Audio effect | Off |
 | Digital noise reduction | High |
 | Disable audio | Off |
