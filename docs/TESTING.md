@@ -100,8 +100,8 @@ use the same stable 48 kHz host output so equal buffer settings have equal
 playback latency regardless of the guest sample rate. When `-InputSequence` is
 used, the report estimates input response from the native button timestamp,
 the next PCM submission, queued audio, and the parsed device buffer duration.
-The host queue targets 100 ms so APP writers cannot accumulate the former
-quarter-second backlog before a button-triggered sound.
+The host queue targets 120 ms so irregular APP and CC writers do not starve
+MuMu's virtual audio device while avoiding the former quarter-second backlog.
 
 ## Cheat Regression
 

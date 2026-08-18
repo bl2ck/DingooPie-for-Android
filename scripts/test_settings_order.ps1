@@ -30,6 +30,10 @@ if ($settingsHeader.Contains('8192') -or $settingsSource.Contains('8192') -or
         $audioSource.Contains('8192')) {
     throw 'The removed 8192-sample audio buffer is still referenced.'
 }
+if (!$audioSource.Contains('static const uint32_t kMaxQueuedAudioMs = 120;') -or
+        !$audioSource.Contains('static const uint32_t kPendingAudioMaxMs = 120;')) {
+    throw 'Audio queue safety windows do not match the MuMu stability target.'
+}
 foreach ($removedRecentSymbol in @(
         'EMULATOR_RECENT_GAME_LIMIT', 'lastGamePath', 'recentGamePaths',
         'emulatorRememberRecentGame', 'emulatorRemoveRecentGame',

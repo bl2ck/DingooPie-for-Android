@@ -13,8 +13,8 @@
 static const uint32_t kQueueBackpressureLogIntervalMs = 1000;
 static const uint32_t kAudioQueueDropDisabledMs = 0;
 static const uint32_t kAudioQueueDropMaxMs = 60000;
-static const uint32_t kMaxQueuedAudioMs = 60;
-static const uint32_t kPendingAudioMaxMs = 60;
+static const uint32_t kMaxQueuedAudioMs = 120;
+static const uint32_t kPendingAudioMaxMs = 120;
 static const int kAudioEffectStateChannels = 8;
 static const int kStableHostSampleRate = 48000;
 static const Uint8 kStableHostChannels = 2;
