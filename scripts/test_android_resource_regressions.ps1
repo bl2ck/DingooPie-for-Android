@@ -9,6 +9,8 @@ $null = New-Item -ItemType Directory -Path $classesDirectory -Force
     (Join-Path $projectRoot 'tests\HIDDeviceIdAllocatorTest.java') `
     (Join-Path $projectRoot 'app\src\main\java\com\dingoopie\android\StagedUploadFile.java') `
     (Join-Path $projectRoot 'tests\StagedUploadFileTest.java') `
+    (Join-Path $projectRoot 'app\src\main\java\com\dingoopie\android\FileNameRules.java') `
+    (Join-Path $projectRoot 'tests\FileNameRulesTest.java') `
     (Join-Path $projectRoot 'app\src\main\java\com\dingoopie\android\ExternalGameLaunchRequest.java') `
     (Join-Path $projectRoot 'tests\ExternalGameLaunchRequestTest.java')
 if ($LASTEXITCODE -ne 0) {
@@ -18,6 +20,7 @@ if ($LASTEXITCODE -ne 0) {
 foreach ($testClass in @(
         'org.libsdl.app.HIDDeviceIdAllocatorTest',
         'com.dingoopie.android.StagedUploadFileTest',
+        'com.dingoopie.android.FileNameRulesTest',
         'com.dingoopie.android.ExternalGameLaunchRequestTest')) {
     & java -cp $classesDirectory $testClass
     if ($LASTEXITCODE -ne 0) {

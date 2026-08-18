@@ -499,7 +499,7 @@ final class LanFileManagerServer implements Closeable {
                 "async function uploadFiles(){if(!selectedFiles.length){alert(noFiles);return}const selected=selectedFiles.slice();uploadInProgress=true;if(uploadButton)uploadButton.disabled=true;if(fileInput)fileInput.disabled=true;updateFileSelection();try{for(let i=0;i<selected.length;i++){const f=selected[i];if(statusLabel)statusLabel.textContent=uploading+' '+(i+1)+'/'+selected.length+': '+f.name;await call('upload',{name:f.name},f)}location.reload()}catch(e){if(statusLabel)statusLabel.textContent=e.message;alert(e.message)}finally{uploadInProgress=false;if(uploadButton)uploadButton.disabled=false;if(fileInput)fileInput.disabled=false;updateFileSelection()}}" +
                 "async function renameEntry(p,n){const v=prompt('" +
                 js(text("\u65b0\u540d\u79f0", "New name")) +
-                "',n);if(v)try{await call('rename',{path:p,newName:v});location.reload()}catch(e){alert(e.message)}}" +
+                "',n);if(v===null||v===n)return;const name=v.trim();if(!name||name===n)return;try{await call('rename',{path:p,newName:name});location.reload()}catch(e){alert(e.message)}}" +
                 "async function deleteEntry(p){if(confirm('" +
                 js(text("\u786e\u5b9a\u5220\u9664\uff1f", "Delete this item?")) +
                 "'))try{await call('delete',{path:p});location.reload()}catch(e){alert(e.message)}}</script>";
@@ -539,12 +539,16 @@ final class LanFileManagerServer implements Closeable {
     private void rename(Map<String, String> query) throws IOException {
         Root root = requireWritableRoot(query.get("root"));
         String path = normalizePath(query.get("path"));
-        String name = validateName(query.get("newName"));
         if (path.isEmpty()) {
             throw new IOException("The root directory cannot be renamed");
         }
         if (root.isLocal()) {
             File source = resolveLocal(root, path);
+            String name = FileNameRules.normalizeRenameTarget(
+                    source.getName(), query.get("newName"));
+            if (name == null) {
+                return;
+            }
             File target = new File(source.getParentFile(), name).getCanonicalFile();
             ensureWithin(root.localDirectory, target);
             if (target.exists() || !source.renameTo(target)) {
@@ -553,7 +557,17 @@ final class LanFileManagerServer implements Closeable {
             return;
         }
         DocumentNode source = resolveDocument(root, path);
-        if (source == null || DocumentsContract.renameDocument(
+        if (source == null) {
+            throw new IOException("Could not rename item");
+        }
+        String name = FileNameRules.normalizeRenameTarget(
+                source.name, query.get("newName"));
+        if (name == null) {
+            return;
+        }
+        DocumentNode parent = resolveDocument(root, parentPath(path));
+        DocumentNode existing = findDocumentChild(root, parent, name);
+        if (existing != null || DocumentsContract.renameDocument(
                 resolver, source.uri, name) == null) {
             throw new IOException("Could not rename item");
         }
@@ -927,16 +941,7 @@ final class LanFileManagerServer implements Closeable {
     }
 
     private static String validateName(String name) throws IOException {
-        if (name == null) {
-            throw new IOException("A name is required");
-        }
-        String value = name.trim();
-        if (value.isEmpty() || ".".equals(value) || "..".equals(value) ||
-                value.indexOf('/') >= 0 || value.indexOf('\\') >= 0 ||
-                value.indexOf('\0') >= 0) {
-            throw new IOException("Invalid file name");
-        }
-        return value;
+        return FileNameRules.normalize(name);
     }
 
     private static String parentPath(String path) {
