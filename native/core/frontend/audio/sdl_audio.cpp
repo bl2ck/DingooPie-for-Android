@@ -13,7 +13,8 @@
 static const uint32_t kQueueBackpressureLogIntervalMs = 1000;
 static const uint32_t kAudioQueueDropDisabledMs = 0;
 static const uint32_t kAudioQueueDropMaxMs = 60000;
-static const uint32_t kDefaultAudioBufferLatencyMs = 90;
+static const uint32_t kDefaultAudioBufferLatencyMs = 130;
+static const uint32_t kPendingAudioMaxBytes = 512 * 1024;
 static const int kAudioEffectStateChannels = 8;
 static const int kStableHostSampleRate = 48000;
 static const Uint8 kStableHostChannels = 2;
@@ -30,7 +31,7 @@ static SDL_AudioStream* g_audioStream = NULL;
 static SDL_mutex* g_audioMutex = NULL;
 static uint32_t g_volume = 100;
 static int g_masterVolumePercent = 100;
-static int g_bufferSamples = 1024;
+static int g_bufferSamples = 2048;
 static AudioBufferLatencyMode g_audioBufferLatencyMode = AUDIO_BUFFER_LATENCY_AUTO;
 static AudioEffectMode g_audioEffect = AUDIO_EFFECT_OFF;
 static DigitalNoiseReductionLevel g_digitalNoiseReduction =
@@ -217,10 +218,7 @@ static uint32_t maxQueuedAudioBytesLocked(void)
 
 static uint32_t maxPendingAudioBytesLocked(void)
 {
-    uint32_t latencyTarget =
-        (audioBytesPerSecondLocked() * audioBufferLatencyMillisecondsLocked()) / 1000;
-    uint32_t deviceBuffer = g_audioSpec.size ? g_audioSpec.size : 4096;
-    return latencyTarget > deviceBuffer ? latencyTarget : deviceBuffer;
+    return kPendingAudioMaxBytes;
 }
 
 static void resetResampleLowPassLocked(void)
@@ -475,9 +473,10 @@ static int normalizeBufferSamples(int samples)
     case 1024:
     case 2048:
     case 4096:
+    case 8192:
         return samples;
     default:
-        return 1024;
+        return 2048;
     }
 }
 

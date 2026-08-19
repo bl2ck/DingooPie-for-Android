@@ -22,17 +22,45 @@ function Assert-OrderedText {
 $settingsHeader = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/settings/emulator_settings.h') -Raw
 $settingsSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/settings/emulator_settings.cpp') -Raw
 $audioSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/frontend/audio/sdl_audio.cpp') -Raw
+$menuSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/frontend/menu/menu_overlay.cpp') -Raw
 if (!$settingsHeader.Contains(
-        'EMULATOR_AUDIO_BUFFER_VALUES[] = { 512, 1024, 2048, 4096 };')) {
+        'EMULATOR_AUDIO_BUFFER_VALUES[] = { 512, 1024, 2048, 4096, 8192 };')) {
     throw 'Audio buffer menu values do not match the supported low-latency order.'
 }
-if ($settingsHeader.Contains('8192') -or $settingsSource.Contains('8192') -or
-        $audioSource.Contains('8192')) {
-    throw 'The removed 8192-sample audio buffer is still referenced.'
+if (!$settingsSource.Contains('case 8192:') -or !$audioSource.Contains('case 8192:')) {
+    throw 'The 8192-sample compatibility buffer is not connected end to end.'
 }
-if (!$audioSource.Contains('static const uint32_t kDefaultAudioBufferLatencyMs = 90;') -or
+foreach ($defaultBufferText in @(
+        'settings.audioBufferSamples = 2048;',
+        'normalizeAudioBufferSamples(settings.audioBufferSamples, 2048)',
+        'static int g_bufferSamples = 2048;',
+        'return 2048;',
+        'EMULATOR_AUDIO_BUFFER_VALUES, 2048')) {
+    if (!$settingsSource.Contains($defaultBufferText) -and
+            !$audioSource.Contains($defaultBufferText) -and
+            !$menuSource.Contains($defaultBufferText)) {
+        throw "Audio buffer default and fallback are inconsistent: $defaultBufferText"
+    }
+}
+if (!$audioSource.Contains('static const uint32_t kDefaultAudioBufferLatencyMs = 130;') -or
         !$audioSource.Contains('audioBufferLatencyMillisecondsLocked()')) {
     throw 'Audio latency configuration is not connected to the runtime queue.'
+}
+foreach ($latency in @(110, 120, 130, 140, 150)) {
+    if (!$settingsHeader.Contains("AUDIO_BUFFER_LATENCY_${latency}MS") -or
+            !$settingsSource.Contains(('"' + $latency + 'ms"')) -or
+            !$settingsSource.Contains("return $latency;")) {
+        throw "Audio latency preset is incomplete: ${latency}ms"
+    }
+}
+foreach ($removedLatency in @(70, 80, 90, 100)) {
+    if ($settingsHeader.Contains("AUDIO_BUFFER_LATENCY_${removedLatency}MS")) {
+        throw "Removed audio latency preset is still present: ${removedLatency}ms"
+    }
+}
+if (!$audioSource.Contains('static const uint32_t kPendingAudioMaxBytes = 512 * 1024;') -or
+        !$audioSource.Contains('return kPendingAudioMaxBytes;')) {
+    throw 'Audio pending queue does not use the 512KB compatibility limit.'
 }
 foreach ($removedRecentSymbol in @(
         'EMULATOR_RECENT_GAME_LIMIT', 'lastGamePath', 'recentGamePaths',
@@ -84,7 +112,7 @@ $runtimeFields = @(
 )
 $audioDefaults = @(
     'settings.audioVolumePercent = 100;',
-    'settings.audioBufferSamples = 1024;',
+    'settings.audioBufferSamples = 2048;',
     'settings.audioBufferLatency = AUDIO_BUFFER_LATENCY_AUTO;',
     'settings.audioEffect = AUDIO_EFFECT_OFF;',
     'settings.digitalNoiseReduction = DIGITAL_NOISE_REDUCTION_HIGH;',

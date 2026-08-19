@@ -438,6 +438,7 @@ static int normalizeAudioBufferSamples(int value, int fallback)
     case 1024:
     case 2048:
     case 4096:
+    case 8192:
         return value;
     default:
         return fallback;
@@ -463,15 +464,11 @@ static AudioBufferLatencyMode parseAudioBufferLatencyMode(
     {
         return AUDIO_BUFFER_LATENCY_AUTO;
     }
-    if (strcasecmp(value.c_str(), "70ms") == 0) return AUDIO_BUFFER_LATENCY_70MS;
-    if (strcasecmp(value.c_str(), "80ms") == 0) return AUDIO_BUFFER_LATENCY_80MS;
-    if (strcasecmp(value.c_str(), "90ms") == 0) return AUDIO_BUFFER_LATENCY_90MS;
-    if (strcasecmp(value.c_str(), "100ms") == 0) return AUDIO_BUFFER_LATENCY_100MS;
     if (strcasecmp(value.c_str(), "110ms") == 0) return AUDIO_BUFFER_LATENCY_110MS;
-    if (strcasecmp(value.c_str(), "120ms") == 0)
-    {
-        return AUDIO_BUFFER_LATENCY_120MS;
-    }
+    if (strcasecmp(value.c_str(), "120ms") == 0) return AUDIO_BUFFER_LATENCY_120MS;
+    if (strcasecmp(value.c_str(), "130ms") == 0) return AUDIO_BUFFER_LATENCY_130MS;
+    if (strcasecmp(value.c_str(), "140ms") == 0) return AUDIO_BUFFER_LATENCY_140MS;
+    if (strcasecmp(value.c_str(), "150ms") == 0) return AUDIO_BUFFER_LATENCY_150MS;
     return fallback;
 }
 
@@ -1079,7 +1076,7 @@ EmulatorSettings emulatorDefaultSettings(void)
     settings.showFps = false;
 
     settings.audioVolumePercent = 100;
-    settings.audioBufferSamples = 1024;
+    settings.audioBufferSamples = 2048;
     settings.audioBufferLatency = AUDIO_BUFFER_LATENCY_AUTO;
     settings.audioEffect = AUDIO_EFFECT_OFF;
     settings.digitalNoiseReduction = DIGITAL_NOISE_REDUCTION_HIGH;
@@ -1257,7 +1254,8 @@ static bool writeEmulatorSettings(const EmulatorSettings& settings, const std::s
     ok = writeIniBool("video", "show_fps", settings.showFps, path) && ok;
     ok = writeIniInt("audio", "volume_percent", normalizeIntPreset(
         settings.audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100), path) && ok;
-    ok = writeIniInt("audio", "buffer_samples", normalizeAudioBufferSamples(settings.audioBufferSamples, 1024), path) && ok;
+    ok = writeIniInt("audio", "buffer_samples", normalizeAudioBufferSamples(
+        settings.audioBufferSamples, 2048), path) && ok;
     ok = writeIniString("audio", "buffer_latency",
         emulatorAudioBufferLatencyName(normalizeAudioBufferLatencyMode(
             settings.audioBufferLatency, AUDIO_BUFFER_LATENCY_AUTO)), path) && ok;
@@ -1450,7 +1448,7 @@ void emulatorTraceSettings(const char* reason, const EmulatorSettings& settings)
         "audio.audio_disabled=%u\n",
         label,
         normalizeIntPreset(settings.audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100),
-        normalizeAudioBufferSamples(settings.audioBufferSamples, 1024),
+        normalizeAudioBufferSamples(settings.audioBufferSamples, 2048),
         emulatorAudioBufferLatencyName(normalizeAudioBufferLatencyMode(
             settings.audioBufferLatency, AUDIO_BUFFER_LATENCY_AUTO)),
         emulatorAudioEffectName(audioEffect),
@@ -1588,12 +1586,11 @@ const char* emulatorAudioBufferLatencyName(AudioBufferLatencyMode mode)
 {
     switch (mode)
     {
-    case AUDIO_BUFFER_LATENCY_70MS: return "70ms";
-    case AUDIO_BUFFER_LATENCY_80MS: return "80ms";
-    case AUDIO_BUFFER_LATENCY_90MS: return "90ms";
-    case AUDIO_BUFFER_LATENCY_100MS: return "100ms";
     case AUDIO_BUFFER_LATENCY_110MS: return "110ms";
     case AUDIO_BUFFER_LATENCY_120MS: return "120ms";
+    case AUDIO_BUFFER_LATENCY_130MS: return "130ms";
+    case AUDIO_BUFFER_LATENCY_140MS: return "140ms";
+    case AUDIO_BUFFER_LATENCY_150MS: return "150ms";
     case AUDIO_BUFFER_LATENCY_AUTO:
     default: return "auto";
     }
@@ -1603,14 +1600,13 @@ int emulatorAudioBufferLatencyMilliseconds(AudioBufferLatencyMode mode)
 {
     switch (mode)
     {
-    case AUDIO_BUFFER_LATENCY_70MS: return 70;
-    case AUDIO_BUFFER_LATENCY_80MS: return 80;
-    case AUDIO_BUFFER_LATENCY_90MS: return 90;
-    case AUDIO_BUFFER_LATENCY_100MS: return 100;
     case AUDIO_BUFFER_LATENCY_110MS: return 110;
     case AUDIO_BUFFER_LATENCY_120MS: return 120;
+    case AUDIO_BUFFER_LATENCY_130MS: return 130;
+    case AUDIO_BUFFER_LATENCY_140MS: return 140;
+    case AUDIO_BUFFER_LATENCY_150MS: return 150;
     case AUDIO_BUFFER_LATENCY_AUTO:
-    default: return 90;
+    default: return 130;
     }
 }
 

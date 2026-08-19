@@ -107,18 +107,16 @@ const wchar_t* androidMenuText(UiLanguage language, AndroidMenuTextId id)
         return zh ? L"\u97f3\u9891\u7f13\u51b2\u5ef6\u8fdf" : L"Audio Buffer Latency";
     case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_AUTO:
         return zh ? L"\u81ea\u52a8" : L"Auto";
-    case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_70MS:
-        return L"70 ms";
-    case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_80MS:
-        return L"80 ms";
-    case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_90MS:
-        return L"90 ms";
-    case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_100MS:
-        return L"100 ms";
     case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_110MS:
         return L"110 ms";
     case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_120MS:
         return L"120 ms";
+    case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_130MS:
+        return L"130 ms";
+    case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_140MS:
+        return L"140 ms";
+    case ANDROID_TEXT_AUDIO_BUFFER_LATENCY_150MS:
+        return L"150 ms";
     case ANDROID_TEXT_AUDIO_EFFECT:
         return zh ? L"\u97f3\u9891\u6548\u679c" : L"Audio Effect";
     case ANDROID_TEXT_AUDIO_EFFECT_OFF:

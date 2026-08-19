@@ -124,12 +124,11 @@ static AndroidMenuTextId androidAudioBufferLatencyTextId(AudioBufferLatencyMode 
 {
     switch (mode)
     {
-    case AUDIO_BUFFER_LATENCY_70MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_70MS;
-    case AUDIO_BUFFER_LATENCY_80MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_80MS;
-    case AUDIO_BUFFER_LATENCY_90MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_90MS;
-    case AUDIO_BUFFER_LATENCY_100MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_100MS;
     case AUDIO_BUFFER_LATENCY_110MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_110MS;
     case AUDIO_BUFFER_LATENCY_120MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_120MS;
+    case AUDIO_BUFFER_LATENCY_130MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_130MS;
+    case AUDIO_BUFFER_LATENCY_140MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_140MS;
+    case AUDIO_BUFFER_LATENCY_150MS: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_150MS;
     case AUDIO_BUFFER_LATENCY_AUTO:
     default: return ANDROID_TEXT_AUDIO_BUFFER_LATENCY_AUTO;
     }
@@ -534,7 +533,7 @@ static AndroidMenuRowContent androidMenuRowContent(int row)
                 g_frontendSettings->audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100)) };
         if (row == ANDROID_AUDIO_BUFFER)
             return { androidMenuString(ANDROID_TEXT_AUDIO_BUFFER), androidAudioBufferValue(androidNormalizedIntPreset(
-                g_frontendSettings->audioBufferSamples, EMULATOR_AUDIO_BUFFER_VALUES, 1024)) };
+                g_frontendSettings->audioBufferSamples, EMULATOR_AUDIO_BUFFER_VALUES, 2048)) };
         if (row == ANDROID_AUDIO_BUFFER_LATENCY)
         {
             AudioBufferLatencyMode mode = g_frontendSettings->audioBufferLatency;
@@ -1399,7 +1398,7 @@ void handleAndroidDetailMenuSelection(AndroidMenuScreen screen, int row)
             break;
         case ANDROID_AUDIO_BUFFER:
             g_frontendSettings->audioBufferSamples = nextAndroidIntPreset(
-                g_frontendSettings->audioBufferSamples, EMULATOR_AUDIO_BUFFER_VALUES, 1024);
+                g_frontendSettings->audioBufferSamples, EMULATOR_AUDIO_BUFFER_VALUES, 2048);
             break;
         case ANDROID_AUDIO_BUFFER_LATENCY:
             g_frontendSettings->audioBufferLatency =
