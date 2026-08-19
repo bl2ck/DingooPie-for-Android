@@ -444,6 +444,37 @@ static int normalizeAudioBufferSamples(int value, int fallback)
     }
 }
 
+static AudioBufferLatencyMode normalizeAudioBufferLatencyMode(
+    AudioBufferLatencyMode value, AudioBufferLatencyMode fallback)
+{
+    if (value >= AUDIO_BUFFER_LATENCY_AUTO && value < AUDIO_BUFFER_LATENCY_MODE_COUNT)
+    {
+        return value;
+    }
+    return fallback >= AUDIO_BUFFER_LATENCY_AUTO && fallback < AUDIO_BUFFER_LATENCY_MODE_COUNT ?
+        fallback : AUDIO_BUFFER_LATENCY_AUTO;
+}
+
+static AudioBufferLatencyMode parseAudioBufferLatencyMode(
+    const std::string& value, AudioBufferLatencyMode fallback)
+{
+    fallback = normalizeAudioBufferLatencyMode(fallback, AUDIO_BUFFER_LATENCY_AUTO);
+    if (strcasecmp(value.c_str(), "auto") == 0)
+    {
+        return AUDIO_BUFFER_LATENCY_AUTO;
+    }
+    if (strcasecmp(value.c_str(), "70ms") == 0) return AUDIO_BUFFER_LATENCY_70MS;
+    if (strcasecmp(value.c_str(), "80ms") == 0) return AUDIO_BUFFER_LATENCY_80MS;
+    if (strcasecmp(value.c_str(), "90ms") == 0) return AUDIO_BUFFER_LATENCY_90MS;
+    if (strcasecmp(value.c_str(), "100ms") == 0) return AUDIO_BUFFER_LATENCY_100MS;
+    if (strcasecmp(value.c_str(), "110ms") == 0) return AUDIO_BUFFER_LATENCY_110MS;
+    if (strcasecmp(value.c_str(), "120ms") == 0)
+    {
+        return AUDIO_BUFFER_LATENCY_120MS;
+    }
+    return fallback;
+}
+
 static UiLanguage parseUiLanguage(const std::string& value, UiLanguage fallback)
 {
     if (fallback < UI_LANGUAGE_CHINESE || fallback >= UI_LANGUAGE_COUNT)
@@ -1049,6 +1080,7 @@ EmulatorSettings emulatorDefaultSettings(void)
 
     settings.audioVolumePercent = 100;
     settings.audioBufferSamples = 1024;
+    settings.audioBufferLatency = AUDIO_BUFFER_LATENCY_AUTO;
     settings.audioEffect = AUDIO_EFFECT_OFF;
     settings.digitalNoiseReduction = DIGITAL_NOISE_REDUCTION_HIGH;
     settings.audioDisabled = false;
@@ -1120,6 +1152,9 @@ EmulatorSettings emulatorLoadSettings(void)
     settings.audioBufferSamples = normalizeAudioBufferSamples(
         readIniInt("audio", "buffer_samples", defaults.audioBufferSamples, path),
         defaults.audioBufferSamples);
+    settings.audioBufferLatency = parseAudioBufferLatencyMode(
+        readIniString("audio", "buffer_latency", emulatorAudioBufferLatencyName(defaults.audioBufferLatency), path),
+        defaults.audioBufferLatency);
     std::string audioEffect = readIniString(
         "audio",
         "effect",
@@ -1223,6 +1258,9 @@ static bool writeEmulatorSettings(const EmulatorSettings& settings, const std::s
     ok = writeIniInt("audio", "volume_percent", normalizeIntPreset(
         settings.audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100), path) && ok;
     ok = writeIniInt("audio", "buffer_samples", normalizeAudioBufferSamples(settings.audioBufferSamples, 1024), path) && ok;
+    ok = writeIniString("audio", "buffer_latency",
+        emulatorAudioBufferLatencyName(normalizeAudioBufferLatencyMode(
+            settings.audioBufferLatency, AUDIO_BUFFER_LATENCY_AUTO)), path) && ok;
     ok = writeIniString("audio", "effect", emulatorAudioEffectName(audioEffect), path) && ok;
     ok = writeIniString("audio", "digital_noise_reduction",
         emulatorDigitalNoiseReductionName(digitalNoiseReduction), path) && ok;
@@ -1407,12 +1445,14 @@ void emulatorTraceSettings(const char* reason, const EmulatorSettings& settings)
         settings.portraitMode ? 1u : 0u,
         settings.showFps ? 1u : 0u);
     printf(
-        "settings-trace:%s audio.volume_percent=%d audio.buffer_samples=%d "
+        "settings-trace:%s audio.volume_percent=%d audio.buffer_samples=%d audio.buffer_latency=%s "
         "audio.effect=%s audio.digital_noise_reduction=%s "
         "audio.audio_disabled=%u\n",
         label,
         normalizeIntPreset(settings.audioVolumePercent, EMULATOR_AUDIO_VOLUME_VALUES, 100),
         normalizeAudioBufferSamples(settings.audioBufferSamples, 1024),
+        emulatorAudioBufferLatencyName(normalizeAudioBufferLatencyMode(
+            settings.audioBufferLatency, AUDIO_BUFFER_LATENCY_AUTO)),
         emulatorAudioEffectName(audioEffect),
         emulatorDigitalNoiseReductionName(digitalNoiseReduction),
         settings.audioDisabled ? 1u : 0u);
@@ -1541,6 +1581,36 @@ const char* emulatorAudioEffectName(AudioEffectMode mode)
     case AUDIO_EFFECT_OFF:
     default:
         return "off";
+    }
+}
+
+const char* emulatorAudioBufferLatencyName(AudioBufferLatencyMode mode)
+{
+    switch (mode)
+    {
+    case AUDIO_BUFFER_LATENCY_70MS: return "70ms";
+    case AUDIO_BUFFER_LATENCY_80MS: return "80ms";
+    case AUDIO_BUFFER_LATENCY_90MS: return "90ms";
+    case AUDIO_BUFFER_LATENCY_100MS: return "100ms";
+    case AUDIO_BUFFER_LATENCY_110MS: return "110ms";
+    case AUDIO_BUFFER_LATENCY_120MS: return "120ms";
+    case AUDIO_BUFFER_LATENCY_AUTO:
+    default: return "auto";
+    }
+}
+
+int emulatorAudioBufferLatencyMilliseconds(AudioBufferLatencyMode mode)
+{
+    switch (mode)
+    {
+    case AUDIO_BUFFER_LATENCY_70MS: return 70;
+    case AUDIO_BUFFER_LATENCY_80MS: return 80;
+    case AUDIO_BUFFER_LATENCY_90MS: return 90;
+    case AUDIO_BUFFER_LATENCY_100MS: return 100;
+    case AUDIO_BUFFER_LATENCY_110MS: return 110;
+    case AUDIO_BUFFER_LATENCY_120MS: return 120;
+    case AUDIO_BUFFER_LATENCY_AUTO:
+    default: return 90;
     }
 }
 

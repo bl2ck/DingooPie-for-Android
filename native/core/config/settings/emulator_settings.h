@@ -53,6 +53,27 @@ enum AudioEffectMode
     AUDIO_EFFECT_MODE_COUNT
 };
 
+enum AudioBufferLatencyMode
+{
+    AUDIO_BUFFER_LATENCY_AUTO = 0,
+    AUDIO_BUFFER_LATENCY_70MS,
+    AUDIO_BUFFER_LATENCY_80MS,
+    AUDIO_BUFFER_LATENCY_90MS,
+    AUDIO_BUFFER_LATENCY_100MS,
+    AUDIO_BUFFER_LATENCY_110MS,
+    AUDIO_BUFFER_LATENCY_120MS,
+    AUDIO_BUFFER_LATENCY_MODE_COUNT
+};
+
+static_assert(AUDIO_BUFFER_LATENCY_70MS == AUDIO_BUFFER_LATENCY_AUTO + 1 &&
+    AUDIO_BUFFER_LATENCY_80MS == AUDIO_BUFFER_LATENCY_70MS + 1 &&
+    AUDIO_BUFFER_LATENCY_90MS == AUDIO_BUFFER_LATENCY_80MS + 1 &&
+    AUDIO_BUFFER_LATENCY_100MS == AUDIO_BUFFER_LATENCY_90MS + 1 &&
+    AUDIO_BUFFER_LATENCY_110MS == AUDIO_BUFFER_LATENCY_100MS + 1 &&
+    AUDIO_BUFFER_LATENCY_120MS == AUDIO_BUFFER_LATENCY_110MS + 1 &&
+    AUDIO_BUFFER_LATENCY_MODE_COUNT == AUDIO_BUFFER_LATENCY_120MS + 1,
+    "Audio latency enum order must match the visible menu");
+
 enum DigitalNoiseReductionLevel
 {
     DIGITAL_NOISE_REDUCTION_HIGH = 0,
@@ -128,6 +149,7 @@ struct EmulatorSettings
     // Audio fields follow the Android Options > Audio menu order.
     int audioVolumePercent;
     int audioBufferSamples;
+    AudioBufferLatencyMode audioBufferLatency;
     AudioEffectMode audioEffect;
     DigitalNoiseReductionLevel digitalNoiseReduction;
     bool audioDisabled;
@@ -175,6 +197,8 @@ void emulatorApplySharedRuntimeSettings(const EmulatorSettings& settings);
 const char* emulatorAntiAliasingName(AntiAliasingMode mode);
 const char* emulatorColorEffectName(ColorEffectMode mode);
 const char* emulatorAudioEffectName(AudioEffectMode mode);
+const char* emulatorAudioBufferLatencyName(AudioBufferLatencyMode mode);
+int emulatorAudioBufferLatencyMilliseconds(AudioBufferLatencyMode mode);
 const char* emulatorDigitalNoiseReductionName(DigitalNoiseReductionLevel level);
 const char* emulatorUiLanguageName(UiLanguage language);
 const char* emulatorMinimizedBehaviorName(MinimizedBehavior behavior);

@@ -82,6 +82,7 @@ adb shell am start -n com.dingoopie.android/.DingooPieActivity `
 | 显示 FPS | 关闭 |
 | 主音量 | 100% |
 | 音频缓冲 | 1024 采样 |
+| 音频缓冲延迟 | 自动 |
 | 音频效果 | 关闭 |
 | 数字降噪 | 高 |
 | 禁用音频 | 关闭 |
@@ -104,7 +105,7 @@ adb shell am start -n com.dingoopie.android/.DingooPieActivity `
 - `暂停菜单`：即时存档、切换游戏、重启游戏、选项、设置、退出应用和返回游戏。
 - `选项`：视频、音频、输入、恢复默认设置和返回。
 - `选项 > 视频`：抗锯齿、滤镜、亮度、对比度、伽马、饱和度、最小化时、屏幕方向、画面填充和显示 FPS。
-- `选项 > 音频`：主音量、音频缓冲、音频效果、数字降噪和禁用音频。
+- `选项 > 音频`：主音量、音频缓冲、音频缓冲延迟、音频效果、数字降噪和禁用音频。
 - `选项 > 输入`：禁用系统输入法、显示虚拟按键、虚拟按键大小、方向键类型、手柄按键映射和手柄校准。
 - `设置`：CPU 执行模式、CPU 时钟、游戏速度、系统延迟比例、金手指管理器、语言、恢复默认设置和返回。
 - `关于`：版本、支持格式和软件信息。
@@ -286,6 +287,7 @@ token. Addresses in the `192.168.*` range are listed first.
 | Show FPS | Off |
 | Master volume | 100% |
 | Audio buffer | 1024 samples |
+| Audio buffer latency | Auto |
 | Audio effect | Off |
 | Digital noise reduction | High |
 | Disable audio | Off |
@@ -308,7 +310,7 @@ token. Addresses in the `192.168.*` range are listed first.
 - `Pause Menu`: instant saves, switch game, restart, options, settings, exit, and return to the game.
 - `Options`: Video, Audio, Input, Restore Default Settings, and Back.
 - `Options > Video`: Anti-aliasing, Filter, Brightness, Contrast, Gamma, Saturation, When Minimized, Screen Orientation, Screen Fill, and Show FPS.
-- `Options > Audio`: master volume, buffer size, audio effect, digital noise reduction, and audio disable.
+- `Options > Audio`: master volume, buffer size, audio buffer latency, audio effect, digital noise reduction, and audio disable.
 - `Options > Input`: Disable System IME, Show Virtual Controls, Virtual Control Size, D-pad Type, Controller Mapping, and Controller Calibration.
 - `Settings`: CPU Execution Mode, CPU Clock, Game Speed, System Delay Scale, Cheat Manager, Language, Restore Default Settings, and Back.
 - `About`: version, supported formats, and software information.

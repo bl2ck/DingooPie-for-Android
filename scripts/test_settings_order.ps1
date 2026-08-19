@@ -30,9 +30,9 @@ if ($settingsHeader.Contains('8192') -or $settingsSource.Contains('8192') -or
         $audioSource.Contains('8192')) {
     throw 'The removed 8192-sample audio buffer is still referenced.'
 }
-if (!$audioSource.Contains('static const uint32_t kMaxQueuedAudioMs = 120;') -or
-        !$audioSource.Contains('static const uint32_t kPendingAudioMaxMs = 120;')) {
-    throw 'Audio queue safety windows do not match the MuMu stability target.'
+if (!$audioSource.Contains('static const uint32_t kDefaultAudioBufferLatencyMs = 90;') -or
+        !$audioSource.Contains('audioBufferLatencyMillisecondsLocked()')) {
+    throw 'Audio latency configuration is not connected to the runtime queue.'
 }
 foreach ($removedRecentSymbol in @(
         'EMULATOR_RECENT_GAME_LIMIT', 'lastGamePath', 'recentGamePaths',
@@ -47,6 +47,7 @@ foreach ($removedRecentSymbol in @(
 $audioFields = @(
     'int audioVolumePercent;',
     'int audioBufferSamples;',
+    'AudioBufferLatencyMode audioBufferLatency;',
     'AudioEffectMode audioEffect;',
     'DigitalNoiseReductionLevel digitalNoiseReduction;',
     'bool audioDisabled;'
@@ -84,6 +85,7 @@ $runtimeFields = @(
 $audioDefaults = @(
     'settings.audioVolumePercent = 100;',
     'settings.audioBufferSamples = 1024;',
+    'settings.audioBufferLatency = AUDIO_BUFFER_LATENCY_AUTO;',
     'settings.audioEffect = AUDIO_EFFECT_OFF;',
     'settings.digitalNoiseReduction = DIGITAL_NOISE_REDUCTION_HIGH;',
     'settings.audioDisabled = false;'
@@ -91,6 +93,7 @@ $audioDefaults = @(
 $audioIniLoad = @(
     'readIniInt("audio", "volume_percent"',
     'readIniInt("audio", "buffer_samples"',
+    'readIniString("audio", "buffer_latency"',
     'readIniString(',
     '"effect"',
     '"digital_noise_reduction"',
@@ -99,6 +102,7 @@ $audioIniLoad = @(
 $audioIniWrite = @(
     'writeIniInt("audio", "volume_percent"',
     'writeIniInt("audio", "buffer_samples"',
+    'writeIniString("audio", "buffer_latency"',
     'writeIniString("audio", "effect"',
     'writeIniString("audio", "digital_noise_reduction"',
     'writeIniBool("audio", "audio_disabled"'
@@ -106,6 +110,7 @@ $audioIniWrite = @(
 $audioRows = @(
     'ANDROID_AUDIO_VOLUME = 0,',
     'ANDROID_AUDIO_BUFFER,',
+    'ANDROID_AUDIO_BUFFER_LATENCY,',
     'ANDROID_AUDIO_EFFECT,',
     'ANDROID_AUDIO_DIGITAL_NOISE_REDUCTION,',
     'ANDROID_AUDIO_DISABLED,',
@@ -234,6 +239,7 @@ $noiseReductionText = @(
 $audioApply = @(
     'audioOutputSetMasterVolumePercent(settings.audioVolumePercent);',
     'audioOutputSetBufferSamples(settings.audioBufferSamples);',
+    'audioOutputSetBufferLatencyMode(settings.audioBufferLatency);',
     'audioOutputSetEffect(settings.audioEffect);',
     'audioOutputSetNoiseReduction(settings.digitalNoiseReduction);'
 )

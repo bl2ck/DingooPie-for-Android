@@ -13,8 +13,7 @@
 static const uint32_t kQueueBackpressureLogIntervalMs = 1000;
 static const uint32_t kAudioQueueDropDisabledMs = 0;
 static const uint32_t kAudioQueueDropMaxMs = 60000;
-static const uint32_t kMaxQueuedAudioMs = 120;
-static const uint32_t kPendingAudioMaxMs = 120;
+static const uint32_t kDefaultAudioBufferLatencyMs = 90;
 static const int kAudioEffectStateChannels = 8;
 static const int kStableHostSampleRate = 48000;
 static const Uint8 kStableHostChannels = 2;
@@ -32,6 +31,7 @@ static SDL_mutex* g_audioMutex = NULL;
 static uint32_t g_volume = 100;
 static int g_masterVolumePercent = 100;
 static int g_bufferSamples = 1024;
+static AudioBufferLatencyMode g_audioBufferLatencyMode = AUDIO_BUFFER_LATENCY_AUTO;
 static AudioEffectMode g_audioEffect = AUDIO_EFFECT_OFF;
 static DigitalNoiseReductionLevel g_digitalNoiseReduction =
     DIGITAL_NOISE_REDUCTION_HIGH;
@@ -197,10 +197,20 @@ static uint32_t audioBytesPerSecondLocked(void)
     return freq * channels * bytes;
 }
 
+static uint32_t audioBufferLatencyMillisecondsLocked(void)
+{
+    if (g_audioBufferLatencyMode == AUDIO_BUFFER_LATENCY_AUTO)
+    {
+        return kDefaultAudioBufferLatencyMs;
+    }
+    return (uint32_t)emulatorAudioBufferLatencyMilliseconds(
+        g_audioBufferLatencyMode);
+}
+
 static uint32_t maxQueuedAudioBytesLocked(void)
 {
     uint32_t latencyTarget =
-        (audioBytesPerSecondLocked() * kMaxQueuedAudioMs) / 1000;
+        (audioBytesPerSecondLocked() * audioBufferLatencyMillisecondsLocked()) / 1000;
     uint32_t deviceBuffer = g_audioSpec.size ? g_audioSpec.size : 4096;
     return latencyTarget > deviceBuffer ? latencyTarget : deviceBuffer;
 }
@@ -208,7 +218,7 @@ static uint32_t maxQueuedAudioBytesLocked(void)
 static uint32_t maxPendingAudioBytesLocked(void)
 {
     uint32_t latencyTarget =
-        (audioBytesPerSecondLocked() * kPendingAudioMaxMs) / 1000;
+        (audioBytesPerSecondLocked() * audioBufferLatencyMillisecondsLocked()) / 1000;
     uint32_t deviceBuffer = g_audioSpec.size ? g_audioSpec.size : 4096;
     return latencyTarget > deviceBuffer ? latencyTarget : deviceBuffer;
 }
@@ -1413,6 +1423,17 @@ void audioOutputSetBufferSamples(int samples)
     lockAudio();
     g_bufferSamples = normalizeBufferSamples(samples);
     SDL_Log("Audio buffer samples set to %d", g_bufferSamples);
+    unlockAudio();
+}
+
+void audioOutputSetBufferLatencyMode(AudioBufferLatencyMode mode)
+{
+    lockAudio();
+    if (mode < AUDIO_BUFFER_LATENCY_AUTO || mode >= AUDIO_BUFFER_LATENCY_MODE_COUNT)
+    {
+        mode = AUDIO_BUFFER_LATENCY_AUTO;
+    }
+    g_audioBufferLatencyMode = mode;
     unlockAudio();
 }
 

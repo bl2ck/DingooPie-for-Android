@@ -21,6 +21,7 @@ void audioOutputSetMuted(bool muted);
 void audioOutputSetFrontendPaused(bool paused);
 void audioOutputSetMasterVolumePercent(int percent);
 void audioOutputSetBufferSamples(int samples);
+void audioOutputSetBufferLatencyMode(AudioBufferLatencyMode mode);
 void audioOutputSetEffect(AudioEffectMode effect);
 void audioOutputSetNoiseReduction(DigitalNoiseReductionLevel level);
 void audioOutputRecordInput(uint32_t controlMask);

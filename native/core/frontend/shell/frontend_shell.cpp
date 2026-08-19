@@ -6695,13 +6695,15 @@ void frontendApplyAudioSettings(const EmulatorSettings& settings)
 {
     audioOutputSetMasterVolumePercent(settings.audioVolumePercent);
     audioOutputSetBufferSamples(settings.audioBufferSamples);
+    audioOutputSetBufferLatencyMode(settings.audioBufferLatency);
     audioOutputSetEffect(settings.audioEffect);
     audioOutputSetNoiseReduction(settings.digitalNoiseReduction);
     printf(
-        "frontend: audio settings volume=%d buffer_samples=%d effect=%s "
+        "frontend: audio settings volume=%d buffer_samples=%d buffer_latency=%s effect=%s "
         "digital_noise_reduction=%s audio_disabled=%u\n",
         settings.audioVolumePercent,
         settings.audioBufferSamples,
+        emulatorAudioBufferLatencyName(settings.audioBufferLatency),
         emulatorAudioEffectName(settings.audioEffect),
         emulatorDigitalNoiseReductionName(settings.digitalNoiseReduction),
         settings.audioDisabled ? 1u : 0u);
