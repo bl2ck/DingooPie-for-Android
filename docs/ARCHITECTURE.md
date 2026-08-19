@@ -14,6 +14,12 @@ The Android Gradle module remains `app/`; this is unrelated to the Dingoo `.app`
 
 Android implementations remain in `native/android/`. Core code includes only the platform-neutral declarations under `native/core/shared/platform/`.
 
+## CPU Backend Scheme
+
+- APP uses its own MIPS runtime. Automatic mode selects the PPSSPP IR JIT backend. Compatibility mode, unavailable JIT support, or a per-game compatibility override selects the built-in MIPS interpreter.
+- CC uses its own ARM32 runtime. Automatic mode selects Dynarmic A32 when it is compiled and profiling is disabled. Compatibility mode, profiling, or unavailable Dynarmic support selects the built-in ARM32 interpreter.
+- The execution-mode setting is shared, but APP and CC retain separate CPU state, memory, HLE, diagnostics, and save-state implementations.
+
 ## Dependency Direction
 
 - `app` and `cc` never include one another.

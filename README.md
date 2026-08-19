@@ -11,6 +11,12 @@ CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM
 - Powered by：BL2CK Software
 - 版权：Copyright (c) 2026 BL2CK
 
+### 模拟内核方案
+
+- APP 游戏使用独立 MIPS 运行时：自动模式使用 PPSSPP IR JIT，兼容模式或兼容性配置要求时使用内置 MIPS 解释器。
+- CC 游戏使用独立 ARM32 运行时：自动模式优先使用 Dynarmic A32 JIT，兼容模式、调试分析或 JIT 不可用时使用内置 ARM32 解释器。
+- 两类运行时各自处理 CPU 执行与 HLE，共享视频、音频、输入、存档和配置前端。
+
 ### 快速使用
 1. 安装 `DingooPie.apk` 并启动。
 2. 在游戏库中添加游戏目录，或导入单个 `.app` / `.cc` 文件。
@@ -205,6 +211,12 @@ by the dedicated APP MIPS and CC ARM32 runtimes, respectively.
 - Product name: DingooPie Android
 - Powered by: BL2CK Software
 - Copyright: Copyright (c) 2026 BL2CK
+
+### Emulation Core Scheme
+
+- APP games use a dedicated MIPS runtime. Automatic mode uses PPSSPP IR JIT; compatibility mode or a compatibility profile uses the built-in MIPS interpreter.
+- CC games use a dedicated ARM32 runtime. Automatic mode prefers Dynarmic A32 JIT; compatibility mode, profiling, or an unavailable JIT uses the built-in ARM32 interpreter.
+- Each runtime owns CPU execution and HLE, while video, audio, input, saves, and configuration are shared through the frontend.
 
 ### Quick Start
 
