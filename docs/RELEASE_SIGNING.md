@@ -16,8 +16,7 @@ committed. Back up the keystore separately before publishing an APK.
 - Serial number: `4e869f45959cdc9b`
 - Signature algorithm: SHA256withRSA
 - Public key: RSA 3072 bits
-- Valid from: July 28, 2026 08:31:21 HKT
-- Valid until: July 4, 2126 08:31:21 HKT
+- Validity: verify the certificate validity period directly from the signed APK before release.
 - SHA-256: `2D:CC:1D:F8:D5:2E:6F:C8:8E:11:76:1A:24:D6:55:47:59:16:FA:A2:7E:36:60:21:3F:16:31:CE:99:64:11:6D`
 - SHA-1: `64:EE:8E:CF:93:28:76:35:E2:50:BC:A7:F7:9C:E1:B9:A3:17:E6:A5`
 

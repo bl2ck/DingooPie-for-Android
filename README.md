@@ -25,9 +25,9 @@ CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM
 
 ### 模拟内核方案
 
-- APP 游戏使用独立 MIPS 运行时：自动模式使用 PPSSPP IR JIT，兼容模式或兼容性配置要求时使用内置 MIPS 解释器。
-- CC 游戏使用独立 ARM32 运行时：自动模式优先使用 Dynarmic A32 JIT，兼容模式、调试分析或 JIT 不可用时使用内置 ARM32 解释器。
-- 两类运行时各自处理 CPU 执行与 HLE，共享视频、音频、输入、存档和配置前端。
+- APP 游戏使用独立 MIPS 运行时：自动模式使用 PPSSPP IR JIT，兼容或兼容性配置要求时使用内置 MIPS 解释器。
+- CC 游戏使用独立 ARM32 运行时：自动模式优先使用 Dynarmic A32 JIT，兼容、需要解释器指令采样或 JIT 不可用时使用内置 ARM32 解释器；普通性能日志仍可保留 Dynarmic。
+- 两类运行时各自处理 CPU 执行与 HLE，共享通用视频、输入、配置、存档和其他前端基础设施，再由 Android 平台层完成界面与系统集成。
 
 ### 快速使用
 1. 安装 `DingooPie.apk` 并启动。
@@ -203,13 +203,14 @@ powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1 `
 
 ### 代码架构
 
-原生模拟器核心按职责划分到 `native/core/`：
+原生代码按共享模拟核心与 Android 平台集成分层：
 
-- `app/`：APP/MIPS 运行时、CPU 后端、HLE 和 APP 存档。
-- `cc/`：CC/ARM32 运行时、解释器、Dynarmic 后端、HLE 和 CC 存档。
-- `shared/`：格式选择、执行协调、访客服务、存档、诊断和平台接口。
-- `frontend/`：SDL 外壳、视频、输入、音频、菜单和游戏库界面。
-- `config/`：设置、兼容性配置和金手指。
+- `native/core/app/`：APP/MIPS 运行时、CPU 后端、HLE 和 APP 存档。
+- `native/core/cc/`：CC/ARM32 运行时、解释器、Dynarmic 后端、HLE 和 CC 存档。
+- `native/core/shared/`：格式选择、执行协调、访客服务、通用存档和诊断契约。
+- `native/core/frontend/`：跨平台的视频、输入和其他 SDL 前端基础设施。
+- `native/core/config/`：设置、兼容性配置和金手指。
+- `native/android/`：Android 入口、前端外壳、菜单、游戏库、平台服务、诊断和兼容层。
 
 完整架构和依赖边界见 `docs/ARCHITECTURE.md`。
 
@@ -243,9 +244,9 @@ do not use separate emulation cores.
 
 ### Emulation Core Scheme
 
-- APP games use a dedicated MIPS runtime. Automatic mode uses PPSSPP IR JIT; compatibility mode or a compatibility profile uses the built-in MIPS interpreter.
-- CC games use a dedicated ARM32 runtime. Automatic mode prefers Dynarmic A32 JIT; compatibility mode, profiling, or an unavailable JIT uses the built-in ARM32 interpreter.
-- Each runtime owns CPU execution and HLE, while video, audio, input, saves, and configuration are shared through the frontend.
+- APP games use a dedicated MIPS runtime. Automatic mode uses PPSSPP IR JIT; Compatibility or a compatibility profile uses the built-in MIPS interpreter.
+- CC games use a dedicated ARM32 runtime. Automatic mode prefers Dynarmic A32 JIT; Compatibility, interpreter instruction sampling, or an unavailable JIT uses the built-in ARM32 interpreter. Normal performance logging can keep Dynarmic enabled.
+- Each runtime owns CPU execution and HLE. Common video, input, configuration, save, and other frontend infrastructure is shared, then integrated with the UI and system through the Android platform layer.
 
 ### Quick Start
 
@@ -435,12 +436,13 @@ Before publishing, verify the APK signature, text format, and relevant regressio
 
 ### Code Architecture
 
-The native emulator core is organized by responsibility under `native/core/`:
+Native code is divided between the shared emulator core and Android platform integration:
 
-- `app/`: APP/MIPS runtime, CPU backends, HLE, and APP save states.
-- `cc/`: CC/ARM32 runtime, interpreter, Dynarmic backend, HLE, and CC save states.
-- `shared/`: format selection, execution coordination, guest services, saves, diagnostics, and platform interfaces.
-- `frontend/`: SDL shell, video, input, audio, menus, and game-library presentation.
-- `config/`: settings, compatibility configuration, and cheats.
+- `native/core/app/`: APP/MIPS runtime, CPU backends, HLE, and APP save states.
+- `native/core/cc/`: CC/ARM32 runtime, interpreter, Dynarmic backend, HLE, and CC save states.
+- `native/core/shared/`: format selection, execution coordination, guest services, common save infrastructure, and diagnostic contracts.
+- `native/core/frontend/`: cross-platform video, input, and other SDL frontend infrastructure.
+- `native/core/config/`: settings, compatibility configuration, and cheats.
+- `native/android/`: Android entry point, frontend shell, menus, game library, platform services, diagnostics, and compatibility shims.
 
 See `docs/ARCHITECTURE.md` for the complete architecture and dependency boundaries.

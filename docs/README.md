@@ -10,7 +10,7 @@
 
 - `ARCHITECTURE.md`：APP / CC 运行时边界、CC 包布局、共享服务、兼容性规则和配置顺序。
 - `BUILDING.md`：依赖准备、Debug / Release 构建、签名参数和输出路径。
-- `TESTING.md`：APK、运行时、音频、输入、金手指、即时存档和兼容性测试。
+- `TESTING.md`：APK、运行时、界面、输入、金手指、即时存档、线程、资源、菜单和兼容性测试。
 - `RELEASE_SIGNING.md`：正式签名证书、私有文件位置和发行包验证方法。
 - `a320_dingoo_ib_chinese.pdf`：丁果 A320 中文使用说明书。
 
@@ -35,7 +35,7 @@ library layouts, System Tools, LAN file management, controls, cheats, and instan
 
 - `ARCHITECTURE.md`: APP / CC runtime boundaries, CC package layouts, shared services, compatibility rules, and configuration order.
 - `BUILDING.md`: dependency setup, Debug / Release builds, signing inputs, and output paths.
-- `TESTING.md`: APK, runtime, audio, input, cheat, instant-save, and compatibility validation.
+- `TESTING.md`: APK, runtime, UI, input, cheat, instant-save, thread, resource, menu, and compatibility validation.
 - `RELEASE_SIGNING.md`: official certificate identity, private local files, and release verification.
 - `a320_dingoo_ib_chinese.pdf`: Chinese Dingoo A320 user manual.
 

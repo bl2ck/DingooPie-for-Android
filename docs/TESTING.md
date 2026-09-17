@@ -36,8 +36,10 @@ For MuMu, the script automatically prefers the MuMu ADB when using serial
 `127.0.0.1:7555`. Pass `-AdbPath` for another emulator-specific ADB. Do not mix
 two ADB server implementations against the same running emulator.
 
-The MuMu x86_64 build uses a pinned Dynarmic A32 backend when `profile=0`.
-Prepare its static libraries before the normal Gradle build:
+The MuMu x86_64 build uses a pinned Dynarmic A32 backend in Automatic mode.
+The normal Performance Log path keeps Dynarmic enabled; only an explicit
+interpreter instruction-sampling run selects the ARM32 interpreter. Prepare the
+Dynarmic static libraries before the normal Gradle build:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
@@ -48,8 +50,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 The preparation script pins Dynarmic commit
 `a41c380246d3d9f9874f0f792d234dc0cc17c180`, Boost headers 1.84.0 with
 SHA-512 verification, NDK 26.3.11579264, and CMake 3.22.1. Other ABIs continue
-to use the ARM32 interpreter. Profile runs also use the interpreter so PC/LR
-sampling remains available.
+to use the ARM32 interpreter. Interpreter-only PC/LR hotspot sampling remains
+available for focused diagnostic runs.
 
 Run both retail 3D CC regressions with OCR-guided scene entry and FPS sampling:
 
@@ -64,10 +66,11 @@ single-game invocation. The JSON summary records `execution_backend` and
 
 Each case archives screenshots, `fps.csv`, Android logcat, the private native
 log, extracted `cc-profile` / `profile:frontend` lines, and a JSON summary. With
-`debug.profile=1`, CC profile rows include interpreter IPS, framebuffer submit
-count, framebuffer copy time, average/maximum frame interval, and counts above
-25 ms and 33 ms. Use those fields to distinguish guest CPU limits from frame
-submission or frontend presentation stalls.
+`debug.profile=1`, CC profile rows include runtime IPS, framebuffer submit count,
+framebuffer copy time, average/maximum frame interval, and counts above 25 ms
+and 33 ms. Use those fields to distinguish guest CPU limits from frame
+submission or frontend presentation stalls. PC/LR hotspot rows are present only
+for an interpreter instruction-sampling run.
 
 For a diagnostic run without manually editing the emulator settings, pass
 `-EnableProfile` to the single-game script. It backs up `DingooPie.ini`, enables
@@ -134,6 +137,23 @@ Debug builds support timed virtual-control sequences through
 `DINGOO_PIE_INPUT_TRACE=1`. Use these only in isolated automation runs and clear
 package wrap properties afterward.
 
+Validate portrait virtual-control placement, utility-button order, and the
+configured control scale:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_portrait_controls.ps1 `
+    -GamePath 'C:\Games\sample.app' `
+    -Serial 127.0.0.1:7555
+```
+
+Validate the existing Screen Fill choices and default restoration through OCR
+screenshots:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_screen_fill_ocr.ps1 `
+    -Serial 127.0.0.1:7555
+```
+
 ## Save Regression
 
 Debug builds expose `dingoopie.save_automation`. The automation verifies APP/CC
@@ -170,6 +190,9 @@ powershell -ExecutionPolicy Bypass -File scripts/test_android_save_state_all_sam
 
 Each sample must save, load, and return to the game screen without leaving the
 application in the menu or a stalled runtime state.
+The workflow uses `scripts/ocr_click_dialog_button.py` to click the rendered
+Save, Load, and OK confirmations, so opening a dialog alone is not treated as a
+completed save or load.
 
 For a repeatable CC 3D interactive-scene save test, use the TiandiDao workflow:
 
@@ -184,6 +207,12 @@ The workflow enters the playable 3D scene, captures a state, exits and restarts
 without clearing private saves, loads the state, and verifies that the native CC
 runtime restores and continues. Pair it with the OCR/FPS regression above so
 scene interactivity and frame pacing are checked independently from save loading.
+
+Run the native syntax regression for save-state menu mode transitions:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_save_state_menu_flow.ps1
+```
 
 Validate the instant save-state menu visually on the 960x540 Android test device:
 
@@ -214,6 +243,14 @@ concurrent profiling increments are retained, waits for the active count to
 reach zero, and fails if the process virtual-memory increase exceeds 16 MiB. It
 also stresses synchronized diagnostic snapshots and the shared APP tick clock
 with 16 concurrent host threads.
+
+Run the target-runtime join regression to verify that joinable guest threads
+complete and release their resources correctly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test_android_thread_join.ps1 `
+    -Serial 127.0.0.1:7555
+```
 
 ## Android Resource Regressions
 
@@ -266,6 +303,9 @@ beside the game; otherwise it uses the format-isolated private save directory.
 APP reports MIPS runtime context and CC reports ARM registers plus execution and
 import statistics. Startup file-open or package-parse rejection is not a guest
 execution failure and is validated through the native runtime log instead.
+Diagnostic acceptance should require complete structured fields, meaningful
+state transitions, actionable warnings or errors, and a confirmed report close;
+repeated unchanged defaults are not required evidence of a valid run.
 
 ## Menu Structure
 
