@@ -1,4 +1,5 @@
 #include "config/cheats/cheat_engine.h"
+#include "shared/platform/storage_services.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -459,7 +460,7 @@ bool cheatLoadStream(FILE* file, const std::string& sourcePath, CheatSet* out, s
 
 bool cheatLoadFile(const std::string& path, CheatSet* out, std::string* error)
 {
-    FILE* file = fopen(path.c_str(), "rb");
+    FILE* file = platformOpenFile(path, "rb");
     if (!file)
     {
         if (error)

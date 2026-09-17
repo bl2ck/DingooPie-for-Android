@@ -22,7 +22,7 @@ function Assert-OrderedText {
 $settingsHeader = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/settings/emulator_settings.h') -Raw
 $settingsSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/config/settings/emulator_settings.cpp') -Raw
 $audioSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/frontend/audio/sdl_audio.cpp') -Raw
-$menuSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/core/frontend/menu/menu_overlay.cpp') -Raw
+$menuSource = Get-Content -LiteralPath (Join-Path $projectRoot 'native/android/frontend/menu/menu_overlay.cpp') -Raw
 if (!$settingsHeader.Contains(
         'EMULATOR_AUDIO_BUFFER_VALUES[] = { 512, 1024, 2048, 4096, 8192 };')) {
     throw 'Audio buffer menu values do not match the supported low-latency order.'
@@ -96,6 +96,7 @@ $inputFields = @(
     'bool systemImeDisabled;',
     'bool showVirtualControls;',
     'int virtualControlScalePercent;',
+    'int virtualControlOpacityPercent;',
     'VirtualDpadType virtualDpadType;',
     'std::string controllerMapping;',
     'std::string controllerCalibration;',
@@ -108,7 +109,27 @@ $runtimeFields = @(
     'std::string osTimeDelayScale;',
     'bool cheatsEnabled;',
     'std::vector<EmulatorCheatSelection> cheatSelections;',
+    'GameLibraryLayoutMode gameLibraryLayout;',
     'UiLanguage uiLanguage;'
+)
+$libraryLayoutEnum = @(
+    'GAME_LIBRARY_LAYOUT_SINGLE_COLUMN = 0,',
+    'GAME_LIBRARY_LAYOUT_MULTI_COLUMN,',
+    'GAME_LIBRARY_LAYOUT_MODE_COUNT'
+)
+$uiHelperOrder = @(
+    'static GameLibraryLayoutMode parseGameLibraryLayoutMode(',
+    'static UiLanguage parseUiLanguage(',
+    'const char* emulatorGameLibraryLayoutName(GameLibraryLayoutMode mode)',
+    'const char* emulatorUiLanguageName(UiLanguage language)'
+)
+$uiDefaults = @(
+    'settings.gameLibraryLayout = GAME_LIBRARY_LAYOUT_SINGLE_COLUMN;',
+    'settings.uiLanguage = UI_LANGUAGE_CHINESE;'
+)
+$uiIniLoad = @(
+    'readIniString("ui", "game_library_layout"',
+    'readIniString("ui", "language"'
 )
 $audioDefaults = @(
     'settings.audioVolumePercent = 100;',
@@ -126,6 +147,27 @@ $audioIniLoad = @(
     '"effect"',
     '"digital_noise_reduction"',
     'readIniBool("audio", "audio_disabled"'
+)
+$inputDefaults = @(
+    'settings.systemImeDisabled = true;',
+    'settings.showVirtualControls = true;',
+    'settings.virtualControlScalePercent = 100;',
+    'settings.virtualControlOpacityPercent = 100;',
+    'settings.virtualDpadType = VIRTUAL_DPAD_JOYSTICK;',
+    'settings.controllerMapping = "";',
+    'settings.controllerCalibration = "";',
+    'settings.keyboardMapping = "";'
+)
+$inputIniLoad = @(
+    '"input", "system_ime_disabled"',
+    'readIniBool("input", "show_virtual_controls"',
+    'readIniInt("input", "virtual_control_scale"',
+    'readIniInt("input", "virtual_control_opacity"',
+    'readIniString("input", "virtual_dpad_type"',
+    'readIniString("input", "controller_mapping"',
+    'readIniString(',
+    '"input", "controller_calibration"',
+    'readIniString("input", "keyboard_mapping"'
 )
 $audioIniWrite = @(
     'writeIniInt("audio", "volume_percent"',
@@ -163,6 +205,7 @@ $inputRows = @(
     'ANDROID_INPUT_SYSTEM_IME = 0,',
     'ANDROID_INPUT_VIRTUAL_CONTROLS,',
     'ANDROID_INPUT_VIRTUAL_CONTROL_SCALE,',
+    'ANDROID_INPUT_VIRTUAL_CONTROL_OPACITY,',
     'ANDROID_INPUT_VIRTUAL_DPAD_TYPE,',
     'ANDROID_INPUT_CONTROLLER_MAPPING,',
     'ANDROID_INPUT_CONTROLLER_CALIBRATION,',
@@ -264,6 +307,92 @@ $noiseReductionText = @(
     'ANDROID_TEXT_AUDIO_DIGITAL_NOISE_REDUCTION_MEDIUM,',
     'ANDROID_TEXT_AUDIO_DIGITAL_NOISE_REDUCTION_LOW,'
 )
+$inputTextIds = @(
+    'ANDROID_TEXT_INPUT_SYSTEM_IME,',
+    'ANDROID_TEXT_INPUT_VIRTUAL_CONTROLS,',
+    'ANDROID_TEXT_INPUT_VIRTUAL_CONTROL_SCALE,',
+    'ANDROID_TEXT_INPUT_VIRTUAL_CONTROL_OPACITY,',
+    'ANDROID_TEXT_INPUT_VIRTUAL_DPAD_TYPE,',
+    'ANDROID_TEXT_INPUT_CONTROLLER_MAPPING,',
+    'ANDROID_TEXT_INPUT_CONTROLLER_CALIBRATION,'
+)
+$inputMenuContent = @(
+    'if (row == ANDROID_INPUT_SYSTEM_IME)',
+    'if (row == ANDROID_INPUT_VIRTUAL_CONTROLS)',
+    'if (row == ANDROID_INPUT_VIRTUAL_CONTROL_SCALE)',
+    'if (row == ANDROID_INPUT_VIRTUAL_CONTROL_OPACITY)',
+    'if (row == ANDROID_INPUT_VIRTUAL_DPAD_TYPE)',
+    'if (row == ANDROID_INPUT_CONTROLLER_MAPPING)',
+    'if (row == ANDROID_INPUT_CONTROLLER_CALIBRATION)',
+    'if (row == ANDROID_INPUT_BACK)'
+)
+$inputMenuActions = @(
+    'case ANDROID_INPUT_SYSTEM_IME:',
+    'case ANDROID_INPUT_VIRTUAL_CONTROLS:',
+    'case ANDROID_INPUT_VIRTUAL_CONTROL_SCALE:',
+    'case ANDROID_INPUT_VIRTUAL_CONTROL_OPACITY:',
+    'case ANDROID_INPUT_VIRTUAL_DPAD_TYPE:',
+    'case ANDROID_INPUT_CONTROLLER_MAPPING:',
+    'case ANDROID_INPUT_CONTROLLER_CALIBRATION:'
+)
+$virtualMenuOpacity = @(
+    'SDL_Rect button = androidMenuButtonRect(width);',
+    'SDL_Color{ 255, 255, 255, virtualControlAlpha(235) }',
+    'drawAndroidSystemTextCentered("MENU", button,',
+    'SDL_Color{ 255, 255, 255, virtualControlAlpha(255) }'
+)
+$libraryKeyboardShortcuts = @(
+    'case SDL_SCANCODE_ESCAPE:',
+    'case SDL_SCANCODE_AC_BACK:',
+    'openAndroidMenu(ANDROID_MENU_MAIN);',
+    'case SDL_SCANCODE_DELETE:',
+    'removeAndroidLibraryGameAtRow(g_androidLibrarySelectedRow);',
+    'case SDL_SCANCODE_INSERT:',
+    'requestAndroidGameImport();'
+)
+$libraryKeyboardNavigation = @(
+    'scancode == SDL_SCANCODE_UP',
+    'scancode == SDL_SCANCODE_LEFT',
+    'scancode == SDL_SCANCODE_RIGHT',
+    'scancode == SDL_SCANCODE_DOWN',
+    'moveAndroidNavigationSelection(direction);',
+    'scancode == SDL_SCANCODE_RETURN || scancode == SDL_SCANCODE_SPACE',
+    'activateAndroidNavigationSelection();'
+)
+$librarySystemToolsMenu = @(
+    '"Switch to Single Column"',
+    '"Switch to Multiple Columns"',
+    '"Refresh Game List"',
+    '"File Manager Service"'
+)
+$librarySystemToolsActions = @(
+    'if (which == 0)',
+    'nativeToggleGameLibraryLayout();',
+    'else if (which == 1)',
+    'nativeRefreshGameLibrary();',
+    'else if (which == 2)',
+    'showFileManagerService(chinese);'
+)
+$librarySystemToolsFrontendOrder = @(
+    'void frontendToggleGameLibraryLayout(void);',
+    'void frontendRefreshGameLibrary(void);'
+)
+$librarySystemToolsJniOrder = @(
+    'nativeToggleGameLibraryLayout(',
+    'frontendToggleGameLibraryLayout();',
+    'nativeRefreshGameLibrary(',
+    'frontendRefreshGameLibrary();'
+)
+$librarySystemToolsImplementationOrder = @(
+    'void frontendToggleGameLibraryLayout(void)',
+    'void frontendRefreshGameLibrary(void)'
+)
+$libraryUnifiedSizing = @(
+    'kAndroidLibraryRowHeight = 52;',
+    'kAndroidLibraryFormatIconSize = 34;',
+    'layout.rowHeight = kAndroidLibraryRowHeight * scale;',
+    'layout.formatIconSize = kAndroidLibraryFormatIconSize * scale;'
+)
 $audioApply = @(
     'audioOutputSetMasterVolumePercent(settings.audioVolumePercent);',
     'audioOutputSetBufferSamples(settings.audioBufferSamples);',
@@ -295,9 +424,22 @@ $inputIniWrite = @(
     '"input", "system_ime_disabled"',
     'writeIniBool("input", "show_virtual_controls"',
     'writeIniInt("input", "virtual_control_scale"',
+    'writeIniInt("input", "virtual_control_opacity"',
     'writeIniString("input", "virtual_dpad_type"',
     'writeIniString("input", "controller_mapping"',
+    'writeIniString(',
+    '"input", "controller_calibration"',
     'writeIniString("input", "keyboard_mapping"'
+)
+$inputTraceOutput = @(
+    'input.system_ime_disabled=%u',
+    'input.show_virtual_controls=%u',
+    'input.virtual_control_scale=%d',
+    'input.virtual_control_opacity=%d',
+    'input.virtual_dpad_type=%s',
+    'input.controller_mapping=\"%s\"',
+    'input.controller_calibration=\"%s\"',
+    'input.keyboard_mapping=\"%s\"'
 )
 $runtimeIniWrite = @(
     'writeIniString("runtime", "backend"',
@@ -305,6 +447,7 @@ $runtimeIniWrite = @(
     'writeIniString("runtime", "speed_scale"',
     'writeIniString("runtime", "ostimedly_scale"',
     'writeIniBool("runtime", "cheats_enabled"',
+    'writeIniString("ui", "game_library_layout"',
     'writeIniString("ui", "language"',
     'writeIniBool("debug", "profile"'
 )
@@ -315,6 +458,10 @@ $runtimeIniLoad = @(
     'readIniString("runtime", "ostimedly_scale"',
     'readIniBool("runtime", "cheats_enabled"'
 )
+$uiTraceOutput = @(
+    'ui.game_library_layout=%s',
+    'ui.language=%s'
+)
 
 Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $noiseReductionValues
 Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $cpuClockValues
@@ -322,24 +469,44 @@ Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $videoField
 Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $audioFields
 Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $inputFields
 Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $runtimeFields
+Assert-OrderedText 'native\core\config\settings\emulator_settings.h' $libraryLayoutEnum
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $uiHelperOrder
 Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $audioDefaults
 Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $audioIniLoad
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $inputDefaults
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $inputIniLoad
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $uiDefaults
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $uiIniLoad
 Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $managedIniSections
 Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $videoIniWrite
 Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $audioIniWrite
 Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $inputIniWrite
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $inputTraceOutput
 Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $runtimeIniLoad
 Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $runtimeIniWrite
-Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $videoRows
-Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $audioRows
-Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $inputRows
-Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $controllerMappingRows
+Assert-OrderedText 'native\core\config\settings\emulator_settings.cpp' $uiTraceOutput
+Assert-OrderedText 'native\android\frontend\menu\menu_model.h' $videoRows
+Assert-OrderedText 'native\android\frontend\menu\menu_model.h' $audioRows
+Assert-OrderedText 'native\android\frontend\menu\menu_model.h' $inputRows
+Assert-OrderedText 'native\android\frontend\menu\menu_model.h' $controllerMappingRows
 Assert-OrderedText 'native\core\frontend\input\input_controls.h' $inputControlBits
 Assert-OrderedText 'native\core\cc\hle\cc_input_mapping.h' $ccInputSourceMasks
-Assert-OrderedText 'native\core\frontend\menu\menu_overlay.cpp' $controllerMappingControls
-Assert-OrderedText 'native\core\frontend\menu\menu_model.h' $runtimeRows
-Assert-OrderedText 'native\core\frontend\menu\menu_strings.h' $noiseReductionText
-Assert-OrderedText 'native\core\frontend\shell\frontend_shell.cpp' $audioApply
-Assert-OrderedText 'native\core\frontend\shell\frontend_shell.cpp' $controllerMenuMapping
+Assert-OrderedText 'native\android\frontend\menu\menu_overlay.cpp' $controllerMappingControls
+Assert-OrderedText 'native\android\frontend\menu\menu_model.h' $runtimeRows
+Assert-OrderedText 'native\android\frontend\menu\menu_strings.h' $noiseReductionText
+Assert-OrderedText 'native\android\frontend\menu\menu_strings.h' $inputTextIds
+Assert-OrderedText 'native\android\frontend\menu\menu_overlay.cpp' $inputMenuContent
+Assert-OrderedText 'native\android\frontend\menu\menu_overlay.cpp' $inputMenuActions
+Assert-OrderedText 'native\android\frontend\menu\menu_overlay.cpp' $virtualMenuOpacity
+Assert-OrderedText 'native\android\frontend\frontend_shell.cpp' $libraryKeyboardShortcuts
+Assert-OrderedText 'native\android\frontend\frontend_shell.cpp' $libraryKeyboardNavigation
+Assert-OrderedText 'app\src\main\java\com\dingoopie\android\DingooPieActivity.java' $librarySystemToolsMenu
+Assert-OrderedText 'app\src\main\java\com\dingoopie\android\DingooPieActivity.java' $librarySystemToolsActions
+Assert-OrderedText 'native\android\frontend\frontend_shell.h' $librarySystemToolsFrontendOrder
+Assert-OrderedText 'native\android\platform\platform_android.cpp' $librarySystemToolsJniOrder
+Assert-OrderedText 'native\android\frontend\frontend_shell.cpp' $librarySystemToolsImplementationOrder
+Assert-OrderedText 'native\android\frontend\frontend_shell.cpp' $libraryUnifiedSizing
+Assert-OrderedText 'native\android\frontend\frontend_shell.cpp' $audioApply
+Assert-OrderedText 'native\android\frontend\frontend_shell.cpp' $controllerMenuMapping
 
 Write-Host 'Settings, INI, enum, and menu order validation passed.'

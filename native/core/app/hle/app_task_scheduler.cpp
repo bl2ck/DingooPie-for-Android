@@ -1,21 +1,23 @@
 #include "app/hle/app_task_scheduler.h"
-#include "app/runtime/app_runtime_context.h"
-#include "app/hle/app_task_lifecycle.h"
-#include <assert.h>
-#include "app/memory/app_memory.h"
-#include <pthread.h>
+
 #include <SDL2/SDL.h>
-#include "app/cpu/mips_runtime.h"
-#include "shared/execution/execution_backend.h"
-#include "frontend/video/framebuffer.h"
-#include "app/memory/app_framebuffer_mapping.h"
-#include "shared/diagnostics/runtime_log.h"
-#include "app/hle/app_hle.h"
-#include "app/runtime/app_runtime_debug.h"
-#include "shared/services/guest_package.h"
+#include <assert.h>
 #include <cstdlib>
 #include <cstring>
+#include <pthread.h>
 #include <vector>
+
+#include "app/cpu/mips_runtime.h"
+#include "app/hle/app_hle.h"
+#include "app/hle/app_task_lifecycle.h"
+#include "app/memory/app_framebuffer_mapping.h"
+#include "app/memory/app_memory.h"
+#include "app/runtime/app_runtime_context.h"
+#include "app/runtime/app_runtime_debug.h"
+#include "frontend/video/framebuffer.h"
+#include "shared/diagnostics/runtime_log.h"
+#include "shared/execution/execution_backend.h"
+#include "shared/services/guest_package.h"
 
 static SDL_atomic_t s_taskShutdownRequested;
 static pthread_mutex_t s_taskRuntimeMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -58,6 +60,8 @@ static ExecutionBackend subtaskBackendFromEnv()
     }
     if (backend == EXECUTION_BACKEND_PPSSPP_IRJIT)
     {
+        // The PPSSPP adapter still owns global CPU/JIT state, so running host
+        // pthread-backed Dingoo tasks through it serializes or corrupts state.
         printf("task: ppsspp_irjit uses process-global state; using compatibility mode for subtask\n");
         return EXECUTION_BACKEND_COMPATIBILITY;
     }
@@ -185,7 +189,8 @@ static void hookTaskProfile(NativeRuntime* runtime, uint64_t address, uint32_t s
     }
 }
 
-static bool hookInvalidMemory(NativeRuntime* runtime, RuntimeMemoryAccess type, uint64_t address, int size, int64_t value, void* userData)
+static bool hookInvalidMemory(NativeRuntime* runtime, RuntimeMemoryAccess type,
+    uint64_t address, int size, int64_t value, void* userData)
 {
     (void)userData;
     appRuntimeDebugReportInvalidMemory(runtime, type, address, size, value);
@@ -195,6 +200,7 @@ static bool hookInvalidMemory(NativeRuntime* runtime, RuntimeMemoryAccess type, 
 void* subTaskRun(void* data)
 {
     taskThreadLifecycleDetachCurrent();
+
     struct TaskCompletionGuard
     {
         ~TaskCompletionGuard()
@@ -292,7 +298,8 @@ void* subTaskRun(void* data)
         return NULL;
     }
 
-    nativeRuntimeAddHook(runtime, &trace, RUNTIME_HOOK_MEM_INVALID, (void*)hookInvalidMemory, NULL, 1, 0);
+    nativeRuntimeAddHook(runtime, &trace, RUNTIME_HOOK_MEM_INVALID,
+        (void*)hookInvalidMemory, NULL, 1, 0);
     if (taskProfileEnabled())
     {
         nativeRuntimeAddHook(runtime, &trace, RUNTIME_HOOK_CODE, (void*)hookTaskProfile, taskStruct, 1, 0xffffffffu);

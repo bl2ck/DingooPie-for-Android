@@ -3,17 +3,14 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "shared/config/runtime_constants.h"
-#include "shared/services/guest_package.h"
+#include "shared/config/guest_runtime_constants.h"
 
 // 320x240 RGB565 framebuffer, rounded up to a 4 KB page boundary.
 #define VM_LCD_FB_SIZE  0x00026000
 
-void framebufferReset(void);
+uint32_t framebufferGuestAddress(void);
 size_t framebufferGuestAliasCount(void);
 uint32_t framebufferGuestAlias(size_t index);
-
-uint32_t framebufferGuestAddress(void);
 bool framebufferHostPointer(uint32_t addr, void** out);
 bool framebufferVmPointer(void* ptr, uint32_t* out);
 
@@ -22,7 +19,6 @@ void* framebufferPresentedPixels(void);
 void framebufferCopyPresented(void* dst, uint32_t size);
 
 void framebufferRequestUpdate(void);
-void framebufferSetTransientPartialProtectionEnabled(bool enabled);
 void framebufferPresentRestoredFrame(void);
 int framebufferConsumeUpdateRequest(void);
 uint64_t framebufferConsumeSubmittedCount(void);
@@ -34,5 +30,8 @@ bool framebufferAddressOverlaps(uint32_t address, uint32_t size);
 uint64_t framebufferConsumeWriteCount(void);
 uint64_t framebufferConsumeWriteBytes(void);
 void framebufferSetProfileEnabled(bool enabled);
+
+void framebufferSetTransientPartialProtectionEnabled(bool enabled);
+void framebufferReset(void);
 
 #endif

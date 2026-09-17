@@ -1,6 +1,0 @@
-#ifndef DINGOO_PIE_SHARED_PLATFORM_LIFECYCLE_SERVICES_H
-#define DINGOO_PIE_SHARED_PLATFORM_LIFECYCLE_SERVICES_H
-
-void platformRequestApplicationExit(void);
-
-#endif

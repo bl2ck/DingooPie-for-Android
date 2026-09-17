@@ -10,6 +10,7 @@ struct CcCrashLogContext
     const char* gameSha256;
     const char* saveDirectory;
     const char* error;
+    const char* backend;
     const uint32_t* registers;
     uint32_t cpsr;
     uint32_t unsupportedInstruction;
@@ -30,6 +31,7 @@ struct CcCrashLogContext
     uint32_t failedTaskDelayTicks;
     bool faultWrite;
     bool faultFetch;
+    bool failedTaskValid;
     const char* lastImport;
 };
 

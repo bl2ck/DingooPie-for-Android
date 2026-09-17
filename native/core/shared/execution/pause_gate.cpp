@@ -9,6 +9,7 @@ static std::mutex s_pauseMutex;
 static std::condition_variable s_pauseCondition;
 static std::atomic<bool> s_paused(false);
 static std::atomic<unsigned int> s_waiterCount(0);
+static std::atomic<uint32_t> s_restoreGeneration(0);
 
 void pauseGateSetPaused(bool paused)
 {
@@ -96,4 +97,14 @@ bool pauseGateWaitForNoWaiters(uint32_t timeoutMs)
 uint32_t pauseGateWaiterCount(void)
 {
     return s_waiterCount.load(std::memory_order_acquire);
+}
+
+void pauseGateMarkRuntimeRestored(void)
+{
+    s_restoreGeneration.fetch_add(1, std::memory_order_acq_rel);
+}
+
+uint32_t pauseGateRestoreGeneration(void)
+{
+    return s_restoreGeneration.load(std::memory_order_acquire);
 }

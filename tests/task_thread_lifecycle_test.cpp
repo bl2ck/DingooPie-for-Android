@@ -1,6 +1,6 @@
 #include "app/hle/app_task_lifecycle.h"
 #include "shared/diagnostics/profile_counter.h"
-#include "shared/diagnostics/runtime_shared_text.h"
+#include "shared/execution/thread_safe_text.h"
 #include "shared/execution/runtime_tick_clock.h"
 
 #include <pthread.h>
@@ -11,7 +11,7 @@
 
 static volatile int g_completed = 0;
 static RuntimeProfileCounter g_profileCounter;
-static RuntimeSharedText<96> g_sharedText;
+static ThreadSafeText<96> g_sharedText;
 static RuntimeTickClock g_tickClock;
 static volatile int g_concurrencyStart = 0;
 static volatile int g_sharedTextErrors = 0;

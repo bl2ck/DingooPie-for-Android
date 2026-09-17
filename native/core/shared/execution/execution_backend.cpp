@@ -32,12 +32,15 @@ ExecutionBackend executionBackendFromName(const char* value, bool* recognized)
         return EXECUTION_BACKEND_PPSSPP_IRJIT;
     }
 
-    if (executionValueEquals(value, "compatibility"))
+    if (executionValueEquals(value, "compatibility") ||
+        executionValueEquals(value, "interpreter") ||
+        executionValueEquals(value, "native"))
     {
         return EXECUTION_BACKEND_COMPATIBILITY;
     }
 
-    if (executionValueEquals(value, "ppsspp_irjit"))
+    if (executionValueEquals(value, "ppsspp_irjit") ||
+        executionValueEquals(value, "irjit"))
     {
         return EXECUTION_BACKEND_PPSSPP_IRJIT;
     }
@@ -66,12 +69,14 @@ RuntimeExecutionMode runtimeExecutionModeFromName(const char* value, bool* recog
         *recognized = true;
     }
 
-    if (!value || !value[0])
+    if (!value || !value[0] || executionValueEquals(value, "auto"))
     {
         return RUNTIME_EXECUTION_MODE_AUTOMATIC;
     }
 
-    if (executionValueEquals(value, "compatibility"))
+    if (executionValueEquals(value, "compatibility") ||
+        executionValueEquals(value, "interpreter") ||
+        executionValueEquals(value, "native"))
     {
         return RUNTIME_EXECUTION_MODE_COMPATIBILITY;
     }

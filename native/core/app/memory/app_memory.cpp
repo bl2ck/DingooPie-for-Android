@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <mutex>
-#include <unordered_map>
 #include "frontend/video/framebuffer.h"
 #include <pthread.h>
 static uint32_t alignUp(uint32_t value, uint32_t alignment)
@@ -42,7 +41,6 @@ static uint32_t s_originalLegacyHeapLength;
 static void* s_legacyHeapEnd;
 static uint32_t s_legacyHeapFreeBytes;
 static std::recursive_mutex s_vmHeapMutex;
-static std::unordered_map<void*, uint32_t> s_vmAllocations;
 
 #define MEM_DEBUG
 
@@ -73,7 +71,6 @@ static int mapAliasIfNeeded(NativeRuntime* runtime, uint32_t addr, uint32_t size
 static void initializeVmHeapAllocator(void* baseAddress, uint32_t length)
 {
     std::lock_guard<std::recursive_mutex> lock(s_vmHeapMutex);
-    s_vmAllocations.clear();
     printf("memory: initialize heap base=%p length=0x%08x\n", baseAddress, length);
     s_originalLegacyHeapBase = baseAddress;
     s_originalLegacyHeapLength = length;
@@ -325,18 +322,74 @@ static void* allocateTrackedVmHeapBlock(uint32_t len)
     {
         ((uint32_t*)p)[0] = len;
         void* userPtr = (void*)((uint8_t*)p + 8);
-        try
-        {
-            s_vmAllocations[userPtr] = len;
-        }
-        catch (...)
-        {
-            freeVmHeapBlock(p, len + 8);
-            return NULL;
-        }
         return userPtr;
     }
     return p;
+}
+
+static bool allocationRangeIsAllocatedLocked(uint64_t blockOffset,
+    uint64_t blockLength)
+{
+    uint64_t blockEnd = blockOffset + blockLength;
+    size_t nextOffset = s_legacyHeapFreeList.next;
+    size_t remainingNodes = s_legacyHeapLength / 8u + 1u;
+    while (nextOffset < s_legacyHeapLength && remainingNodes-- != 0)
+    {
+        if ((nextOffset & 7u) != 0 ||
+            nextOffset > s_legacyHeapLength - sizeof(LegacyHeapFreeBlock))
+        {
+            return false;
+        }
+
+        const LegacyHeapFreeBlock* freeBlock =
+            (const LegacyHeapFreeBlock*)((const uint8_t*)s_legacyHeapBase + nextOffset);
+        uint64_t freeLength = freeBlock->len;
+        uint64_t freeEnd = (uint64_t)nextOffset + freeLength;
+        if (freeLength == 0 || freeEnd > s_legacyHeapLength ||
+            (blockOffset < freeEnd && nextOffset < blockEnd))
+        {
+            return false;
+        }
+        if (freeBlock->next <= nextOffset || freeBlock->next > s_legacyHeapLength)
+        {
+            return false;
+        }
+        nextOffset = freeBlock->next;
+    }
+    return nextOffset == s_legacyHeapLength;
+}
+
+static bool trackedAllocationLengthLocked(void* p, uint32_t* outLength)
+{
+    if (!p || !outLength || !s_legacyHeapBase || !s_legacyHeapEnd)
+    {
+        return false;
+    }
+
+    uintptr_t userAddress = (uintptr_t)p;
+    uintptr_t heapBegin = (uintptr_t)s_legacyHeapBase;
+    uintptr_t heapEnd = (uintptr_t)s_legacyHeapEnd;
+    if (userAddress < heapBegin + 8u || userAddress >= heapEnd)
+    {
+        return false;
+    }
+
+    uint32_t length = *(uint32_t*)(userAddress - 8u);
+    if (length == 0 || length > UINT32_MAX - 15)
+    {
+        return false;
+    }
+    uint64_t blockOffset = (uint64_t)(userAddress - heapBegin) - 8u;
+    uint64_t blockLength = alignedLegacyHeapSize((uint64_t)length + 8u);
+    if ((blockOffset & 7u) != 0 || blockOffset > s_legacyHeapLength ||
+        blockLength > s_legacyHeapLength - blockOffset ||
+        !allocationRangeIsAllocatedLocked(blockOffset, blockLength))
+    {
+        return false;
+    }
+
+    *outLength = length;
+    return true;
 }
 
 static void freeTrackedVmHeapBlock(void* p)
@@ -347,15 +400,12 @@ static void freeTrackedVmHeapBlock(void* p)
     }
 
     std::lock_guard<std::recursive_mutex> lock(s_vmHeapMutex);
-    std::unordered_map<void*, uint32_t>::iterator allocation = s_vmAllocations.find(p);
-    if (allocation == s_vmAllocations.end())
+    uint32_t length = 0;
+    if (!trackedAllocationLengthLocked(p, &length))
     {
         return;
     }
-
-    uint32_t len = allocation->second;
-    s_vmAllocations.erase(allocation);
-    freeVmHeapBlock((uint8_t*)p - 8, len + 8);
+    freeVmHeapBlock((uint8_t*)p - 8, length + 8);
 }
 
 static void* reallocateTrackedVmHeapBlock(void* p, uint32_t newLen)
@@ -370,13 +420,12 @@ static void* reallocateTrackedVmHeapBlock(void* p, uint32_t newLen)
     else
     {
         std::lock_guard<std::recursive_mutex> lock(s_vmHeapMutex);
-        std::unordered_map<void*, uint32_t>::iterator allocation = s_vmAllocations.find(p);
-        if (allocation == s_vmAllocations.end())
+        uint32_t oldLength = 0;
+        if (!trackedAllocationLengthLocked(p, &oldLength))
         {
             return NULL;
         }
-        uint32_t oldlen = allocation->second;
-        size_t minsize = (oldlen < newLen) ? oldlen : newLen;
+        size_t minsize = (oldLength < newLen) ? oldLength : newLen;
         void* newblock = allocateTrackedVmHeapBlock(newLen);
         if (newblock == NULL)
         {
@@ -561,7 +610,8 @@ void* toHostPtrRange(uint32_t addr, uint32_t size)
         }
     }
 
-    printf("memory: failed to translate VM address address=0x%08x\n", addr);
+    printf("memory: failed to translate VM address address=0x%08x size=%u\n",
+        addr, size);
     return NULL;
 }
 

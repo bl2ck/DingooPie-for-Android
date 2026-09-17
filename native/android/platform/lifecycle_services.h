@@ -1,0 +1,6 @@
+#ifndef DINGOO_PIE_ANDROID_PLATFORM_LIFECYCLE_SERVICES_H
+#define DINGOO_PIE_ANDROID_PLATFORM_LIFECYCLE_SERVICES_H
+
+void platformRequestApplicationExit(void);
+
+#endif

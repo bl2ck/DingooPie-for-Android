@@ -22,6 +22,7 @@
 #include "frontend/input/input_state.h"
 #include "shared/services/guest_filesystem.h"
 #include "shared/diagnostics/runtime_log.h"
+#include "shared/diagnostics/runtime_resource_events.h"
 #include "Common/CPUDetect.h"
 #include "Common/File/FileUtil.h"
 #include "Common/File/VFS/VFS.h"
@@ -59,6 +60,7 @@ static uint64_t g_runtimeMaxTicks = 0;
 static bool g_logEnabled = true;
 static std::atomic<bool> g_ppssppProfileEnabled(false);
 static bool g_fastPageDirectEnabled = true;
+static int g_fastPageDirectOverride = -1;
 static bool g_fastFramebufferDirectEnabled = true;
 static std::atomic<bool> g_irjitThrottleEnabled(false);
 static std::atomic<double> g_runtimeSpeedScale(0.0);
@@ -1753,19 +1755,31 @@ static bool tryRunFastHle(uint32_t address)
             else if (file.type == GUEST_FILE_TYPE_FILE)
             {
                 fsys_begin_fast_hle_call();
+                bool shouldRecordResourceLoad = runtimeResourceMonitorIsCapturing();
+                uint32_t positionBefore = shouldRecordResourceLoad ?
+                    fsys_stream_position(file.data) : 0;
+                const uint8_t* cachedData = NULL;
                 uint32_t cachedBytes = 0;
                 uint32_t cachedItems = 0;
-                if (fsys_read_cached(file.data, size, count, dst, &cachedBytes, &cachedItems))
+                if (fsys_read_cached(file.data, size, count, &cachedData, &cachedBytes, &cachedItems))
                 {
+                    if (cachedBytes > 0)
+                    {
+                        memcpy(dst, cachedData, cachedBytes);
+                    }
                     ret = cachedItems;
                 }
                 else
                 {
-                    ret = vm_fread(dst, size, count, file.data);
+                    ret = fsys_fread(dst, size, count, file.data);
                 }
                 fsys_end_fast_hle_call();
                 if (ret != (uint32_t)-1)
                 {
+                    if (shouldRecordResourceLoad)
+                    {
+                        fsys_record_load_to_guest(file.data, ptr, dst, positionBefore);
+                    }
                     g_ppssppFastFreadCalls++;
                     g_ppssppFastFreadBytes += (uint64_t)ret * (uint64_t)size;
                 }
@@ -1834,19 +1848,31 @@ static bool tryRunFastHle(uint32_t address)
         {
             void* dst = hostPointerCanonical(ptr, bytes);
             fsys_begin_fast_hle_call();
+            bool shouldRecordResourceLoad = runtimeResourceMonitorIsCapturing();
+            uint32_t positionBefore = shouldRecordResourceLoad ?
+                fsys_stream_position(stream) : 0;
+            const uint8_t* cachedData = NULL;
             uint32_t cachedBytes = 0;
             uint32_t cachedItems = 0;
-            if (dst && fsys_read_cached(stream, size, count, dst, &cachedBytes, &cachedItems))
+            if (dst && fsys_read_cached(stream, size, count, &cachedData, &cachedBytes, &cachedItems))
             {
+                if (cachedBytes > 0)
+                {
+                    memcpy(dst, cachedData, cachedBytes);
+                }
                 ret = cachedItems;
             }
             else
             {
-                ret = dst ? vm_fread(dst, size, count, stream) : (uint32_t)-1;
+                ret = dst ? fsys_fread(dst, size, count, stream) : (uint32_t)-1;
             }
             fsys_end_fast_hle_call();
             if (dst && ret != (uint32_t)-1)
             {
+                if (shouldRecordResourceLoad)
+                {
+                    fsys_record_load_to_guest(stream, ptr, dst, positionBefore);
+                }
                 g_ppssppFastFreadCalls++;
                 g_ppssppFastFreadBytes += (uint64_t)ret * (uint64_t)size;
             }
@@ -1985,8 +2011,10 @@ void ppssppShimAttachRuntime(NativeRuntime* runtime)
     ppssppShimApplyCpuClockSettings();
     coreState = CORE_RUNNING_CPU;
     coreStatePending = false;
-    const char* fastMemory = getenv("DINGOO_PIE_IRJIT_FASTMEM");
-    g_fastPageDirectEnabled = !fastMemory || strcmp(fastMemory, "0") != 0;
+    g_fastPageDirectEnabled = g_fastPageDirectOverride >= 0 ?
+        (g_fastPageDirectOverride != 0) :
+        (getenv("DINGOO_PIE_IRJIT_FASTMEM") == NULL ||
+            strcmp(getenv("DINGOO_PIE_IRJIT_FASTMEM"), "0") != 0);
     g_runtimeBeginTicks = 0;
     g_runtimeMaxTicks = 0;
     g_ppssppLastProfileTicks = 0;
@@ -2004,6 +2032,11 @@ void ppssppShimAttachRuntime(NativeRuntime* runtime)
     g_ppssppFastSemCalls = 0;
     g_ppssppLastProfileCoreTicks = CoreTiming::GetTicks();
     memset(&g_fastHleAddresses, 0x00, sizeof(g_fastHleAddresses));
+}
+
+void ppssppShimSetFastMemoryOverride(int enabled)
+{
+    g_fastPageDirectOverride = enabled < 0 ? -1 : (enabled ? 1 : 0);
 }
 
 void ppssppShimDetachRuntime(NativeRuntime* runtime)
@@ -2070,7 +2103,12 @@ bool ppssppShimWaitForPauseResume(NativeRuntime* runtime)
     }
 
     syncPpssppStateToRuntime();
-    pauseGateWaitForResume();
+    uint32_t restoreGeneration = pauseGateRestoreGeneration();
+    if (pauseGateWaitForResume() &&
+        restoreGeneration != pauseGateRestoreGeneration())
+    {
+        syncRuntimeStateToPpsspp();
+    }
     processPendingJitCacheClear();
     if (g_runtimeControl.stopRequested.load(std::memory_order_acquire))
     {
@@ -2096,7 +2134,17 @@ uint32_t ppssppShimRunCodeHook(uint32_t address)
     uint32_t currentAddress = address;
     for (uint32_t pass = 0; pass < 4; ++pass)
     {
-        pauseGateWaitForResume();
+        uint32_t restoreGeneration = pauseGateRestoreGeneration();
+        if (pauseGateWaitForResume() &&
+            restoreGeneration != pauseGateRestoreGeneration())
+        {
+            syncRuntimeStateToPpsspp();
+            if (currentMIPS->pc != currentAddress)
+            {
+                currentAddress = currentMIPS->pc;
+                continue;
+            }
+        }
 
         bool hasHook = nativeRuntimeHasCodeHook(g_ppssppRuntime, currentAddress);
         if (irjitTraceEnabled() && g_irjitDispatchTraceCount < 128)
@@ -2118,7 +2166,17 @@ uint32_t ppssppShimRunCodeHook(uint32_t address)
         // Synchronize only when a generated block reaches an HLE/compat hook.
         g_ppssppHookCalls++;
         ppssppShimProfileTick();
-        pauseGateWaitForResume();
+        restoreGeneration = pauseGateRestoreGeneration();
+        if (pauseGateWaitForResume() &&
+            restoreGeneration != pauseGateRestoreGeneration())
+        {
+            syncRuntimeStateToPpsspp();
+            if (currentMIPS->pc != currentAddress)
+            {
+                currentAddress = currentMIPS->pc;
+                continue;
+            }
+        }
 
         uint32_t fastReturnValue = 0;
         if (bridge_try_fast_return_hook(currentAddress, &fastReturnValue))
@@ -3048,7 +3106,12 @@ void Advance()
     {
         coreState = CORE_STEPPING_CPU;
     }
-    pauseGateWaitForResume();
+    uint32_t restoreGeneration = pauseGateRestoreGeneration();
+    if (pauseGateWaitForResume() &&
+        restoreGeneration != pauseGateRestoreGeneration())
+    {
+        syncRuntimeStateToPpsspp();
+    }
     g_ticks += slicelength;
     if (currentMIPS)
     {

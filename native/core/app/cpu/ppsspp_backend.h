@@ -10,6 +10,7 @@ RuntimeError ppssppIrJitStart(NativeRuntime* runtime, uint64_t begin, uint64_t u
 RuntimeError ppssppIrJitFlushCodeCache(NativeRuntime* runtime);
 void ppssppIrJitRequestStop(NativeRuntime* runtime);
 void ppssppShimClearJitCache(NativeRuntime* runtime);
+void ppssppShimSetFastMemoryOverride(int enabled);
 void ppssppShimApplyRuntimeSettings(void);
 void ppssppShimAttachRuntime(NativeRuntime* runtime);
 void ppssppShimDetachRuntime(NativeRuntime* runtime);

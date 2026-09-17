@@ -22,13 +22,13 @@ EmulatorOptions loadEmulatorOptions(void)
     options.ignoreQuit = emulatorEnvEnabled("DINGOO_PIE_IGNORE_QUIT");
     options.profile = emulatorEnvEnabled("DINGOO_PIE_PROFILE");
     options.compatTrace = emulatorEnvEnabled("DINGOO_PIE_COMPAT_TRACE");
+    const char* backendName = getenv("DINGOO_PIE_BACKEND");
     bool backendRecognized = false;
-    options.backend = executionBackendFromName(getenv("DINGOO_PIE_BACKEND"), &backendRecognized);
+    options.backend = executionBackendFromName(backendName, &backendRecognized);
     if (!backendRecognized)
     {
-        const char* backend = getenv("DINGOO_PIE_BACKEND");
         printf("config: invalid DINGOO_PIE_BACKEND='%s'; using compatibility mode\n",
-            backend ? backend : "");
+            backendName ? backendName : "");
     }
     return options;
 }

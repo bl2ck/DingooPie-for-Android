@@ -234,7 +234,7 @@ if ($timingResult -notmatch 'regression passed') {
 $armTest = Join-Path $resolvedOutputDirectory 'cc-arm-interpreter-test-x86_64'
 & $compiler -std=c++11 -O2 -Wall -Wextra -Werror -static-libstdc++ `
     -I (Join-Path $projectRoot 'native\core') `
-    (Join-Path $projectRoot 'tests\cc_arm_interpreter_test.cpp') `
+    (Join-Path $projectRoot 'tests\arm32_interpreter_test.cpp') `
     (Join-Path $projectRoot 'native\core\cc\cpu\arm32_interpreter.cpp') `
     (Join-Path $projectRoot 'native\core\shared\services\guest_package.cpp') `
     -o $armTest
@@ -531,7 +531,7 @@ profile=1
             'cc-arm: compatibility mode uses base ARM32 execution paths',
             'frontend: video settings anti_aliasing=low effect=sepia brightness=125 contrast=90 gamma=110 saturation=150 minimized_behavior=throttle screen_orientation=landscape screen_fill=aspect portrait=0 show_fps=1',
             'frontend: audio settings volume=75 buffer_samples=4096 effect=bass_boost digital_noise_reduction=high audio_disabled=1',
-            'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_dpad_type=joystick controller_mapping=A=B controller_calibration=(default) keyboard_mapping=space=A',
+            'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_control_opacity=100 virtual_dpad_type=joystick controller_mapping=A=B controller_calibration=(default) keyboard_mapping=space=A',
             'cheat: loaded 1 code(s), parse_errors=0, enabled=1, sha_mismatch=0, source=dingoopie-cc-automation.cc.cht',
             'cc-arm: game settings cheats_enabled=1 cheats_available=1 cheat_entries=1 cheat_startup_applied=1'
         )
@@ -549,7 +549,7 @@ profile=1
                 'execution backend effective: compatibility',
                 'frontend: video settings anti_aliasing=low effect=sepia brightness=125 contrast=90 gamma=110 saturation=150 minimized_behavior=throttle screen_orientation=landscape screen_fill=aspect portrait=0 show_fps=1',
                 'frontend: audio settings volume=75 buffer_samples=4096 effect=bass_boost digital_noise_reduction=high audio_disabled=1',
-                'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_dpad_type=joystick controller_mapping=A=B controller_calibration=(default) keyboard_mapping=space=A',
+                'frontend: input settings system_ime_disabled=0 virtual_controls=1 virtual_control_scale=100 virtual_control_opacity=100 virtual_dpad_type=joystick controller_mapping=A=B controller_calibration=(default) keyboard_mapping=space=A',
                 'hle: runtime speed scale 0.800 env',
                 'hle: host delay scale 0.750 env'
             )
@@ -566,7 +566,7 @@ profile=1
         $autoCcLog = Start-AutomationGameAndReadNativeLog -DeviceGamePath $deviceGamePath
         Assert-NativeLogContains -RuntimeName 'CC automatic backend' `
             -LogText $autoCcLog -Expected @(
-                'cc-arm: settings requested_backend=auto effective_backend=arm32_interpreter execution_mode=optimized'
+                'cc-arm: settings requested_backend=auto effective_backend=dynarmic execution_mode=optimized'
             )
         if ($AppGamePath) {
             $autoAppLog = Start-AutomationGameAndReadNativeLog -DeviceGamePath $deviceAppPath

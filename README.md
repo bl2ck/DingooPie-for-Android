@@ -1,10 +1,22 @@
 # DingooPie Android
 ## 中文
-丁果派 DingooPie Android 是 Android 平台的 `.app` / `.cc` 游戏模拟器，用于运行
-丁果 A320、歌美 X760+ 和歌美 A330 掌机游戏。`.app` 与 `.cc` 格式文件归丁果科技所有；
+丁果派 DingooPie Android 是 Android 平台的 `.app` / `.cc` / `.c2m` / `.c2s` / `.c3s` 游戏模拟器，用于运行
+丁果 A320、歌美 X760+ 和歌美 A330 掌机游戏。游戏文件格式归原厂商所有；
 本项目和发布包不包含游戏样本，请使用自行合法取得的文件。
 其中，APP 游戏使用 Ingenic JZ4732 SoC 的 XBurst/MIPS 架构，CC 游戏使用 ChinaChip
 CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM32 运行时执行这两类游戏。
+
+### 支持的游戏样本后缀
+
+| 后缀 | 类型与处理方式 |
+| --- | --- |
+| `.app` | 丁果 APP 游戏包，使用 APP MIPS 运行时。 |
+| `.cc` | 歌美 CC 系列游戏包，使用 CC ARM32 运行时。 |
+| `.c2m` | 使用的 CC 系列容器后缀，按 `.cc` 同类格式加载。 |
+| `.c2s` | 使用的 CC 系列容器后缀，按 `.cc` 同类格式加载。 |
+| `.c3s` | 使用的 CC 系列容器后缀，按 `.cc` 同类格式加载。 |
+
+后缀用于识别原始游戏样本的容器形式；`.c2m`、`.c2s` 和 `.c3s` 不使用独立模拟内核。
 
 - 文件说明：DingooPie Android Game Emulator
 - 产品名称：丁果派 DingooPie Android
@@ -19,7 +31,7 @@ CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM
 
 ### 快速使用
 1. 安装 `DingooPie.apk` 并启动。
-2. 在游戏库中添加游戏目录，或导入单个 `.app` / `.cc` 文件。
+2. 在游戏库中添加游戏目录，或导入单个 `.app` / `.cc` / `.c2m` / `.c2s` / `.c3s` 文件。
 3. 授予 Android 文件访问权限，等待扫描完成后点击游戏启动。
 4. 游戏中按 Android 返回键打开暂停菜单，可即时存档、切换游戏、重启、进入选项或设置、退出应用，或返回游戏。
 从可写目录导入的游戏会优先把存档保存在游戏旁边。单文件导入、只读目录或
@@ -28,7 +40,7 @@ CC1800 SoC 的 ARM11 架构。模拟器分别通过 APP MIPS 运行时和 CC ARM
 ### 外部模拟器前端调用
 
 DingooPie 支持由天马 G、Daijishō、Pegasus、自动化工具及其他能够发送 Android
-Intent 的模拟器前端直接启动 `.app` / `.cc` 游戏。前端应配置以下组件：
+Intent 的模拟器前端直接启动 `.app` / `.cc` / `.c2m` / `.c2s` / `.c3s` 游戏。前端应配置以下组件：
 
 - 包名：`com.dingoopie.android`
 - Activity：`com.dingoopie.android.DingooPieActivity`
@@ -62,11 +74,12 @@ adb shell am start -n com.dingoopie.android/.DingooPieActivity `
 
 ### 局域网文件管理
 
-点击游戏库左侧的文件夹按钮才会启动文件管理服务；正常启动模拟器不会自动开启。
+点击游戏库左侧的四方块系统工具图标，可依次选择切换单列/多列显示、刷新游戏列表和文件管理服务。只有选择“文件管理服务”才会启动服务；正常启动模拟器不会自动开启文件管理服务。
 手机或模拟器与电脑连接同一网络后，在电脑浏览器中打开提示的 IPv4 地址即可访问。
 地址中包含 6 位小写字母与数字令牌，服务优先显示 `192.168.*` 地址。
 
 - 可访问模拟器私有目录和用户持续授权的目录。
+- 授权目录可从根目录列表中移除；该操作只撤销模拟器访问权限，不会删除目录或文件。
 - 支持多文件累计选择、上传、下载、重命名和删除。
 - 点击文件夹名称进入目录；文件下载使用右侧下载按钮。
 - 为避免误删，非空文件夹不能删除。
@@ -95,6 +108,7 @@ adb shell am start -n com.dingoopie.android/.DingooPieActivity `
 | 禁用系统输入法 | 开启 |
 | 显示虚拟按键 | 开启 |
 | 虚拟按键大小 | 100% |
+| 虚拟按键透明度 | 100% |
 | 方向键类型 | 摇杆 |
 | 手柄按键映射 | 默认映射 |
 | CPU 执行模式 | 自动 |
@@ -102,19 +116,20 @@ adb shell am start -n com.dingoopie.android/.DingooPieActivity `
 | 游戏速度 | 自动 |
 | 系统延迟比例 | 自动 |
 | 金手指管理器 | 禁用金手指 |
+| 游戏列表布局 | 单列 |
 | 语言 | 中文 |
 
 ### 菜单与配置
 
-- `游戏库`：添加、启动、移除及刷新游戏；方向键可循环选择或按住滚动，停止后确认运行。
+- `游戏库`：添加、启动、移除及刷新游戏，可在系统工具中手动切换单列或多列显示；单列下方向键选择上一个或下一个游戏，多列下方向键按网格移动，`Enter` / `Space` 进入选中游戏，`Delete` 移除选中游戏，`Esc` 打开主菜单，`Insert` 添加游戏；方向键支持按住连续选择。
 - `主菜单`：选项、设置、关于、退出应用和返回。
 - `暂停菜单`：即时存档、切换游戏、重启游戏、选项、设置、退出应用和返回游戏。
 - `选项`：视频、音频、输入、恢复默认设置和返回。
 - `选项 > 视频`：抗锯齿、滤镜、亮度、对比度、伽马、饱和度、最小化时、屏幕方向、画面填充和显示 FPS。
 - `选项 > 音频`：主音量、音频缓冲、音频缓冲延迟、音频效果、数字降噪和禁用音频。
-- `选项 > 输入`：禁用系统输入法、显示虚拟按键、虚拟按键大小、方向键类型、手柄按键映射和手柄校准。
+- `选项 > 输入`：禁用系统输入法、显示虚拟按键、虚拟按键大小、虚拟按键透明度、方向键类型、手柄按键映射和手柄校准。
 - `设置`：CPU 执行模式、CPU 时钟、游戏速度、系统延迟比例、金手指管理器、语言、恢复默认设置和返回。
-- `关于`：版本、支持格式和软件信息。
+- `关于`：版本、适用机型、游戏文件格式归属、作者主页、项目主页和软件信息。
 
 设置会自动保存到应用私有目录中的 `DingooPie.ini`。
 
@@ -200,12 +215,26 @@ powershell -ExecutionPolicy Bypass -File scripts/build_android.ps1 `
 
 ## English
 
-DingooPie Android is an Android emulator for Dingoo `.app` and `.cc` games made for
-the Dingoo A320, Gemei X760+, and Gemei A330 handhelds. The package formats belong
-to Dingoo Technology. No game images are included; use only files obtained legally.
+DingooPie Android is an Android emulator for `.app`, `.cc`, `.c2m`, `.c2s`, and
+`.c3s` games made for the Dingoo A320, Gemei X760+, and Gemei A330 handhelds. The
+game file formats belong to their original vendors. No game images are included;
+use only files obtained legally.
 APP games use the XBurst/MIPS architecture of the Ingenic JZ4732 SoC, while CC
 games use the ARM11 architecture of the ChinaChip CC1800 SoC. They are executed
 by the dedicated APP MIPS and CC ARM32 runtimes, respectively.
+
+### Supported Game Sample Suffixes
+
+| Suffix | Type And Handling |
+| --- | --- |
+| `.app` | Dingoo APP game package handled by the APP MIPS runtime. |
+| `.cc` | CC-family game package handled by the CC ARM32 runtime. |
+| `.c2m` | CC-family container suffix used by Gemei samples; loaded like `.cc`. |
+| `.c2s` | CC-family container suffix used by Gemei samples; loaded like `.cc`. |
+| `.c3s` | CC-family container suffix used by Gemei samples; loaded like `.cc`. |
+
+The suffix identifies the original sample container. `.c2m`, `.c2s`, and `.c3s`
+do not use separate emulation cores.
 
 - File description: DingooPie Android Game Emulator
 - Product name: DingooPie Android
@@ -221,7 +250,7 @@ by the dedicated APP MIPS and CC ARM32 runtimes, respectively.
 ### Quick Start
 
 1. Install and launch `DingooPie.apk`.
-2. Add a game folder or import one `.app` / `.cc` file from the game library.
+2. Add a game folder or import one `.app` / `.cc` / `.c2m` / `.c2s` / `.c3s` file from the game library.
 3. Grant Android file access and wait for the library scan to finish.
 4. Tap a game to start it. Press Android Back during play to open the pause menu,
    then use instant saves, switch game, restart, options, settings, exit, or return.
@@ -232,9 +261,9 @@ an entry never deletes the game.
 
 ### External Emulator Frontends
 
-DingooPie accepts `.app` and `.cc` launch requests from Tianma G, Daijishō,
-Pegasus-based frontends, automation tools, and other Android emulator frontends
-that can send Android intents.
+DingooPie accepts `.app`, `.cc`, `.c2m`, `.c2s`, and `.c3s` launch requests from
+Tianma G, Daijishō, Pegasus-based frontends, automation tools, and other Android
+emulator frontends that can send Android intents.
 Use package `com.dingoopie.android` and activity
 `com.dingoopie.android.DingooPieActivity`.
 
@@ -271,13 +300,16 @@ through a document provider.
 
 ### LAN File Management
 
-The file service starts only after the folder button on the left side of the game
-library is pressed; launching the emulator does not start it automatically. Connect
-the Android device or emulator and the computer to the same network, then open the
-displayed IPv4 address. Its URL includes a six-character lowercase letter and digit
-token. Addresses in the `192.168.*` range are listed first.
+Press the four-square System Tools icon on the left side of the game library. Its
+items are ordered as layout switching, Refresh Game List, and File Manager Service.
+Only choosing File Manager Service starts the service; launching the emulator does
+not start it automatically.
+Connect the Android device or emulator and the computer to the same network, then
+open the displayed IPv4 address. Its URL includes a six-character lowercase letter
+and digit token. Addresses in the `192.168.*` range are listed first.
 
 - Access application-private files and directories with persisted user permission.
+- Authorized folders can be removed from the root list; this only revokes emulator access and does not delete the folder or its files.
 - Select multiple files cumulatively, upload, download, rename, and delete entries.
 - Open folders by clicking their names; download files with the action button.
 - Non-empty folders cannot be deleted, which prevents accidental recursive removal.
@@ -306,6 +338,7 @@ token. Addresses in the `192.168.*` range are listed first.
 | Disable system IME | On |
 | Show virtual controls | On |
 | Virtual control size | 100% |
+| Virtual control opacity | 100% |
 | D-pad type | Joystick |
 | Controller mapping | Default mapping |
 | CPU execution mode | Auto |
@@ -313,19 +346,20 @@ token. Addresses in the `192.168.*` range are listed first.
 | Game speed | Auto |
 | System delay scale | Auto |
 | Cheat manager | Cheats disabled |
+| Game library layout | Single column |
 | Language | Chinese |
 
 ### Menu And Configuration
 
-- `Game Library`: add, launch, remove, and refresh games. Use directional keys to select or hold to scroll, then confirm after scrolling stops.
+- `Game Library`: add, launch, remove, and refresh games, with a manual single-column or multi-column switch in System Tools. Directional keys select the previous or next game in single-column mode and move through the grid in multi-column mode. `Enter` / `Space` launches the selected game, `Delete` removes it, `Esc` opens the main menu, and `Insert` adds a game. Directional keys support hold-to-repeat selection.
 - `Main Menu`: Options, Settings, About, Exit App, and Back.
 - `Pause Menu`: instant saves, switch game, restart, options, settings, exit, and return to the game.
 - `Options`: Video, Audio, Input, Restore Default Settings, and Back.
 - `Options > Video`: Anti-aliasing, Filter, Brightness, Contrast, Gamma, Saturation, When Minimized, Screen Orientation, Screen Fill, and Show FPS.
 - `Options > Audio`: master volume, buffer size, audio buffer latency, audio effect, digital noise reduction, and audio disable.
-- `Options > Input`: Disable System IME, Show Virtual Controls, Virtual Control Size, D-pad Type, Controller Mapping, and Controller Calibration.
+- `Options > Input`: Disable System IME, Show Virtual Controls, Virtual Control Size, Virtual Control Opacity, D-pad Type, Controller Mapping, and Controller Calibration.
 - `Settings`: CPU Execution Mode, CPU Clock, Game Speed, System Delay Scale, Cheat Manager, Language, Restore Default Settings, and Back.
-- `About`: version, supported formats, and software information.
+- `About`: version, supported devices, game file format ownership, author homepage, project homepage, and software information.
 
 Settings are saved automatically in the application-private `DingooPie.ini`.
 

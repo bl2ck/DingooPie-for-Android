@@ -8,8 +8,8 @@
 #include <string.h>
 
 #include "app/runtime/app_runtime_debug.h"
+#include "shared/config/guest_runtime_constants.h"
 #include "shared/services/guest_package.h"
-#include "shared/config/runtime_constants.h"
 
 // Wires Dingoo SDK imports to host-side HLE implementations.
 void bridge_set_game_identity(const char* sha256Hex);
@@ -22,6 +22,7 @@ void bridge_restore_os_ticks(uint32_t ticks);
 uint32_t bridge_semaphore_state_count(void);
 void bridge_capture_semaphore_counts(uint32_t* out, uint32_t count);
 bool bridge_restore_semaphore_counts(const uint32_t* counts, uint32_t count);
+void bridge_notify_state_restored(void);
 bool bridge_try_fast_return_hook(uint32_t address, uint32_t* returnValue);
 bool bridge_lookup_hook_address(const char* name, uint32_t* address);
 void bridge_profile_tick(void);

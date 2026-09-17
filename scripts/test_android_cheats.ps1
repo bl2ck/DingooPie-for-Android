@@ -4,6 +4,8 @@ param(
     [string]$Serial = '127.0.0.1:7555',
     [string]$GameName = [string]::Concat([char]0x5929, [char]0x5730, [char]0x9053),
     [string]$GamePath,
+    [ValidateSet('app', 'cc')]
+    [string]$GameFormat = 'app',
     [string]$GameDirectory = '/sdcard/Download/DingooSample',
     [string]$PcCheatSource = 'D:\Project\C++\dingoo-emu\cheats',
     [switch]$SkipBuild,
@@ -78,7 +80,10 @@ if (!$SkipInstall) {
     Invoke-Adb -Arguments @('install', '-r', $apk) | Out-Null
 }
 
-$cheatFile = Join-Path $PcCheatSource "$GameName.cht"
+$cheatFile = Join-Path $PcCheatSource "$GameName.$GameFormat.cht"
+if (!(Test-Path -LiteralPath $cheatFile)) {
+    $cheatFile = Join-Path $PcCheatSource "$GameName.cht"
+}
 if (!(Test-Path -LiteralPath $cheatFile)) {
     throw "Cheat file was not found: $cheatFile"
 }
@@ -92,6 +97,7 @@ if (!$shaLine) {
     throw "No app_sha256 was found in $cheatFile"
 }
 $appSha256 = ([regex]::Match($shaLine, '([0-9A-Fa-f]{64})')).Groups[1].Value
+$expectedCodeCount = @(Get-Content -LiteralPath $cheatFile | Where-Object { $_ -match '^(on|once)\|' }).Count
 
 $abi = (Invoke-Adb -Arguments @('shell', 'getprop', 'ro.product.cpu.abi') | Out-String).Trim()
 $target = switch ($abi) {
@@ -110,6 +116,7 @@ $testBinary = Join-Path $env:TEMP 'dingoopie-cheat-engine-test'
 & $compiler '-std=c++11' '-O2' '-static-libstdc++' '-I' `
     (Join-Path $projectRoot 'native\core') `
     (Join-Path $projectRoot 'tests\cheat_engine_test.cpp') `
+    (Join-Path $projectRoot 'tests\storage_services_test_stub.cpp') `
     (Join-Path $projectRoot 'native\core\config\cheats\cheat_engine.cpp') `
     (Join-Path $projectRoot 'native\core\shared\game\game_paths.cpp') `
     '-o' $testBinary
@@ -136,18 +143,18 @@ try {
         Invoke-Adb -Arguments @('push', $_.FullName, "$GameDirectory/$($_.Name)") | Out-Null
     }
     $automationGameName = if ($GamePath) { 'dingoopie-cheat-test' } else { $GameName }
-    $formatCheatName = "$automationGameName.app.cht"
+    $formatCheatName = "$automationGameName.$GameFormat.cht"
     Invoke-Adb -Arguments @(
         'push', $cheatFile, "$GameDirectory/$formatCheatName") | Out-Null
-    $secondaryFormatCheatName = "$automationGameName-alternate.app.cht"
+    $secondaryFormatCheatName = "$automationGameName-alternate.$GameFormat.cht"
     $automationGamePath = ''
     $secondaryAutomationGamePath = ''
     if ($GamePath) {
-        if ([System.IO.Path]::GetExtension($GamePath).ToLowerInvariant() -ne '.app') {
-            throw 'Cheat manager automation currently requires an APP game sample.'
+        if ([System.IO.Path]::GetExtension($GamePath).ToLowerInvariant() -ne ".$GameFormat") {
+            throw "Cheat manager automation requires a .$GameFormat game sample."
         }
-        $automationGamePath = "$GameDirectory/$automationGameName.app"
-        $secondaryAutomationGamePath = "$GameDirectory/$automationGameName-alternate.app"
+        $automationGamePath = "$GameDirectory/$automationGameName.$GameFormat"
+        $secondaryAutomationGamePath = "$GameDirectory/$automationGameName-alternate.$GameFormat"
         Invoke-Adb -Arguments @(
             'push', (Resolve-Path -LiteralPath $GamePath).Path, $automationGamePath) | Out-Null
         Invoke-Adb -Arguments @(
@@ -186,10 +193,10 @@ try {
     if (!$automationLine -or $automationLine -notlike 'CHEAT_MANAGER_AUTOMATION result=pass*') {
         throw "Cheat automation did not pass: $automationLine"
     }
-    $expectedLoadPattern = 'cheat: loaded 12 code\(s\), parse_errors=0,.*source=' +
+    $expectedLoadPattern = "cheat: loaded $expectedCodeCount code\(s\), parse_errors=0,.*source=" +
         [regex]::Escape($formatCheatName)
     if ($nativeLog -notmatch $expectedLoadPattern) {
-        throw "The APP-specific $formatCheatName load was not confirmed in the native log."
+        throw "The $GameFormat-specific $formatCheatName load was not confirmed in the native log."
     }
     Write-Host $automationLine
 }

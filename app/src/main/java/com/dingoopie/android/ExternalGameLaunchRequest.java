@@ -18,7 +18,9 @@ final class ExternalGameLaunchRequest {
             return false;
         }
         String lowerName = name.toLowerCase(Locale.ROOT);
-        return lowerName.endsWith(".app") || lowerName.endsWith(".cc");
+        return lowerName.endsWith(".app") || lowerName.endsWith(".cc") ||
+                lowerName.endsWith(".c2m") || lowerName.endsWith(".c2s") ||
+                lowerName.endsWith(".c3s");
     }
 
     static String normalizeStringPath(String candidate) {

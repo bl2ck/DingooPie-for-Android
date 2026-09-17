@@ -1,9 +1,9 @@
 #include "app/memory/app_framebuffer_mapping.h"
 
+#include <stdio.h>
+
 #include "app/cpu/mips_runtime.h"
 #include "frontend/video/framebuffer.h"
-
-#include <stdio.h>
 
 int appFramebufferInitialize(NativeRuntime* runtime)
 {
@@ -19,7 +19,11 @@ int appFramebufferInitialize(NativeRuntime* runtime)
                 break;
             }
         }
-        if (duplicate) continue;
+        if (duplicate)
+        {
+            continue;
+        }
+
         RuntimeError error = nativeRuntimeMapMemory(runtime, alias,
             VM_LCD_FB_SIZE, RUNTIME_PROT_ALL, framebufferPixels());
         if (error)

@@ -12,13 +12,15 @@
 #include "app/hle/app_text_format.h"
 #include "config/compatibility/compat_profile.h"
 #include "shared/execution/pause_gate.h"
+#include "shared/diagnostics/runtime_resource_events.h"
 #include "shared/platform/storage_services.h"
 #include "app/cpu/mips_compat.h"
+#include "app/cpu/mips_runtime.h"
 #include "app/memory/app_memory.h"
 #include "app/cpu/ppsspp_backend.h"
 #include "app/runtime/app_runtime_debug.h"
 #include "shared/execution/thread_join.h"
-#include "frontend/shell/frontend_shell.h"
+#include "frontend/frontend_shell.h"
 #include "frontend/audio/sdl_audio.h"
 #include "app/hle/app_task_scheduler.h"
 #include "shared/services/guest_filesystem.h"
@@ -38,14 +40,13 @@
 #include <string.h>
 #include <thread>
 #include <vector>
-#include "app/cpu/mips_runtime.h"
 
 static std::string g_appLoadPath;
 static std::string g_appMainPath;
 static std::string g_currentAppSha256;
 static std::vector<std::string> g_enabledCheatFeatureKeys;
 static ExecutionBackend g_activeAppBackend = EXECUTION_BACKEND_COMPATIBILITY;
-static FILE* makeSeekableAndroidAppFile(FILE* source, void** bufferOut, uint32_t* sizeOut)
+static FILE* makeSeekableAppFile(FILE* source, void** bufferOut, uint32_t* sizeOut)
 {
     if (!source || !bufferOut || !sizeOut)
     {
@@ -402,6 +403,7 @@ static void destroyMainPackage(void)
     s_appDataSize = 0;
     s_appDataBuffer = NULL;
     pthread_mutex_unlock(&g_runtimeThreadMutex);
+    runtimeResourceMonitorSetAppResources(NULL);
     guestPackageDestroy(package);
 }
 
@@ -428,7 +430,7 @@ static GuestPackage* loadApp(const char* appPath)
 {
     std::string path = gamePathNormalize(appPath);
     long fileSize = 0;
-    void* androidMemoryFileBuffer = NULL;
+    void* seekableFileBuffer = NULL;
 
     FILE* file = platformOpenGameFile(path);
 
@@ -441,7 +443,7 @@ static GuestPackage* loadApp(const char* appPath)
     if (fseek(file, 0, SEEK_END) != 0)
     {
         uint32_t memoryFileSize = 0;
-        FILE* seekableFile = makeSeekableAndroidAppFile(file, &androidMemoryFileBuffer,
+        FILE* seekableFile = makeSeekableAppFile(file, &seekableFileBuffer,
             &memoryFileSize);
         fclose(file);
         file = seekableFile;
@@ -454,21 +456,21 @@ static GuestPackage* loadApp(const char* appPath)
         }
     }
 
-    if (!androidMemoryFileBuffer)
+    if (!seekableFileBuffer)
     {
         fileSize = ftell(file);
     }
     if (fileSize <= 0 || (uint64_t)fileSize > UINT32_MAX || fseek(file, 0, SEEK_SET) != 0)
     {
         fclose(file);
-        free(androidMemoryFileBuffer);
+        free(seekableFileBuffer);
         printf("app-runtime: invalid app size: %s\n", path.c_str());
         return NULL;
     }
 
     GuestPackage* loadedApp = guestPackageCreate(file, (uint32_t)fileSize);
     fclose(file);
-    free(androidMemoryFileBuffer);
+    free(seekableFileBuffer);
 
     if (!loadedApp)
     {
@@ -799,6 +801,8 @@ static NativeRuntime* initDingooPie(void)
     pthread_mutex_lock(&g_runtimeThreadMutex);
     g_currentAppSha256 = appSha256;
     pthread_mutex_unlock(&g_runtimeThreadMutex);
+    runtimeResourceMonitorSetAppSha256(appSha256.c_str());
+    runtimeResourceMonitorSetAppResources(loadedApp);
     bridge_set_game_identity(appSha256.c_str());
     fsys_set_game_identity(appSha256.c_str());
     fsys_set_game_name(g_appMainPath.c_str());
@@ -812,6 +816,7 @@ static NativeRuntime* initDingooPie(void)
         g_enabledCheatFeatureKeys);
     printf("app-runtime: app sha256: %s\n", appSha256.c_str());
     printf("app-runtime: compat profile: %s\n", compatProfileName(appSha256.c_str()));
+    ppssppShimSetFastMemoryOverride(-1);
 
     ExecutionBackend effectiveBackend = g_options.backend;
     if (compatForcedBackend(appSha256.c_str(), &effectiveBackend))
@@ -919,6 +924,7 @@ static NativeRuntime* initDingooPie(void)
     crashContext.appPath = g_appLoadPath.c_str();
     crashContext.appMainPath = g_appMainPath.c_str();
     crashContext.appSha256 = appSha256.c_str();
+    crashContext.saveDirectory = saveDirectory.c_str();
     crashContext.compatProfile = compatProfileName(appSha256.c_str());
     crashContext.backend = effectiveBackend;
     crashContext.appEntry = appMainEntry;
@@ -1016,7 +1022,9 @@ bool appRuntimeStart(
             g_appLoadPath.empty() ? "(empty)" : g_appLoadPath.c_str());
         return false;
     }
-    g_appMainPath = appGuestMainPathFromGamePath(g_appLoadPath);
+    g_appMainPath = guestMainPathFromGamePath(g_appLoadPath);
+    runtimeResourceMonitorReset(g_appLoadPath.c_str(), NULL);
+    runtimeResourceMonitorSetActive(false);
 
     printf("app-runtime: start APP: %s\n", g_appLoadPath.c_str());
     printf("app-runtime: AppMain path: %s\n", g_appMainPath.c_str());
@@ -1258,6 +1266,8 @@ bool appRuntimeRestoreState(const AppRuntimeState& state, std::string* error)
             nativeRuntimeFlushCodeCache(taskRuntimes[index]);
         }
         framebufferPresentRestoredFrame();
+        bridge_notify_state_restored();
+        pauseGateMarkRuntimeRestored();
     }
     pthread_mutex_unlock(&g_runtimeThreadMutex);
     if (!restored)

@@ -1,14 +1,16 @@
 #include "frontend/audio/sdl_audio.h"
-#include "frontend/audio/audio_validation_capture.h"
 
 #include <SDL2/SDL.h>
+#include <deque>
 #include <math.h>
 #include <stdint.h>
-#include <deque>
-#include <vector>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <utility>
+#include <vector>
+
+#include "frontend/audio/audio_validation_capture.h"
 
 static const uint32_t kQueueBackpressureLogIntervalMs = 1000;
 static const uint32_t kAudioQueueDropDisabledMs = 0;
@@ -302,7 +304,8 @@ static bool configureAudioStreamLocked(const waveout_args* args)
         g_audioSpec.format, g_audioSpec.channels, g_audioSpec.freq);
     if (!g_audioStream)
     {
-        SDL_Log("Couldn't create audio conversion stream: %s", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "Couldn't create audio conversion stream: %s", SDL_GetError());
         return false;
     }
     SDL_Log("Audio conversion enabled guest=%dHz/0x%x/%uch host=%dHz/0x%x/%uch",
@@ -344,7 +347,8 @@ static bool convertAudioBufferLocked(const char* buffer, int count,
     }
     if (SDL_AudioStreamPut(g_audioStream, input, (int)alignedBytes) != 0)
     {
-        SDL_Log("Audio conversion input failed: %s", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "Audio conversion input failed: %s", SDL_GetError());
         return false;
     }
     g_guestAudioRemainder.assign(input + alignedBytes, input + totalBytes);
@@ -357,7 +361,8 @@ static bool convertAudioBufferLocked(const char* buffer, int count,
     int converted = SDL_AudioStreamGet(g_audioStream, output->data(), available);
     if (converted < 0)
     {
-        SDL_Log("Audio conversion output failed: %s", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "Audio conversion output failed: %s", SDL_GetError());
         output->clear();
         return false;
     }
@@ -402,10 +407,16 @@ static void logAudioBackpressure(uint64_t nowTicks, uint64_t waitBeginTicks, boo
         return;
     }
 
-    SDL_Log(dropping ?
-        "Audio queue saturated for %u ms; dropping guest buffer" :
-        "Audio queue saturated for %u ms; waiting for playback",
-        (unsigned int)(nowTicks - waitBeginTicks));
+    unsigned int elapsedMs = (unsigned int)(nowTicks - waitBeginTicks);
+    if (dropping)
+    {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "Audio queue saturated for %u ms; dropping guest buffer", elapsedMs);
+    }
+    else
+    {
+        SDL_Log("Audio queue saturated for %u ms; waiting for playback", elapsedMs);
+    }
     g_lastQueueBackpressureLogTicks = nowTicks;
 }
 
@@ -909,6 +920,19 @@ static void applyVolumeInPlaceLocked(char* buffer, int count)
     }
 }
 
+static void applyAudioProcessingInPlaceLocked(char* buffer, int count)
+{
+    if (g_audioSpec.format == AUDIO_F32LSB)
+    {
+        return;
+    }
+
+    applyResampleLowPassInPlaceLocked(buffer, count);
+    applyAudioEffectInPlaceLocked(buffer, count);
+    applyVolumeInPlaceLocked(buffer, count);
+    applyOutputConditionerS16Locked(buffer, count);
+}
+
 static void applyQueueRecoveryFadeInLocked(char* buffer, int count,
     uint32_t queuedBytes)
 {
@@ -969,6 +993,20 @@ static void applyQueueRecoveryFadeInLocked(char* buffer, int count,
                 int centered = (int)samples[index] - 128;
                 samples[index] = (uint8_t)(128 + centered * frame /
                     (fadeFrames - 1));
+            }
+        }
+    }
+    else if (g_audioSpec.format == AUDIO_F32LSB)
+    {
+        float* samples = (float*)buffer;
+        const int frameCount = count / (int)(sizeof(float) * channels);
+        const int frames = frameCount < fadeFrames ? frameCount : fadeFrames;
+        for (int frame = 0; frame < frames; ++frame)
+        {
+            const float gain = (float)frame / (float)(fadeFrames - 1);
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                samples[frame * channels + channel] *= gain;
             }
         }
     }
@@ -1037,7 +1075,8 @@ uint32_t audioOutputOpen(waveout_args* args)
     g_audioDevice = SDL_OpenAudioDevice(NULL, 0, &want, &g_audioSpec, allowedChanges);
     if (!g_audioDevice)
     {
-        SDL_Log("Guest audio device open failed: %s; retrying standard host format",
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "Guest audio device open failed: %s; retrying standard host format",
             SDL_GetError());
         SDL_AudioSpec hostWant;
         SDL_zero(hostWant);
@@ -1051,8 +1090,10 @@ uint32_t audioOutputOpen(waveout_args* args)
     }
     if (!g_audioDevice)
     {
-        SDL_Log("Couldn't open audio: %s", SDL_GetError());
-        SDL_Log("Audio output disabled; guest audio buffers will be dropped");
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            "Couldn't open audio: %s", SDL_GetError());
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+            "Audio output disabled; guest audio buffers will be dropped");
         g_audioOutputUnavailable = true;
         unlockAudio();
         return 1;
@@ -1068,7 +1109,9 @@ uint32_t audioOutputOpen(waveout_args* args)
     }
 
     audioValidationBegin(g_audioSpec);
-    SDL_Log("Opened audio at %d Hz, format 0x%x, channels %d, samples %d, guest_volume=%u master_volume=%d%% effective_volume=%d%%",
+    SDL_Log(
+        "Opened audio at %d Hz, format 0x%x, channels %d, samples %d, "
+        "guest_volume=%u master_volume=%d%% effective_volume=%d%%",
         g_audioSpec.freq, g_audioSpec.format, g_audioSpec.channels, g_audioSpec.samples, g_volume,
         g_masterVolumePercent, effectiveVolumePercentLocked());
     SDL_PauseAudioDevice(g_audioDevice, outputMutedLocked() ? 1 : 0);
@@ -1103,7 +1146,8 @@ void audioOutputReleaseGameResources(void)
 void audioOutputResetAfterRuntimeStop(void)
 {
     SDL_mutex* previousMutex = g_audioMutex;
-    // Keep the SDL device alive across guest restarts; closing it blocks on MuMu.
+    // Keep the SDL device alive across guest restarts because reopening some
+    // host audio drivers can block for a noticeable amount of time.
     // Only reset guest-owned state and replace a mutex left locked by forced stop.
     g_audioOutputUnavailable = false;
     g_gameAudioResourcesActive = false;
@@ -1207,10 +1251,7 @@ uint32_t audioOutputWriteBuffer(char* buffer, int count)
         return 1;
     }
 
-    applyResampleLowPassInPlaceLocked(converted.data(), (int)converted.size());
-    applyAudioEffectInPlaceLocked(converted.data(), (int)converted.size());
-    applyVolumeInPlaceLocked(converted.data(), (int)converted.size());
-    applyOutputConditionerS16Locked(converted.data(), (int)converted.size());
+    applyAudioProcessingInPlaceLocked(converted.data(), (int)converted.size());
     uint32_t queuedBytes = SDL_GetQueuedAudioSize(g_audioDevice);
     applyQueueRecoveryFadeInLocked(converted.data(), (int)converted.size(),
         queuedBytes);
@@ -1264,10 +1305,7 @@ uint32_t audioOutputTryWriteBuffer(char* buffer, int count)
     }
     if (SDL_GetQueuedAudioSize(g_audioDevice) >= maxQueuedAudioBytesLocked())
     {
-        applyResampleLowPassInPlaceLocked(converted.data(), (int)converted.size());
-        applyAudioEffectInPlaceLocked(converted.data(), (int)converted.size());
-        applyVolumeInPlaceLocked(converted.data(), (int)converted.size());
-        applyOutputConditionerS16Locked(converted.data(), (int)converted.size());
+        applyAudioProcessingInPlaceLocked(converted.data(), (int)converted.size());
         audioValidationRecordAudio(converted.data(), (uint32_t)converted.size(),
             "pending", SDL_GetQueuedAudioSize(g_audioDevice),
             g_pendingAudioBytes);
@@ -1284,10 +1322,7 @@ uint32_t audioOutputTryWriteBuffer(char* buffer, int count)
         return 0;
     }
 
-    applyResampleLowPassInPlaceLocked(converted.data(), (int)converted.size());
-    applyAudioEffectInPlaceLocked(converted.data(), (int)converted.size());
-    applyVolumeInPlaceLocked(converted.data(), (int)converted.size());
-    applyOutputConditionerS16Locked(converted.data(), (int)converted.size());
+    applyAudioProcessingInPlaceLocked(converted.data(), (int)converted.size());
     uint32_t queuedBytes = SDL_GetQueuedAudioSize(g_audioDevice);
     applyQueueRecoveryFadeInLocked(converted.data(), (int)converted.size(),
         queuedBytes);
@@ -1348,7 +1383,9 @@ bool audioOutputSkipsGuestOutput()
 void audioOutputSetGuestVolume(uint32_t vol)
 {
     lockAudio();
-    g_volume = vol > 255 ? 255 : vol;
+    uint32_t normalizedVolume = vol > 255 ? 255 : vol;
+    bool changed = g_volume != normalizedVolume;
+    g_volume = normalizedVolume;
     if (g_audioDevice)
     {
         bool muted = outputMutedLocked();
@@ -1360,14 +1397,18 @@ void audioOutputSetGuestVolume(uint32_t vol)
             clearAudioStreamLocked();
         }
     }
-    SDL_Log("Audio guest volume set to %u, master=%d%%, effective=%d%%%s",
-        g_volume, g_masterVolumePercent, effectiveVolumePercentLocked(), outputMutedLocked() ? " muted" : "");
+    if (changed)
+    {
+        SDL_Log("Audio guest volume set to %u, master=%d%%, effective=%d%%%s",
+            g_volume, g_masterVolumePercent, effectiveVolumePercentLocked(), outputMutedLocked() ? " muted" : "");
+    }
     unlockAudio();
 }
 
 void audioOutputSetMuted(bool muted)
 {
     lockAudio();
+    bool changed = g_guestMuteRequested != muted;
     g_guestMuteRequested = muted;
     if (g_audioDevice)
     {
@@ -1380,13 +1421,17 @@ void audioOutputSetMuted(bool muted)
             clearAudioStreamLocked();
         }
     }
-    SDL_Log("Audio mute %s", g_guestMuteRequested ? "on" : "off");
+    if (changed)
+    {
+        SDL_Log("Audio mute %s", g_guestMuteRequested ? "on" : "off");
+    }
     unlockAudio();
 }
 
 void audioOutputSetFrontendPaused(bool paused)
 {
     lockAudio();
+    bool changed = g_frontendPauseRequested != paused;
     g_frontendPauseRequested = paused;
     if (g_audioDevice)
     {
@@ -1397,14 +1442,19 @@ void audioOutputSetFrontendPaused(bool paused)
             clearPendingAudioLocked();
         }
     }
-    SDL_Log("Audio frontend pause %s", g_frontendPauseRequested ? "on" : "off");
+    if (changed)
+    {
+        SDL_Log("Audio frontend pause %s", g_frontendPauseRequested ? "on" : "off");
+    }
     unlockAudio();
 }
 
 void audioOutputSetMasterVolumePercent(int percent)
 {
     lockAudio();
-    g_masterVolumePercent = clampIntLocal(percent, 0, 150);
+    int normalizedPercent = clampIntLocal(percent, 0, 150);
+    bool changed = g_masterVolumePercent != normalizedPercent;
+    g_masterVolumePercent = normalizedPercent;
     if (g_audioDevice)
     {
         SDL_PauseAudioDevice(g_audioDevice, outputMutedLocked() ? 1 : 0);
@@ -1412,16 +1462,23 @@ void audioOutputSetMasterVolumePercent(int percent)
         clearPendingAudioLocked();
         clearAudioStreamLocked();
     }
-    SDL_Log("Audio master volume set to %d%%, guest=%u, effective=%d%%%s",
-        g_masterVolumePercent, g_volume, effectiveVolumePercentLocked(), outputMutedLocked() ? " muted" : "");
+    if (changed)
+    {
+        SDL_Log("Audio master volume set to %d%%, guest=%u, effective=%d%%%s",
+            g_masterVolumePercent, g_volume, effectiveVolumePercentLocked(), outputMutedLocked() ? " muted" : "");
+    }
     unlockAudio();
 }
 
 void audioOutputSetBufferSamples(int samples)
 {
     lockAudio();
-    g_bufferSamples = normalizeBufferSamples(samples);
-    SDL_Log("Audio buffer samples set to %d", g_bufferSamples);
+    int normalizedSamples = normalizeBufferSamples(samples);
+    if (g_bufferSamples != normalizedSamples)
+    {
+        g_bufferSamples = normalizedSamples;
+        SDL_Log("Audio buffer samples set to %d", g_bufferSamples);
+    }
     unlockAudio();
 }
 
@@ -1450,8 +1507,8 @@ void audioOutputSetEffect(AudioEffectMode effect)
             clearPendingAudioLocked();
             clearAudioStreamLocked();
         }
+        SDL_Log("Audio effect set to %s", emulatorAudioEffectName(g_audioEffect));
     }
-    SDL_Log("Audio effect set to %s", emulatorAudioEffectName(g_audioEffect));
     unlockAudio();
 }
 
@@ -1473,9 +1530,9 @@ void audioOutputSetNoiseReduction(DigitalNoiseReductionLevel level)
                 SDL_AudioStreamClear(g_audioStream);
             }
         }
+        SDL_Log("Digital noise reduction set to %s",
+            emulatorDigitalNoiseReductionName(g_digitalNoiseReduction));
     }
-    SDL_Log("Digital noise reduction set to %s",
-        emulatorDigitalNoiseReductionName(g_digitalNoiseReduction));
     unlockAudio();
 }
 
@@ -1492,6 +1549,9 @@ void audioOutputSetValidationCaptureEnabled(bool enabled)
 {
     lockAudio();
     audioValidationSetEnabled(enabled);
-    SDL_Log("Audio validation capture %s", enabled ? "enabled" : "disabled");
+    if (enabled)
+    {
+        printf("audio-validation: capture enabled\n");
+    }
     unlockAudio();
 }

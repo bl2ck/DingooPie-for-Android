@@ -11,7 +11,7 @@
 #include "cc/runtime/cc_timing.h"
 #include "cc/hle/cc_input_mapping.h"
 #include "config/cheats/cheat_runtime.h"
-#include "shared/config/runtime_constants.h"
+#include "shared/config/guest_runtime_constants.h"
 #include "shared/execution/execution_backend.h"
 #include "cc/runtime/cc_crash_report.h"
 #include "frontend/video/framebuffer.h"
@@ -22,6 +22,7 @@
 #include "shared/execution/pause_gate.h"
 #include "shared/platform/storage_services.h"
 #include "shared/diagnostics/runtime_log.h"
+#include "shared/diagnostics/runtime_resource_events.h"
 #include "Common/Crypto/sha256.h"
 
 #include <algorithm>
@@ -99,6 +100,18 @@ static std::mutex s_runtimeMutex;
 struct CcRuntimeContext;
 static CcRuntimeContext* s_activeRuntime = NULL;
 static std::string sha256Hex(const uint8_t* data, uint32_t size);
+
+static bool environmentFlagEnabled(const char* name)
+{
+    const char* value = getenv(name);
+    return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static bool runtimeCollectsInterpreterProfileSamples()
+{
+    return runtimeLogProfileEnabled() &&
+        !environmentFlagEnabled("DINGOO_PIE_CC_DYNARMIC_PROFILE");
+}
 
 struct CcRuntimeContext
 {
@@ -179,6 +192,7 @@ struct CcRuntimeContext
     uint32_t faultSize;
     bool faultWrite;
     bool faultFetch;
+    bool cheatCodeCacheFlushPending;
     bool yielded;
     bool dvcAudioStarted;
     Arm32Bus bus;
@@ -596,6 +610,18 @@ static uint8_t* resolveMemory(CcRuntimeContext* runtime, uint32_t address, size_
     return pointer && size <= available ? pointer : NULL;
 }
 
+static bool memoryRangesOverlap(uint32_t address, size_t size,
+    uint32_t rangeStart, uint32_t rangeSize)
+{
+    if (!size || !rangeSize)
+    {
+        return false;
+    }
+    uint64_t end = (uint64_t)address + size;
+    uint64_t rangeEnd = (uint64_t)rangeStart + rangeSize;
+    return address < rangeEnd && end > rangeStart;
+}
+
 static void noteFramebufferWrite(CcRuntimeContext* runtime, uint32_t address, size_t size)
 {
     if (address < kFramebufferAddress ||
@@ -714,18 +740,50 @@ static bool cheatReadCallback(void* userData, uint32_t address, void* output, si
     return busRead(userData, address, output, size);
 }
 
+static bool cheatWriteTouchesExecutableMemory(const CcRuntimeContext* runtime,
+    uint32_t address, size_t size)
+{
+    return memoryRangesOverlap(address, size, runtime->package->origin,
+            runtime->package->prog_size) ||
+        memoryRangesOverlap(address, size, kDynamicThunkStart, 0x10000u);
+}
+
 static bool cheatWriteCallback(void* userData, uint32_t address, const void* input, size_t size)
 {
-    return busWrite(userData, address, input, size);
+    CcRuntimeContext* runtime = (CcRuntimeContext*)userData;
+    if (!busWrite(userData, address, input, size))
+    {
+        return false;
+    }
+    if (cheatWriteTouchesExecutableMemory(runtime, address, size))
+    {
+        runtime->cheatCodeCacheFlushPending = true;
+    }
+    return true;
 }
 
 static void cheatFlushCallback(void* userData)
 {
     CcRuntimeContext* runtime = (CcRuntimeContext*)userData;
+    if (!runtime->cheatCodeCacheFlushPending)
+    {
+        return;
+    }
     std::fill(runtime->instructionCache.begin(), runtime->instructionCache.end(),
         Arm32InstructionCacheEntry{});
 }
 
+static void processPendingCheatCodeCacheFlush(CcRuntimeContext* runtime)
+{
+    if (!runtime->cheatCodeCacheFlushPending)
+    {
+        return;
+    }
+#if defined(DINGOO_PIE_ARM32_DYNARMIC)
+    arm32DynarmicReset();
+#endif
+    runtime->cheatCodeCacheFlushPending = false;
+}
 static std::string sha256Hex(const uint8_t* data, uint32_t size)
 {
     static const char kHex[] = "0123456789ABCDEF";
@@ -1618,7 +1676,7 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
             resolveMemory(runtime, state->r[0], (uint32_t)requested) : NULL;
         uint32_t stream = fileStream(runtime, state->r[3]);
         state->r[0] = data ? (!strcmp(name, "fsys_fread") ?
-            vm_fread(data, state->r[1], state->r[2], stream) :
+            fsys_fread(data, state->r[1], state->r[2], stream) :
             fsys_fwrite(data, state->r[1], state->r[2], stream)) : 0;
         return true;
     }
@@ -1757,6 +1815,8 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
         if (!entry) { state->r[0] = 0; return true; }
         uint32_t address = allocateMemory(runtime, 16);
         runtime->resources.push_back({ address, entry, 0, 0 });
+        runtimeResourceMonitorRecordGuestOpen(
+            resourceName, entry, entry->decoded_data != NULL);
         state->r[0] = address; return true;
     }
     if (!strcmp(name, "dl_res_get_size"))
@@ -1778,6 +1838,9 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
                 if (resource->dataAddress)
                 {
                     busWrite(runtime, resource->dataAddress, data, resource->entry->size);
+                    runtimeResourceMonitorRecordGuestLoadContent(
+                        resource->entry, resource->dataAddress, data,
+                        resource->entry->size, resource->entry->size);
                 }
             }
             state->r[0] = resource->dataAddress;
@@ -1789,6 +1852,9 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
         uint32_t bytes = std::min<uint32_t>((uint32_t)requested, available);
         if (!data || !busWrite(runtime, state->r[1], data + resource->position, bytes)) bytes = 0;
         resource->position += bytes;
+        runtimeResourceMonitorRecordGuestLoadContent(
+            resource->entry, state->r[1], data + resource->position - bytes,
+            bytes, resource->position);
         state->r[0] = state->r[3] ? bytes / state->r[3] : bytes;
         return true;
     }
@@ -1799,6 +1865,7 @@ static bool handleSvc(void* userData, Arm32State* state, uint32_t immediate)
         {
             if (runtime->resources[i].address == address)
             {
+                runtimeResourceMonitorRecordGuestClose(runtime->resources[i].entry);
                 freeMemory(runtime, runtime->resources[i].dataAddress);
                 runtime->resources.erase(runtime->resources.begin() + i);
                 freeMemory(runtime, address);
@@ -1896,6 +1963,7 @@ static Arm32RunResult runState(CcRuntimeContext* runtime, Arm32State* state,
         result = arm32Run(state, &runtime->bus, kExitAddress,
             state->instructions + sliceInstructions);
     }
+    processPendingCheatCodeCacheFlush(runtime);
     runtime->stats->instructions += state->instructions - before;
     uint64_t targetIps = s_targetInstructionsPerSecond.load();
     if (targetIps)
@@ -2195,7 +2263,7 @@ static bool initializeRuntime(CcRuntimeContext* runtime, const char* path)
     runtime->bus.instructionCache = runtime->instructionCache.data();
     runtime->bus.instructionCacheCount =
         (uint32_t)runtime->instructionCache.size();
-    if (runtimeLogProfileEnabled())
+    if (runtimeCollectsInterpreterProfileSamples())
     {
         runtime->profilePcSamples.resize(runtime->instructionCache.size());
         runtime->profileLrSamples.resize(runtime->instructionCache.size());
@@ -2293,6 +2361,8 @@ bool ccRuntimeRunFile(const char* path,
     fsys_reset_guest_package(runtime.package);
     std::string gameSha256 = sha256Hex(runtime.package->file_data,
         runtime.package->file_size);
+    runtimeResourceMonitorSetAppSha256(gameSha256.c_str());
+    runtimeResourceMonitorSetGuestResources(runtime.package);
     fsys_set_game_identity(gameSha256.c_str());
     std::string gameName = gameFileNameFromPath(path);
     fsys_set_game_name(gameName.c_str());
@@ -2300,6 +2370,7 @@ bool ccRuntimeRunFile(const char* path,
     fsys_set_save_directory(saveDirectory.c_str());
     printf("cc-arm: save directory: %s\n", saveDirectory.c_str());
     cheatRuntimeLoadForGame(gameSha256.c_str(), path, enabledCheatFeatureKeys);
+    runtime.cheatCodeCacheFlushPending = false;
     cheatRuntimeBindMemory(&runtime, cheatReadCallback, cheatWriteCallback,
         cheatFlushCallback);
     uint32_t startupCheatApplyCount = cheatRuntimeApplyStartupBound();
@@ -2396,6 +2467,7 @@ bool ccRuntimeRunFile(const char* path,
                         stats->faultWrite = runtime.faultWrite;
                         stats->faultFetch = runtime.faultFetch;
                         stats->unsupportedPc = task.state.unsupportedPc;
+                        stats->failedTaskValid = true;
                         stats->failedTaskIndex = (uint32_t)i;
                         stats->failedTaskEntry = task.entry;
                         stats->failedTaskStack = task.stack;
@@ -2434,6 +2506,8 @@ bool ccRuntimeRunFile(const char* path,
         crashContext.gameSha256 = gameSha256.c_str();
         crashContext.saveDirectory = saveDirectory.c_str();
         crashContext.error = stats->error;
+        crashContext.backend =
+            s_useOptimizedBackend.load() ? "dynarmic" : "arm32_interpreter";
         crashContext.registers = crashState.r;
         crashContext.cpsr = crashState.cpsr;
         crashContext.unsupportedInstruction = crashState.unsupportedInstruction;
@@ -2442,6 +2516,7 @@ bool ccRuntimeRunFile(const char* path,
         crashContext.faultSize = stats->faultSize;
         crashContext.faultWrite = stats->faultWrite;
         crashContext.faultFetch = stats->faultFetch;
+        crashContext.failedTaskValid = stats->failedTaskValid;
         crashContext.lastImportPc = stats->lastImportPc;
         crashContext.lastImportReturnAddress = stats->lastImportReturnAddress;
         crashContext.failedTaskIndex = stats->failedTaskIndex;
@@ -2484,6 +2559,7 @@ bool ccRuntimeRunFile(const char* path,
         s_activeRuntime = NULL;
     }
     framebufferSetTransientPartialProtectionEnabled(false);
+    runtimeResourceMonitorSetActive(false);
     s_running.store(false);
     printf("cc-arm: stopped ok=%u instructions=%llu imports=%u unknown=%u frames=%u tasks=%u last=%s error=%s\n",
         ok ? 1u : 0u, (unsigned long long)stats->instructions, stats->importCalls,
@@ -2506,6 +2582,14 @@ void ccRuntimeApplySettings(void)
     if (parsePositiveScaleEnv("DINGOO_PIE_RUNTIME_SPEED_SCALE", &envScale))
     {
         runtimeScale = envScale;
+    }
+    if (runtimeScale > 1.0)
+    {
+        runtimeScale = 1.0;
+    }
+    if (runtimeScale < 0.10)
+    {
+        runtimeScale = 0.10;
     }
     if (parsePositiveScaleEnv("DINGOO_PIE_OSTIMEDLY_SCALE", &envScale))
     {
@@ -2534,7 +2618,7 @@ void ccRuntimeApplySettings(void)
 #endif
     bool useOptimizedBackend = optimizedBackendAvailable &&
         runtimeExecutionModeUsesOptimizedBackend(executionMode) &&
-        !runtimeLogProfileEnabled();
+        !runtimeCollectsInterpreterProfileSamples();
     s_useOptimizedBackend.store(useOptimizedBackend);
     const char* effectiveBackend = useOptimizedBackend ?
         "dynarmic" : "arm32_interpreter";

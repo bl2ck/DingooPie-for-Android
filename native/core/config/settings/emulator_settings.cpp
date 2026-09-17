@@ -472,6 +472,25 @@ static AudioBufferLatencyMode parseAudioBufferLatencyMode(
     return fallback;
 }
 
+static GameLibraryLayoutMode parseGameLibraryLayoutMode(
+    const std::string& value, GameLibraryLayoutMode fallback)
+{
+    if (fallback < GAME_LIBRARY_LAYOUT_SINGLE_COLUMN ||
+        fallback >= GAME_LIBRARY_LAYOUT_MODE_COUNT)
+    {
+        fallback = GAME_LIBRARY_LAYOUT_SINGLE_COLUMN;
+    }
+    if (strcasecmp(value.c_str(), "single") == 0)
+    {
+        return GAME_LIBRARY_LAYOUT_SINGLE_COLUMN;
+    }
+    if (strcasecmp(value.c_str(), "multi") == 0)
+    {
+        return GAME_LIBRARY_LAYOUT_MULTI_COLUMN;
+    }
+    return fallback;
+}
+
 static UiLanguage parseUiLanguage(const std::string& value, UiLanguage fallback)
 {
     if (fallback < UI_LANGUAGE_CHINESE || fallback >= UI_LANGUAGE_COUNT)
@@ -482,13 +501,13 @@ static UiLanguage parseUiLanguage(const std::string& value, UiLanguage fallback)
     {
         return fallback;
     }
-    if (strcasecmp(value.c_str(), "english") == 0)
-    {
-        return UI_LANGUAGE_ENGLISH;
-    }
     if (strcasecmp(value.c_str(), "chinese") == 0)
     {
         return UI_LANGUAGE_CHINESE;
+    }
+    if (strcasecmp(value.c_str(), "english") == 0)
+    {
+        return UI_LANGUAGE_ENGLISH;
     }
     return fallback;
 }
@@ -1061,6 +1080,12 @@ static bool externalBackendOverrideEnabled(void)
     return enabled;
 }
 
+static bool externalCcDynarmicProfileOverrideEnabled(void)
+{
+    static const bool enabled = getenv("DINGOO_PIE_CC_DYNARMIC_PROFILE") != NULL;
+    return enabled;
+}
+
 EmulatorSettings emulatorDefaultSettings(void)
 {
     EmulatorSettings settings;
@@ -1085,6 +1110,7 @@ EmulatorSettings emulatorDefaultSettings(void)
     settings.systemImeDisabled = true;
     settings.showVirtualControls = true;
     settings.virtualControlScalePercent = 100;
+    settings.virtualControlOpacityPercent = 100;
     settings.virtualDpadType = VIRTUAL_DPAD_JOYSTICK;
     settings.controllerMapping = "";
     settings.controllerCalibration = "";
@@ -1097,6 +1123,7 @@ EmulatorSettings emulatorDefaultSettings(void)
     settings.cheatsEnabled = false;
     settings.cheatSelections.clear();
 
+    settings.gameLibraryLayout = GAME_LIBRARY_LAYOUT_SINGLE_COLUMN;
     settings.uiLanguage = UI_LANGUAGE_CHINESE;
 
     settings.debugProfile = false;
@@ -1171,6 +1198,11 @@ EmulatorSettings emulatorLoadSettings(void)
         readIniInt("input", "virtual_control_scale", defaults.virtualControlScalePercent, path),
         EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES,
         defaults.virtualControlScalePercent);
+    settings.virtualControlOpacityPercent = normalizeIntPreset(
+        readIniInt("input", "virtual_control_opacity",
+            defaults.virtualControlOpacityPercent, path),
+        EMULATOR_VIRTUAL_CONTROL_OPACITY_VALUES,
+        defaults.virtualControlOpacityPercent);
     settings.virtualDpadType = parseVirtualDpadType(
         readIniString("input", "virtual_dpad_type",
             emulatorVirtualDpadTypeName(defaults.virtualDpadType), path),
@@ -1211,6 +1243,10 @@ EmulatorSettings emulatorLoadSettings(void)
         settings.cheatSelections.push_back(selection);
     }
 
+    settings.gameLibraryLayout = parseGameLibraryLayoutMode(
+        readIniString("ui", "game_library_layout",
+            emulatorGameLibraryLayoutName(defaults.gameLibraryLayout), path),
+        defaults.gameLibraryLayout);
     std::string language = readIniString("ui", "language", emulatorUiLanguageName(defaults.uiLanguage), path);
     settings.uiLanguage = parseUiLanguage(language, defaults.uiLanguage);
 
@@ -1268,6 +1304,9 @@ static bool writeEmulatorSettings(const EmulatorSettings& settings, const std::s
     ok = writeIniBool("input", "show_virtual_controls", settings.showVirtualControls, path) && ok;
     ok = writeIniInt("input", "virtual_control_scale", normalizeIntPreset(
         settings.virtualControlScalePercent, EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES, 100), path) && ok;
+    ok = writeIniInt("input", "virtual_control_opacity", normalizeIntPreset(
+        settings.virtualControlOpacityPercent,
+        EMULATOR_VIRTUAL_CONTROL_OPACITY_VALUES, 100), path) && ok;
     ok = writeIniString("input", "virtual_dpad_type",
         emulatorVirtualDpadTypeName(settings.virtualDpadType), path) && ok;
     ok = writeIniString("input", "controller_mapping", settings.controllerMapping, path) && ok;
@@ -1292,6 +1331,8 @@ static bool writeEmulatorSettings(const EmulatorSettings& settings, const std::s
                 encodeCheatFeatureKeys(selection.enabledFeatureKeys), path) && ok;
         }
     }
+    ok = writeIniString("ui", "game_library_layout",
+        emulatorGameLibraryLayoutName(settings.gameLibraryLayout), path) && ok;
     ok = writeIniString("ui", "language", emulatorUiLanguageName(settings.uiLanguage), path) && ok;
     ok = writeIniBool("debug", "profile", settings.debugProfile, path) && ok;
     return ok;
@@ -1457,12 +1498,15 @@ void emulatorTraceSettings(const char* reason, const EmulatorSettings& settings)
     printf(
         "settings-trace:%s input.system_ime_disabled=%u "
         "input.show_virtual_controls=%u input.virtual_control_scale=%d "
+        "input.virtual_control_opacity=%d "
         "input.virtual_dpad_type=%s input.controller_mapping=\"%s\" "
         "input.controller_calibration=\"%s\" input.keyboard_mapping=\"%s\"\n",
         label,
         settings.systemImeDisabled ? 1u : 0u,
         settings.showVirtualControls ? 1u : 0u,
         normalizeIntPreset(settings.virtualControlScalePercent, EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES, 100),
+        normalizeIntPreset(settings.virtualControlOpacityPercent,
+            EMULATOR_VIRTUAL_CONTROL_OPACITY_VALUES, 100),
         emulatorVirtualDpadTypeName(settings.virtualDpadType),
         settings.controllerMapping.empty() ? "(default)" : settings.controllerMapping.c_str(),
         settings.controllerCalibration.empty() ? "(default)" : settings.controllerCalibration.c_str(),
@@ -1485,8 +1529,9 @@ void emulatorTraceSettings(const char* reason, const EmulatorSettings& settings)
                 encodeCheatFeatureKeys(selection.enabledFeatureKeys).c_str());
         }
     }
-    printf("settings-trace:%s ui.language=%s\n",
+    printf("settings-trace:%s ui.game_library_layout=%s ui.language=%s\n",
         label,
+        emulatorGameLibraryLayoutName(settings.gameLibraryLayout),
         emulatorUiLanguageName(settings.uiLanguage));
     printf("settings-trace:%s debug.profile=%u\n",
         label,
@@ -1514,6 +1559,11 @@ void emulatorApplySettingsToEnvironment(const EmulatorSettings& settings)
     setEnvValue("DINGOO_PIE_OSTIMEDLY_SCALE", normalizeScaleValue(settings.osTimeDelayScale, ""));
     setEnvValue("DINGOO_PIE_AUDIO_DISABLED", settings.audioDisabled ? "1" : "");
     setEnvValue("DINGOO_PIE_PROFILE", settings.debugProfile || runtimeLogExternalProfileEnabled() ? "1" : "");
+    if (!externalCcDynarmicProfileOverrideEnabled())
+    {
+        setEnvValue("DINGOO_PIE_CC_DYNARMIC_PROFILE",
+            settings.debugProfile ? "1" : "");
+    }
     runtimeLogSetProfileEnabled(settings.debugProfile);
 }
 
@@ -1621,13 +1671,27 @@ const char* emulatorDigitalNoiseReductionName(DigitalNoiseReductionLevel level)
     }
 }
 
+const char* emulatorGameLibraryLayoutName(GameLibraryLayoutMode mode)
+{
+    switch (mode)
+    {
+    case GAME_LIBRARY_LAYOUT_SINGLE_COLUMN:
+        return "single";
+    case GAME_LIBRARY_LAYOUT_MULTI_COLUMN:
+        return "multi";
+    default:
+        return "single";
+    }
+}
+
 const char* emulatorUiLanguageName(UiLanguage language)
 {
     switch (language)
     {
+    case UI_LANGUAGE_CHINESE:
+        return "chinese";
     case UI_LANGUAGE_ENGLISH:
         return "english";
-    case UI_LANGUAGE_CHINESE:
     default:
         return "chinese";
     }

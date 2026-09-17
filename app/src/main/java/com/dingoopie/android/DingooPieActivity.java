@@ -135,6 +135,8 @@ public final class DingooPieActivity extends SDLActivity {
     static native boolean nativeRunSaveAutomation(
             String appDirectory, String ccDirectory);
     private static native void nativeSetAppBackgrounded(boolean backgrounded);
+    private static native void nativeToggleGameLibraryLayout();
+    private static native void nativeRefreshGameLibrary();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -491,7 +493,33 @@ public final class DingooPieActivity extends SDLActivity {
                 .show());
     }
 
-    public void showLanFileManager(boolean chinese) {
+    public void showGameLibrarySystemToolsMenu(boolean chinese, boolean multiColumn) {
+        runOnUiThread(() -> {
+            if (activityDestroyed || isFinishing()) {
+                return;
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle(chinese ? "\u7CFB\u7EDF\u5DE5\u5177" : "System Tools")
+                    .setItems(new String[]{
+                            multiColumn ?
+                                    (chinese ? "\u5207\u6362\u4E3A\u5355\u5217\u663E\u793A" : "Switch to Single Column") :
+                                    (chinese ? "\u5207\u6362\u4E3A\u591A\u5217\u663E\u793A" : "Switch to Multiple Columns"),
+                            chinese ? "\u5237\u65B0\u6E38\u620F\u5217\u8868" : "Refresh Game List",
+                            chinese ? "\u6587\u4EF6\u7BA1\u7406\u670D\u52A1" : "File Manager Service"
+                    }, (dialog, which) -> {
+                        if (which == 0) {
+                            nativeToggleGameLibraryLayout();
+                        } else if (which == 1) {
+                            nativeRefreshGameLibrary();
+                        } else if (which == 2) {
+                            showFileManagerService(chinese);
+                        }
+                    })
+                    .show();
+        });
+    }
+
+    private void showFileManagerService(boolean chinese) {
         runOnUiThread(() -> {
             if (activityDestroyed || isFinishing()) {
                 return;
@@ -728,8 +756,8 @@ public final class DingooPieActivity extends SDLActivity {
                         gameSelectionText("\u65E0\u6CD5\u6DFB\u52A0\u6E38\u620F",
                                 "Cannot Add Game"),
                         gameSelectionText(
-                                "\u8BF7\u9009\u62E9 .app \u6216 .cc \u6E38\u620F\u6587\u4EF6\u3002",
-                                "Select an .app or .cc game file."),
+                                "\u8BF7\u9009\u62E9 .app\u3001.cc\u3001.c2m\u3001.c2s \u6216 .c3s \u6E38\u620F\u6587\u4EF6\u3002",
+                                "Select an .app, .cc, .c2m, .c2s, or .c3s game file."),
                         gameSelectionText("\u786E\u5B9A", "OK"));
                 completeGameSelection("");
                 return;
@@ -1593,6 +1621,7 @@ public final class DingooPieActivity extends SDLActivity {
             if (pathSegments == null || pathSegments.isEmpty()) {
                 return -1;
             }
+            boolean writing = fileModeWrites(mode);
             Uri directoryUri = Uri.parse(directoryUriText);
             if ("file".equalsIgnoreCase(directoryUri.getScheme())) {
                 File directory = new File(directoryUri.getPath());
@@ -1606,7 +1635,6 @@ public final class DingooPieActivity extends SDLActivity {
                         !filePath.startsWith(directoryPath + File.separator)) {
                     return -1;
                 }
-                boolean writing = mode != null && (mode.contains("w") || mode.contains("a") || mode.contains("+"));
                 if (writing) {
                     File parent = file.getParentFile();
                     if (parent == null || (!parent.exists() && !parent.mkdirs())) {
@@ -1627,7 +1655,6 @@ public final class DingooPieActivity extends SDLActivity {
                     return descriptor.detachFd();
                 }
             }
-            boolean writing = mode != null && (mode.contains("w") || mode.contains("a") || mode.contains("+"));
             Uri parentUri = asDocumentDirectoryUri(directoryUri);
             if (parentUri == null) {
                 return -1;
@@ -1653,7 +1680,7 @@ public final class DingooPieActivity extends SDLActivity {
             if (fileUri == null) {
                 return -1;
             }
-            ParcelFileDescriptor descriptor = openSaveDocument(fileUri, mode);
+            ParcelFileDescriptor descriptor = openDocumentFileDescriptor(fileUri, mode);
             return descriptor == null ? -1 : descriptor.detachFd();
         } catch (Exception exception) {
             Log.e(TAG, "Unable to open game save file: " + fileName, exception);
@@ -1819,10 +1846,14 @@ public final class DingooPieActivity extends SDLActivity {
         }
     }
 
-    private ParcelFileDescriptor openSaveDocument(Uri fileUri, String mode) throws IOException {
-        boolean writing = mode != null &&
+    private static boolean fileModeWrites(String mode) {
+        return mode != null &&
                 (mode.contains("w") || mode.contains("a") || mode.contains("+"));
-        if (!writing) {
+    }
+
+    private ParcelFileDescriptor openDocumentFileDescriptor(Uri fileUri, String mode)
+            throws IOException {
+        if (!fileModeWrites(mode)) {
             return getContentResolver().openFileDescriptor(fileUri, "r");
         }
         boolean truncate = mode.contains("w") && !mode.contains("a");
@@ -1898,16 +1929,25 @@ public final class DingooPieActivity extends SDLActivity {
         }
     }
 
-    public int openSiblingGameFileDescriptor(String gamePath, String fileName) {
-        if (gamePath == null || fileName == null || fileName.isEmpty()) {
+    public int openSiblingGameFileDescriptor(String gamePath, String fileName, String mode) {
+        if (gamePath == null || fileName == null || fileName.isEmpty() ||
+                fileName.indexOf('/') >= 0 || fileName.indexOf('\\') >= 0) {
             return -1;
         }
         try {
-            Uri fileUri = findSiblingDocument(gameUriFromPath(gamePath), fileName);
+            Uri parentUri = findSiblingDirectory(gameUriFromPath(gamePath));
+            if (parentUri == null) {
+                return -1;
+            }
+            Uri fileUri = findChildDocument(parentUri, fileName);
+            if (fileUri == null && fileModeWrites(mode)) {
+                fileUri = DocumentsContract.createDocument(getContentResolver(),
+                        parentUri, "application/octet-stream", fileName);
+            }
             if (fileUri == null) {
                 return -1;
             }
-            ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(fileUri, "r");
+            ParcelFileDescriptor descriptor = openDocumentFileDescriptor(fileUri, mode);
             return descriptor == null ? -1 : descriptor.detachFd();
         } catch (Exception exception) {
             Log.e(TAG, "Unable to open sibling game file", exception);
@@ -1915,7 +1955,7 @@ public final class DingooPieActivity extends SDLActivity {
         }
     }
 
-    private Uri findSiblingDocument(Uri gameUri, String fileName) {
+    private Uri findSiblingDirectory(Uri gameUri) {
         if (gameUri == null || !DocumentsContract.isDocumentUri(this, gameUri)) {
             return null;
         }
@@ -1929,8 +1969,7 @@ public final class DingooPieActivity extends SDLActivity {
         }
         String parentId = documentId.substring(0, separator +
                 (documentId.charAt(separator) == ':' ? 1 : 0));
-        Uri parentUri = DocumentsContract.buildDocumentUriUsingTree(gameUri, parentId);
-        return findChildDocument(parentUri, fileName);
+        return DocumentsContract.buildDocumentUriUsingTree(gameUri, parentId);
     }
 
     public synchronized boolean removeGamePath(String gamePath) {
@@ -2176,7 +2215,9 @@ public final class DingooPieActivity extends SDLActivity {
             return false;
         }
         String lowerName = displayName.toLowerCase(Locale.ROOT);
-        return lowerName.endsWith(".app") || lowerName.endsWith(".cc");
+        return lowerName.endsWith(".app") || lowerName.endsWith(".cc") ||
+                lowerName.endsWith(".c2m") || lowerName.endsWith(".c2s") ||
+                lowerName.endsWith(".c3s");
     }
 
     private Uri gameUriFromPath(String gamePath) {

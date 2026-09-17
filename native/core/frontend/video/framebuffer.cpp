@@ -455,9 +455,14 @@ void framebufferRequestUpdate(void)
     // tied to the Dingoo SDK frame submission point instead of host refresh.
     // Pausing here freezes guest execution at a complete frame boundary while
     // leaving the frontend event loop responsive for menu commands.
+    uint32_t restoreGeneration = pauseGateRestoreGeneration();
     if (pauseGateWaitForResume())
     {
         resetFramebufferPacing();
+        if (restoreGeneration != pauseGateRestoreGeneration())
+        {
+            return;
+        }
     }
     cheatRuntimeApplyFrame();
     uint64_t beginMicros = paceFramebufferSubmission();

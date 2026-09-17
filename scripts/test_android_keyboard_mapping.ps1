@@ -84,7 +84,7 @@ $activity = Join-Path $projectRoot `
 Assert-ContainsLiteral $activity 'SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_BACK);'
 Assert-ContainsLiteral $activity 'SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_BACK);'
 
-$frontendShell = Join-Path $projectRoot 'native\core\frontend\shell\frontend_shell.cpp'
+$frontendShell = Join-Path $projectRoot 'native\android\frontend\frontend_shell.cpp'
 Assert-ContainsLiteral $frontendShell 'SDL_SCANCODE_AC_BACK)'
 
 Write-Host 'Android physical keyboard mapping regression passed.'

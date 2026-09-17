@@ -2,6 +2,7 @@ package com.dingoopie.android;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
 import android.content.UriPermission;
 import android.database.Cursor;
 import android.net.Uri;
@@ -77,6 +78,7 @@ final class LanFileManagerServer implements Closeable {
         String name;
         File localDirectory;
         Uri treeUri;
+        boolean available;
         boolean writable;
 
         boolean isLocal() {
@@ -321,6 +323,9 @@ final class LanFileManagerServer implements Closeable {
         } else if ("/delete".equals(route) && "POST".equals(request.method)) {
             delete(request.query);
             sendText(output, 200, "OK", "text/plain; charset=utf-8");
+        } else if ("/remove-root".equals(route) && "POST".equals(request.method)) {
+            removeAuthorizedRoot(request.query);
+            sendRedirect(output, "/" + token + "/");
         } else {
             sendText(output, 404, "Not Found", "text/plain; charset=utf-8");
         }
@@ -334,14 +339,42 @@ final class LanFileManagerServer implements Closeable {
                 .append(escapeHtml(text("\u9009\u62e9\u8981\u8bbf\u95ee\u7684\u76ee\u5f55\u3002",
                         "Choose a directory to manage."))).append("</p><div class=roots>");
         for (Root root : roots()) {
-            body.append("<a class=root href=\"").append(route("browse", root.id, ""))
-                    .append("\"><strong>").append(escapeHtml(root.name))
-                    .append("</strong><span>")
-                    .append(escapeHtml(root.writable ? text("\u53ef\u8bfb\u5199", "Read and write") :
-                            text("\u53ea\u8bfb", "Read only")))
-                    .append("</span></a>");
+            appendRoot(body, root);
         }
         return pageFooter(body.append("</div>"));
+    }
+
+    private void appendRoot(StringBuilder body, Root root) {
+        body.append("<div class='root-row")
+                .append(root.available ? "" : " unavailable")
+                .append("'>");
+        if (root.available) {
+            body.append("<a class=root href=\"").append(route("browse", root.id, ""))
+                    .append("\">");
+        } else {
+            body.append("<div class=root aria-disabled=true>");
+        }
+        body.append("<strong>").append(escapeHtml(root.name)).append("</strong><span>")
+                .append(escapeHtml(root.available ?
+                        (root.writable ? text("\u53ef\u8bfb\u5199", "Read and write") :
+                                text("\u53ea\u8bfb", "Read only")) :
+                        text("\u76ee\u5f55\u4e0d\u53ef\u7528", "Folder unavailable")))
+                .append(root.available ? "</span></a>" : "</span></div>");
+        if (root.treeUri != null) {
+            String removeLabel = escapeHtml(text("\u79fb\u9664\u6388\u6743\u76ee\u5f55",
+                    "Remove authorized folder"));
+            String confirmation = escapeHtml(text(
+                    "\u4ec5\u79fb\u9664\u6a21\u62df\u5668\u5bf9\u8be5\u76ee\u5f55\u7684\u6388\u6743\uff0c\u4e0d\u4f1a\u5220\u9664\u76ee\u5f55\u6216\u6587\u4ef6\u3002\u786e\u5b9a\u7ee7\u7eed\uff1f",
+                    "This only removes emulator access and does not delete the folder or its files. Continue?"));
+            body.append("<form method=post action=\"")
+                    .append(route("remove-root", root.id, ""))
+                    .append("\" onsubmit=\"return confirm('").append(confirmation)
+                    .append("')\"><button class='danger icon-button' title=\"")
+                    .append(removeLabel).append("\" aria-label=\"")
+                    .append(removeLabel).append("\">").append(ICON_DELETE)
+                    .append("</button></form>");
+        }
+        body.append("</div>");
     }
 
     private String browsePage(Map<String, String> query) throws IOException {
@@ -466,9 +499,9 @@ final class LanFileManagerServer implements Closeable {
                 .append("input{background:var(--input);color:var(--text)}button,.action{display:inline-block;background:var(--control);color:var(--control-text);border-color:var(--control-border);font-weight:500;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.12);transition:background .15s ease,border-color .15s ease}button:hover,.action:hover{background:var(--control-hover)}button:disabled{opacity:.55;cursor:wait}.danger{background:var(--danger);color:var(--danger-text);border-color:var(--danger-border)}.danger:hover{background:var(--danger-hover)}.toolbar{display:grid;grid-template-columns:max-content minmax(0,1fr) max-content;gap:14px;align-items:baseline;margin-bottom:16px}.toolbar>a{white-space:nowrap}.toolbar strong{min-width:0;line-height:1.5;overflow-wrap:anywhere}.page-heading{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:14px;align-items:baseline}.page-heading h1{margin-top:0}")
                 .append(".icon-button{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;padding:0;vertical-align:middle}.icon-button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.file-tools{display:block;width:100%;padding:14px;margin-bottom:16px;background:var(--panel);border:1px solid var(--border);border-radius:10px}.tool-group{display:grid;grid-template-columns:42px minmax(0,1fr) 42px;gap:10px;align-items:center;min-width:0}.tool-action{width:100%;min-width:0;height:42px;margin:0;padding:0}.file-input{display:none}.file-select-button{width:42px;height:42px;margin:0;background:var(--control);color:var(--control-text);border:1px solid var(--control-border);border-radius:6px;box-shadow:0 1px 2px rgba(0,0,0,.12);cursor:pointer}.file-select-button:hover{background:var(--control-hover)}.file-input:disabled+.file-select-button{opacity:.55;cursor:wait}.file-selection{min-width:0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.selection-queue{display:grid;gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}.queue-item{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:10px;align-items:center;min-width:0;padding:5px 6px 5px 10px;background:var(--picker);border-radius:6px}.queue-name{min-width:0;overflow-wrap:anywhere}.queue-remove{width:30px;height:30px;margin:0;padding:0;border:0;background:transparent;box-shadow:none;color:var(--muted);font-size:22px;line-height:1}.queue-remove:hover{background:var(--danger);color:var(--danger-text)}.queue-remove:disabled{background:transparent}#status{display:block;margin-top:10px;overflow-wrap:anywhere}")
                 .append(".table-wrap{width:100%;overflow-x:auto;overflow-y:hidden;background:var(--panel);border:1px solid var(--border);border-radius:8px;scrollbar-width:thin;scrollbar-color:var(--scroll-thumb) transparent}.table-wrap::-webkit-scrollbar{height:7px}.table-wrap::-webkit-scrollbar-track,.table-wrap::-webkit-scrollbar-corner{background:transparent}.table-wrap::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border:1px solid var(--scroll-thumb-border);border-radius:2px;background-clip:padding-box}.table-wrap::-webkit-scrollbar-thumb:hover{background:var(--scroll-thumb-hover)}table{width:100%;min-width:560px;border-collapse:collapse;background:var(--panel)}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line)}tbody tr:last-child td{border-bottom:0}td:first-child{overflow-wrap:anywhere}.entry-file-icon{display:inline-grid;grid-template-rows:20px auto;justify-items:center;width:30px;margin-right:3px;vertical-align:middle}.entry-file-icon svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.entry-file-icon small{font-size:8px;line-height:1;font-weight:700;letter-spacing:.2px}.folder-entry{color:#d7aa52}.document-entry{color:var(--muted)}.save-state-entry{color:#55b978}.cheat-entry{color:#a879e6}.app-game{color:#52a8e8}.cc-game{color:#e86b6b}th:nth-child(2),td:nth-child(2){text-align:right;white-space:nowrap}th:last-child,td:last-child{width:1%;text-align:right;white-space:nowrap}")
-                .append(".roots{display:grid;gap:12px}.root{display:flex;justify-content:space-between;background:var(--panel);padding:16px;border:1px solid var(--border);border-radius:8px}.root span{color:var(--muted)}")
+                .append(".roots{display:grid;gap:12px}.root-row{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:8px;align-items:center;background:var(--panel);padding:8px 8px 8px 16px;border:1px solid var(--border);border-radius:8px}.root-row form{display:flex;margin:0}.root{display:flex;justify-content:space-between;gap:12px;min-width:0;padding:8px 0}.root span{color:var(--muted);white-space:nowrap}.root-row.unavailable{border-style:dashed}.root-row.unavailable .root{color:var(--muted)}")
                 .append("footer{margin-top:28px;color:var(--muted);font-size:14px;line-height:1.5;text-align:center}footer p{margin:0}.copyright{color:var(--copyright);white-space:nowrap}.theme-toggle,.theme-toggle:hover{width:auto;height:auto;padding:0;margin:0;background:transparent;border:0;border-radius:0;box-shadow:none;color:var(--link);font-weight:500;white-space:nowrap}.theme-toggle:hover{text-decoration:underline}")
-                .append("@media(max-width:520px){body{padding:12px}.toolbar{gap:8px}.root{gap:8px;flex-direction:column}}")
+                .append("@media(max-width:520px){body{padding:12px}.toolbar{gap:8px}.root{gap:8px;flex-direction:column}.root span{white-space:normal}}")
                 .append("</style><script>(function(){try{const t=localStorage.getItem('dingoopie-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}})();")
                 .append("function toggleTheme(){const e=document.documentElement,c=e.dataset.theme,l=matchMedia('(prefers-color-scheme:light)').matches,n=c?c==='light'?'dark':'light':l?'dark':'light';e.dataset.theme=n;try{localStorage.setItem('dingoopie-theme',n)}catch(x){}}</script>")
                 ;
@@ -592,6 +625,36 @@ final class LanFileManagerServer implements Closeable {
         }
     }
 
+    private void removeAuthorizedRoot(Map<String, String> query) throws IOException {
+        Root root = requireRoot(query.get("root"));
+        if (root.treeUri == null) {
+            throw new IOException(text("\u5185\u90e8\u76ee\u5f55\u6388\u6743\u4e0d\u80fd\u79fb\u9664",
+                    "The private directory permission cannot be removed"));
+        }
+        int permissionFlags = 0;
+        for (UriPermission permission : resolver.getPersistedUriPermissions()) {
+            if (!root.treeUri.equals(permission.getUri())) {
+                continue;
+            }
+            if (permission.isReadPermission()) {
+                permissionFlags |= Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            }
+            if (permission.isWritePermission()) {
+                permissionFlags |= Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+            }
+        }
+        if (permissionFlags == 0) {
+            return;
+        }
+        try {
+            resolver.releasePersistableUriPermission(root.treeUri, permissionFlags);
+            Log.i(TAG, "Removed persisted directory permission " + root.treeUri);
+        } catch (IllegalArgumentException | SecurityException exception) {
+            throw new IOException(text("\u65e0\u6cd5\u79fb\u9664\u6388\u6743\u76ee\u5f55",
+                    "Could not remove the authorized folder"), exception);
+        }
+    }
+
     private void ensureDirectoryEmpty(Root root, String path) throws IOException {
         Entry entry = stat(root, path);
         if (entry.directory && !list(root, path).isEmpty()) {
@@ -606,6 +669,7 @@ final class LanFileManagerServer implements Closeable {
         privateRoot.id = "private";
         privateRoot.name = text("\u6a21\u62df\u5668\u79c1\u6709\u76ee\u5f55", "Emulator Private Files");
         privateRoot.localDirectory = context.getFilesDir();
+        privateRoot.available = true;
         privateRoot.writable = true;
         result.add(privateRoot);
 
@@ -616,27 +680,53 @@ final class LanFileManagerServer implements Closeable {
                 return left.getUri().toString().compareTo(right.getUri().toString());
             }
         });
-        int index = 0;
+        int unnamedIndex = 0;
         for (UriPermission permission : permissions) {
             Uri uri = permission.getUri();
             if (!permission.isReadPermission() || !isTreeUri(uri)) {
                 continue;
             }
+            Root root = new Root();
+            root.id = "tree:" + uri;
+            root.treeUri = uri;
+            root.writable = permission.isWritePermission();
             try {
-                Root root = new Root();
-                root.id = "tree" + index++;
-                root.name = queryName(rootDocumentUri(uri));
-                if (root.name == null || root.name.isEmpty()) {
-                    root.name = text("\u6388\u6743\u76ee\u5f55", "Authorized Folder") + " " + index;
-                }
-                root.treeUri = uri;
-                root.writable = permission.isWritePermission();
-                result.add(root);
+                Uri documentUri = rootDocumentUri(uri);
+                root.name = queryName(documentUri);
+                root.available = isDocumentTreeAvailable(root, documentUri);
             } catch (RuntimeException exception) {
-                Log.w(TAG, "Ignoring unavailable persisted directory " + uri, exception);
+                Log.w(TAG, "Persisted directory is unavailable " + uri, exception);
             }
+            if (root.name == null || root.name.isEmpty()) {
+                root.name = fallbackTreeName(uri, ++unnamedIndex);
+            }
+            result.add(root);
         }
         return result;
+    }
+
+    private String fallbackTreeName(Uri treeUri, int index) {
+        try {
+            String documentId = DocumentsContract.getTreeDocumentId(treeUri);
+            int separator = Math.max(documentId.lastIndexOf('/'), documentId.lastIndexOf(':'));
+            String name = documentId.substring(separator + 1);
+            if (!name.isEmpty()) {
+                return name;
+            }
+        } catch (RuntimeException exception) {
+            Log.w(TAG, "Unable to derive persisted directory name " + treeUri, exception);
+        }
+        return text("\u6388\u6743\u76ee\u5f55", "Authorized Folder") + " " + index;
+    }
+
+    private boolean isDocumentTreeAvailable(Root root, Uri documentUri) {
+        try {
+            DocumentNode node = queryNode(root, documentUri);
+            return node != null && node.isDirectory();
+        } catch (RuntimeException exception) {
+            Log.w(TAG, "Unable to access persisted directory " + root.treeUri, exception);
+            return false;
+        }
     }
 
     private Root requireRoot(String id) throws IOException {
@@ -1124,6 +1214,12 @@ final class LanFileManagerServer implements Closeable {
 
     private static void sendHtml(OutputStream output, String body) throws IOException {
         sendText(output, 200, body, "text/html; charset=utf-8");
+    }
+
+    private static void sendRedirect(OutputStream output, String location) throws IOException {
+        String headers = "HTTP/1.1 303 See Other\r\nLocation: " + location +
+                "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+        output.write(headers.getBytes(StandardCharsets.ISO_8859_1));
     }
 
     private static void sendText(OutputStream output, int status, String body,

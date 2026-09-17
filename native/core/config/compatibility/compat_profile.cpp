@@ -66,10 +66,7 @@ static const CompatTaskStopExitRule kTaskStopExitRules[] =
     // toggle. The confirmed in-game exit path first tries to open a corrupt
     // control-character filename, shows the resource-load failure page, then
     // reaches this task stop after the user presses a key.
-    { "E4E23B19515716445EEE4A79BF6F081B77F5C0911D43456205902475653373F9",
-        0x80a0067cu,
-        COMPAT_TASK_STOP_EXIT_AFTER_SUSPICIOUS_FILE_OPEN_FAILURE,
-        "JixianPiaoyi resource-failure exit" },
+    { "E4E23B19515716445EEE4A79BF6F081B77F5C0911D43456205902475653373F9", 0x80a0067cu, COMPAT_TASK_STOP_EXIT_AFTER_SUSPICIOUS_FILE_OPEN_FAILURE, "JixianPiaoyi resource-failure exit" },
 
     { "2804FF20F07F82BDCA59EB1BCD6ACE9615862788559F865E11BF0F67547BE6F1", 0x80a058f0u, COMPAT_TASK_STOP_EXIT_ALWAYS, "LubiLubi task-stop exit" },
 

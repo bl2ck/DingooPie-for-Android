@@ -44,6 +44,7 @@ LOCAL_C_INCLUDES := \
     $(PROJECT_ROOT)/native/core/cc \
     $(PROJECT_ROOT)/native/core/config \
     $(PROJECT_ROOT)/native/core/frontend \
+    $(PROJECT_ROOT)/native/android/compat/include \
     $(PROJECT_ROOT)/native/android \
     $(PPSSPP_PATH) \
     $(PPSSPP_PATH)/Common \
@@ -76,7 +77,8 @@ LOCAL_SRC_FILES := \
     $(PROJECT_ROOT)/native/core/config/compatibility/compat_profile.cpp \
     $(PROJECT_ROOT)/native/core/config/settings/emulator_options.cpp \
     $(PROJECT_ROOT)/native/core/config/settings/emulator_settings.cpp \
-    $(PROJECT_ROOT)/native/core/shared/diagnostics/debug_log.cpp \
+    $(PROJECT_ROOT)/native/android/diagnostics/debug_log.cpp \
+    $(PROJECT_ROOT)/native/core/shared/diagnostics/crash_report_writer.cpp \
     $(PROJECT_ROOT)/native/core/shared/diagnostics/runtime_log.cpp \
     $(PROJECT_ROOT)/native/core/shared/execution/execution_backend.cpp \
     $(PROJECT_ROOT)/native/core/shared/execution/pause_gate.cpp \
@@ -92,15 +94,16 @@ LOCAL_SRC_FILES := \
     $(PROJECT_ROOT)/native/core/frontend/audio/sdl_audio.cpp \
     $(PROJECT_ROOT)/native/core/frontend/input/input_controls.cpp \
     $(PROJECT_ROOT)/native/core/frontend/input/keyboard_mapping.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/menu/menu_overlay.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/menu/menu_strings.cpp \
-    $(PROJECT_ROOT)/native/core/frontend/shell/frontend_shell.cpp \
+    $(PROJECT_ROOT)/native/android/frontend/menu/menu_overlay.cpp \
+    $(PROJECT_ROOT)/native/android/frontend/menu/menu_strings.cpp \
+    $(PROJECT_ROOT)/native/android/frontend/frontend_shell.cpp \
     $(PROJECT_ROOT)/native/core/frontend/video/frame_processor.cpp \
     $(PROJECT_ROOT)/native/core/frontend/video/framebuffer.cpp \
-    $(PROJECT_ROOT)/native/core/main.cpp \
-    $(PROJECT_ROOT)/native/android/Common/Crypto/sha256.cpp \
-    $(PROJECT_ROOT)/native/android/capstone_stub.cpp \
-    $(PROJECT_ROOT)/native/android/platform_android.cpp
+    $(PROJECT_ROOT)/native/android/main.cpp \
+    $(PPSSPP_PATH)/Common/Crypto/sha256.cpp \
+    $(PROJECT_ROOT)/native/android/compat/capstone_stub.cpp \
+    $(PROJECT_ROOT)/native/android/platform/platform_android.cpp \
+    $(PROJECT_ROOT)/native/android/diagnostics/runtime_resource_events.cpp
 
 ifeq ($(TARGET_ARCH_ABI),x86_64)
 LOCAL_C_INCLUDES += $(DYNARMIC_SOURCE)/src
@@ -111,7 +114,7 @@ endif
 
 LOCAL_CPPFLAGS += -DDINGOO_PIE_DINGOO_MEMORY -D__LIBRETRO__
 LOCAL_SRC_FILES += \
-    $(PROJECT_ROOT)/native/android/ppsspp_file_stub.cpp \
+    $(PROJECT_ROOT)/native/android/compat/ppsspp_file_stub.cpp \
     $(PPSSPP_PATH)/ext/xxhash.c \
     $(PPSSPP_PATH)/Common/ABI.cpp \
     $(PPSSPP_PATH)/Common/Buffer.cpp \

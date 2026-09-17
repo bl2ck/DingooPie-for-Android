@@ -1,0 +1,6 @@
+#ifndef DINGOO_PIE_ANDROID_COMPAT_SDL2_SDL_H
+#define DINGOO_PIE_ANDROID_COMPAT_SDL2_SDL_H
+
+#include <SDL.h>
+
+#endif

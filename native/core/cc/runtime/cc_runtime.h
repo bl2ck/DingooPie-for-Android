@@ -26,6 +26,7 @@ struct CcRuntimeStats
     uint32_t failedTaskDelayTicks;
     bool faultWrite;
     bool faultFetch;
+    bool failedTaskValid;
     bool guestCompleted;
     char lastImport[96];
     char error[160];

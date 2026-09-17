@@ -1,7 +1,5 @@
 #include "app/cpu/mips_runtime.h"
 
-#include "app/cpu/ppsspp_backend.h"
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -13,9 +11,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "app/cpu/ppsspp_backend.h"
 #include "frontend/video/framebuffer.h"
-#include "shared/execution/pause_gate.h"
 #include "shared/diagnostics/runtime_log.h"
+#include "shared/execution/pause_gate.h"
 
 struct MemoryRegion
 {
@@ -615,7 +614,12 @@ maybe_print:
 
 static bool waitForInterpreterResume(NativeRuntime* runtime)
 {
-    pauseGateWaitForResume();
+    uint32_t restoreGeneration = pauseGateRestoreGeneration();
+    if (pauseGateWaitForResume() && restoreGeneration != pauseGateRestoreGeneration())
+    {
+        runtime->cachedFetchRegionValid = false;
+        runtime->cachedRegionValid = false;
+    }
     return !runtime->stopRequested.load(std::memory_order_acquire);
 }
 

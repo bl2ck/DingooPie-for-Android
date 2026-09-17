@@ -1,7 +1,9 @@
 #include "shared/services/guest_filesystem.h"
 #include "shared/save/guest_save_transaction.h"
 #include "config/compatibility/compat_profile.h"
+#include "shared/platform/storage_services.h"
 #include "shared/diagnostics/runtime_log.h"
+#include "shared/diagnostics/runtime_resource_events.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -187,7 +189,8 @@ static bool traceFsEnabled(void)
 
 static bool traceFsOpenEnabled(void)
 {
-    return true;
+    const char* value = getenv("DINGOO_PIE_TRACE_FS_OPEN");
+    return value && value[0] && strcmp(value, "0") != 0;
 }
 
 static const char* virtualFileTypeName(VirtualFileType type)
@@ -394,14 +397,17 @@ static bool normalizeHostFileMode(const char* mode, char* out, size_t outSize)
         return false;
     }
 
-    bool changed = false;
+    bool hasBinary = false;
     size_t pos = 0;
     for (const char* p = mode; *p; ++p)
     {
-        if (*p == 's')
+        if (*p == 's' || *p == 't')
         {
-            changed = true;
             continue;
+        }
+        if (*p == 'b')
+        {
+            hasBinary = true;
         }
         if (pos + 1 >= outSize)
         {
@@ -410,13 +416,22 @@ static bool normalizeHostFileMode(const char* mode, char* out, size_t outSize)
         }
         out[pos++] = *p;
     }
+    if (!hasBinary)
+    {
+        if (pos + 1 >= outSize)
+        {
+            out[0] = 0;
+            return false;
+        }
+        out[pos++] = 'b';
+    }
     out[pos] = 0;
-    return changed && pos > 0;
+    return pos > 0;
 }
 
 static const char* normalizedHostFileMode(const char* mode, char* buffer, size_t bufferSize)
 {
-    return normalizeHostFileMode(mode, buffer, bufferSize) ? buffer : mode;
+    return normalizeHostFileMode(mode, buffer, bufferSize) ? buffer : NULL;
 }
 
 static const char* pathBaseName(const char* path)
@@ -478,18 +493,10 @@ static void normalizeGuestPath(const char* in, char* out, size_t outSize)
 
 static FILE* openGuestFile(const char* name, const char* mode)
 {
-    FILE* fp = fopen(name, mode);
-    if (fp)
-    {
-        return fp;
-    }
-
     char hostMode[16];
-    if (normalizeHostFileMode(mode, hostMode, sizeof(hostMode)))
-    {
-        fp = fopen(name, hostMode);
-    }
-    return fp;
+    const char* effectiveMode = normalizedHostFileMode(
+        mode, hostMode, sizeof(hostMode));
+    return name && effectiveMode ? platformOpenFile(name, effectiveMode) : NULL;
 }
 
 static FILE* tryOpenHostFile(const char* name, const char* mode, bool* saveTransaction,
@@ -497,6 +504,10 @@ static FILE* tryOpenHostFile(const char* name, const char* mode, bool* saveTrans
 {
     char normalizedMode[16];
     const char* effectiveMode = normalizedHostFileMode(mode, normalizedMode, sizeof(normalizedMode));
+    if (!effectiveMode)
+    {
+        return NULL;
+    }
     if (saveTransaction)
     {
         *saveTransaction = false;
@@ -779,6 +790,14 @@ uint32_t fsys_fopen(const char* name, const char* mode)
             {
                 s_filesystemProfile.resourceCachedOpens++;
             }
+            if (runtimeResourceMonitorIsCapturing())
+            {
+                runtimeResourceMonitorRecordOpen(
+                    RUNTIME_RESOURCE_MONITOR_SOURCE_FSYS,
+                    name,
+                    res,
+                    res->decoded_data || !res->xorKey);
+            }
             if (traceFsEnabled() || traceFsOpenEnabled())
             {
                 printf("trace-fs: fopen name=%s mode=%s -> %u resource=%s offset=0x%08x size=0x%08x xor=0x%02x\n",
@@ -909,6 +928,59 @@ const char* fsys_stream_request_name(uint32_t stream)
     return requestName.c_str();
 }
 
+void fsys_record_load_to_guest(
+    uint32_t stream,
+    uint32_t guestAddress,
+    const void* hostData,
+    uint32_t positionBefore)
+{
+    std::lock_guard<std::recursive_mutex> lock(s_filesystemMutex);
+    if (!runtimeResourceMonitorIsCapturing() || !hostData)
+    {
+        return;
+    }
+
+    uint32_t positionAfter = fsys_stream_position(stream);
+    uint32_t bytesLoaded = positionAfter >= positionBefore ?
+        positionAfter - positionBefore : 0;
+    if (bytesLoaded == 0)
+    {
+        return;
+    }
+
+    GuestResourceEntry* resource = fsys_stream_resource(stream);
+    if (resource)
+    {
+        runtimeResourceMonitorRecordLoadContent(
+            RUNTIME_RESOURCE_MONITOR_SOURCE_FSYS,
+            resource,
+            guestAddress,
+            hostData,
+            bytesLoaded,
+            positionAfter);
+    }
+    else if (fsys_stream_is_guest_package(stream))
+    {
+        runtimeResourceMonitorRecordPackageLoadContent(
+            fsys_stream_request_name(stream),
+            positionBefore,
+            guestAddress,
+            hostData,
+            bytesLoaded,
+            positionAfter);
+    }
+    else if (fsys_stream_is_external_file(stream))
+    {
+        runtimeResourceMonitorRecordExternalLoadContent(
+            fsys_stream_request_name(stream),
+            positionBefore,
+            guestAddress,
+            hostData,
+            bytesLoaded,
+            positionAfter);
+    }
+}
+
 static bool checkedReadSize(uint32_t size, uint32_t count, uint32_t* requested)
 {
     if (!requested)
@@ -931,7 +1003,7 @@ static bool checkedReadSize(uint32_t size, uint32_t count, uint32_t* requested)
     return true;
 }
 
-uint32_t vm_fread(void* ptr, uint32_t size, uint32_t count, uint32_t stream)
+uint32_t fsys_fread(void* ptr, uint32_t size, uint32_t count, uint32_t stream)
 {
     std::lock_guard<std::recursive_mutex> lock(s_filesystemMutex);
     s_filesystemProfile.freadCalls++;
@@ -1055,6 +1127,27 @@ uint32_t fsys_fclose(uint32_t stream)
         free(entry->ownedData);
         entry->ownedData = NULL;
     }
+    bool shouldRecordResourceEvent = runtimeResourceMonitorIsCapturing();
+    if (entry->type == VIRTUAL_FILE_TYPE_RESOURCE)
+    {
+        if (shouldRecordResourceEvent)
+        {
+            runtimeResourceMonitorRecordClose(
+                RUNTIME_RESOURCE_MONITOR_SOURCE_FSYS,
+                entry->resource);
+        }
+    }
+    else if (entry->type == VIRTUAL_FILE_TYPE_HOST)
+    {
+        if (shouldRecordResourceEvent && entry->isGuestPackage)
+        {
+            runtimeResourceMonitorRecordPackageClose(entry->requestName);
+        }
+        else if (shouldRecordResourceEvent)
+        {
+            runtimeResourceMonitorRecordExternalClose(entry->requestName);
+        }
+    }
     if (entry->type == VIRTUAL_FILE_TYPE_HOST && entry->fp)
     {
         ret = (uint32_t)guestSaveCloseFile(s_saveDirectory,
@@ -1174,6 +1267,13 @@ uint32_t fsys_fseek(uint32_t stream, uint32_t offset, uint32_t origin)
         }
         entry->offset = (uint32_t)next;
         s_filesystemProfile.resourceSeekCalls++;
+        if (runtimeResourceMonitorIsCapturing())
+        {
+            runtimeResourceMonitorRecordSeek(
+                RUNTIME_RESOURCE_MONITOR_SOURCE_FSYS,
+                entry->resource,
+                entry->offset);
+        }
         if (fsysInFastHleCall())
         {
             s_filesystemProfile.fastFseekCalls++;
@@ -1250,6 +1350,13 @@ bool fsys_seek_cached(uint32_t stream, uint32_t offset, uint32_t origin, uint32_
             if (entry->type == VIRTUAL_FILE_TYPE_RESOURCE)
             {
                 s_filesystemProfile.resourceSeekCalls++;
+                if (runtimeResourceMonitorIsCapturing())
+                {
+                    runtimeResourceMonitorRecordSeek(
+                        RUNTIME_RESOURCE_MONITOR_SOURCE_FSYS,
+                        entry->resource,
+                        entry->offset);
+                }
             }
             else
             {
@@ -1275,10 +1382,10 @@ bool fsys_seek_cached(uint32_t stream, uint32_t offset, uint32_t origin, uint32_
     return false;
 }
 
-bool fsys_read_cached(uint32_t stream, uint32_t size, uint32_t count, void* destination, uint32_t* bytesRead, uint32_t* itemsRead)
+bool fsys_read_cached(uint32_t stream, uint32_t size, uint32_t count, const uint8_t** data, uint32_t* bytesRead, uint32_t* itemsRead)
 {
     std::lock_guard<std::recursive_mutex> lock(s_filesystemMutex);
-    if (!destination || !bytesRead || !itemsRead ||
+    if (!data || !bytesRead || !itemsRead ||
         stream == 0 || stream >= sizeof(s_fileMap) / sizeof(s_fileMap[0]) ||
         size == 0 || count == 0)
     {
@@ -1299,10 +1406,7 @@ bool fsys_read_cached(uint32_t stream, uint32_t size, uint32_t count, void* dest
 
     uint32_t available = (entry->offset < entry->size) ? (entry->size - entry->offset) : 0;
     uint32_t copySize = requested < available ? requested : available;
-    if (copySize > 0)
-    {
-        memcpy(destination, entry->data + entry->offset, copySize);
-    }
+    *data = entry->data + entry->offset;
     *bytesRead = copySize;
     *itemsRead = copySize / size;
     entry->offset += copySize;

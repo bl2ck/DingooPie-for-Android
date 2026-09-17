@@ -10,6 +10,7 @@ static const int EMULATOR_VIDEO_PERCENT_VALUES[] = { 50, 75, 90, 100, 110, 125, 
 static const int EMULATOR_AUDIO_VOLUME_VALUES[] = { 0, 25, 50, 75, 100, 125, 150 };
 static const int EMULATOR_AUDIO_BUFFER_VALUES[] = { 512, 1024, 2048, 4096, 8192 };
 static const int EMULATOR_VIRTUAL_CONTROL_SCALE_VALUES[] = { 75, 100, 125, 150 };
+static const int EMULATOR_VIRTUAL_CONTROL_OPACITY_VALUES[] = { 25, 50, 75, 100 };
 static const char* const EMULATOR_CPU_CLOCK_VALUES[] = {
     "", "200000000", "336000000", "360000000", "400000000", "430000000"
 };
@@ -86,6 +87,18 @@ static_assert(DIGITAL_NOISE_REDUCTION_MEDIUM ==
     DIGITAL_NOISE_REDUCTION_LEVEL_COUNT == DIGITAL_NOISE_REDUCTION_LOW + 1,
     "Digital noise reduction enum order must match the visible menu");
 
+enum GameLibraryLayoutMode
+{
+    GAME_LIBRARY_LAYOUT_SINGLE_COLUMN = 0,
+    GAME_LIBRARY_LAYOUT_MULTI_COLUMN,
+    GAME_LIBRARY_LAYOUT_MODE_COUNT
+};
+
+static_assert(GAME_LIBRARY_LAYOUT_MULTI_COLUMN ==
+        GAME_LIBRARY_LAYOUT_SINGLE_COLUMN + 1 &&
+    GAME_LIBRARY_LAYOUT_MODE_COUNT == GAME_LIBRARY_LAYOUT_MULTI_COLUMN + 1,
+    "Game library layout enum order must match the visible layout choices");
+
 enum UiLanguage
 {
     UI_LANGUAGE_CHINESE = 0,
@@ -132,7 +145,7 @@ struct EmulatorCheatSelection
 
 struct EmulatorSettings
 {
-    // Video fields follow the Android Options > Video menu order.
+    // Video fields follow the visible Options > Video menu order.
     AntiAliasingMode antiAliasing;
     ColorEffectMode colorEffect;
     int brightnessPercent;
@@ -144,7 +157,7 @@ struct EmulatorSettings
     ScreenFillMode screenFill;
     bool showFps;
 
-    // Audio fields follow the Android Options > Audio menu order.
+    // Audio fields follow the visible Options > Audio menu order.
     int audioVolumePercent;
     int audioBufferSamples;
     AudioBufferLatencyMode audioBufferLatency;
@@ -152,16 +165,17 @@ struct EmulatorSettings
     DigitalNoiseReductionLevel digitalNoiseReduction;
     bool audioDisabled;
 
-    // Input fields follow the Android Options > Input menu order.
+    // Input fields follow the visible Options > Input menu order.
     bool systemImeDisabled;
     bool showVirtualControls;
     int virtualControlScalePercent;
+    int virtualControlOpacityPercent;
     VirtualDpadType virtualDpadType;
     std::string controllerMapping;
     std::string controllerCalibration;
     std::string keyboardMapping;
 
-    // Runtime fields follow the Android Settings menu order.
+    // Runtime fields follow the visible Settings menu order.
     RuntimeExecutionMode executionMode;
     std::string cpuClockHz;
     std::string runtimeSpeedScale;
@@ -169,11 +183,13 @@ struct EmulatorSettings
     bool cheatsEnabled;
     std::vector<EmulatorCheatSelection> cheatSelections;
 
+    // UI fields follow their persisted output order.
+    GameLibraryLayoutMode gameLibraryLayout;
     UiLanguage uiLanguage;
 
     bool debugProfile;
 
-    // Derived from screenOrientationMode and the current Android orientation.
+    // Derived from screenOrientationMode and the current display orientation.
     bool portraitMode;
 };
 
@@ -198,6 +214,7 @@ const char* emulatorAudioEffectName(AudioEffectMode mode);
 const char* emulatorAudioBufferLatencyName(AudioBufferLatencyMode mode);
 int emulatorAudioBufferLatencyMilliseconds(AudioBufferLatencyMode mode);
 const char* emulatorDigitalNoiseReductionName(DigitalNoiseReductionLevel level);
+const char* emulatorGameLibraryLayoutName(GameLibraryLayoutMode mode);
 const char* emulatorUiLanguageName(UiLanguage language);
 const char* emulatorMinimizedBehaviorName(MinimizedBehavior behavior);
 const char* emulatorScreenOrientationName(ScreenOrientationMode mode);

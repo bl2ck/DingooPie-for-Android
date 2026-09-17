@@ -39,16 +39,23 @@
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="file" android:pathPattern=".*\.app" />
-                <data android:scheme="content" android:pathPattern=".*\.app" />
+                <data android:scheme="file" />
+                <data android:sspPattern=".*\\.app" />
+                <data android:sspPattern=".*\\.cc" />
+                <data android:sspPattern=".*\\.c2m" />
+                <data android:sspPattern=".*\\.c2s" />
+                <data android:sspPattern=".*\\.c3s" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="file" android:pathPattern=".*\.cc" />
-                <data android:scheme="content" android:pathPattern=".*\.cc" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.app" />
+                <data android:pathPattern=".*\\.cc" />
+                <data android:pathPattern=".*\\.c2m" />
+                <data android:pathPattern=".*\\.c2s" />
+                <data android:pathPattern=".*\\.c3s" />
             </intent-filter>
         </activity>
     </application>

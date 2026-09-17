@@ -4,7 +4,9 @@ Use the smallest relevant regression first, then run the APK and text-format che
 
 ## APK Validation
 
-Build a debug APK and verify the manifest plus all four native ABIs:
+Build a debug APK, verify the compiled manifest's `file` and `content`
+associations for `.app`, `.cc`, `.c2m`, `.c2s`, and `.c3s` files, and confirm
+all four native ABIs:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test_android.ps1
@@ -248,7 +250,7 @@ still requires an Android device or emulator with physical-keyboard input.
 Run the host-side comparison for queued file-manager connections:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/test_socket_task.ps1
+powershell -ExecutionPolicy Bypass -File scripts/test_closeable_socket_task.ps1
 ```
 
 The test first reproduces the previous lambda-queue behavior, where
@@ -267,11 +269,17 @@ execution failure and is validated through the native runtime log instead.
 
 ## Menu Structure
 
-`native/core/frontend/menu/menu_model.h` is the source of truth for visible menu row
-indices. When a menu changes, verify the same order in `native/core/frontend/menu/menu_overlay.cpp`, the
+`native/android/frontend/menu/menu_model.h` is the source of truth for visible menu row
+indices. When a menu changes, verify the same order in `native/android/frontend/menu/menu_overlay.cpp`, the
 selection handler, `EmulatorSettings`, INI load/save tracing, and both UI
 languages. `-VerifySharedSettings` provides the runtime-side ordering and value
 application check.
+
+The game-library System Tools menu is ordered as layout switching, Refresh Game
+List, and File Manager Service. Keep that order aligned across the Java labels and
+actions, native declarations, JNI implementations, and frontend implementations.
+The persisted layout values are `single` and `multi`; enum order, defaults,
+INI load/save, and settings tracing must follow the same order.
 
 Run the structural order regression directly after changing a visible setting:
 

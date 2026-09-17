@@ -3,6 +3,7 @@ param(
     [string]$SampleRoot,
     [string]$AndroidSdkRoot,
     [string]$AdbPath,
+    [string]$TesseractPath = 'C:\Program Files\Tesseract-OCR\tesseract.exe',
     [string]$Serial = '127.0.0.1:7555',
     [string]$OutputDirectory,
     [int]$StartupSeconds = 12,
@@ -31,6 +32,13 @@ if (!$AndroidSdkRoot) { $AndroidSdkRoot = $env:ANDROID_SDK_ROOT }
 if (!$AndroidSdkRoot) { throw 'Android SDK is required.' }
 if (!$AdbPath) { $AdbPath = Join-Path $AndroidSdkRoot 'platform-tools\adb.exe' }
 if (!(Test-Path -LiteralPath $AdbPath)) { throw "ADB was not found: $AdbPath" }
+if (!(Test-Path -LiteralPath $TesseractPath)) {
+    throw "Tesseract OCR was not found: $TesseractPath"
+}
+$ocrClickScript = Join-Path $PSScriptRoot 'ocr_click_dialog_button.py'
+if (!(Test-Path -LiteralPath $ocrClickScript)) {
+    throw "OCR click helper was not found: $ocrClickScript"
+}
 
 function Invoke-Adb {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -108,9 +116,52 @@ function Tap-UiResource {
     if ($bounds -notmatch '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$') {
         throw "Invalid bounds for UI resource '$ResourceId': $bounds"
     }
-    $x = [int](($Matches[1] + $Matches[3]) / 2)
-    $y = [int](($Matches[2] + $Matches[4]) / 2)
+    $left = [int]$Matches[1]
+    $top = [int]$Matches[2]
+    $right = [int]$Matches[3]
+    $bottom = [int]$Matches[4]
+    $x = [int](($left + $right) / 2)
+    $y = [int](($top + $bottom) / 2)
     Invoke-Adb shell input tap $x $y | Out-Null
+}
+
+function Tap-OcrDialogButton {
+    param([string]$Text, [int]$TimeoutSeconds = 60)
+    $devicePath = '/sdcard/dingoopie-ocr-dialog.png'
+    $hostPath = Join-Path $OutputDirectory 'ocr-dialog.png'
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        Capture-Screenshot -DevicePath $devicePath -HostPath $hostPath
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $json = & py $ocrClickScript --image $hostPath --target $Text `
+            --tesseract $TesseractPath 2>$null
+        $ocrExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($ocrExitCode -eq 0 -and $json) {
+            $button = $json | ConvertFrom-Json
+            Invoke-Adb shell input tap $button.x $button.y | Out-Null
+            return $button
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "OCR timed out waiting for dialog button: $Text"
+}
+
+function Invoke-AppShell {
+    param([string]$Command)
+    Invoke-Adb -Arguments @('shell', "run-as $packageName sh -c '$Command'")
+}
+
+function Get-PrivateFileSize {
+    param([string]$Path)
+    $output = Invoke-AppShell -Command "stat -c %s $Path 2>/dev/null"
+    $size = 0L
+    if ($output -and [long]::TryParse(
+            ([string]$output[0]).Trim(), [ref]$size)) {
+        return $size
+    }
+    return 0L
 }
 
 function Invoke-SampleTest {
@@ -120,11 +171,17 @@ function Invoke-SampleTest {
     $sampleLog = Join-Path $OutputDirectory ("{0:D3}-{1}.log" -f $Index, $Sample.BaseName)
     $menuScreenshot = Join-Path $OutputDirectory ("{0:D3}-save-menu.png" -f $Index)
     $resumedScreenshot = Join-Path $OutputDirectory ("{0:D3}-resumed.png" -f $Index)
+    $gameIdentity = (Get-FileHash -LiteralPath $Sample.FullName `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stateName = "dingoopie-save-state-sample-$Index.slot1"
+    $statePath = "saves/$gameIdentity/savestates/$stateName.dps"
+    $thumbnailPath = "saves/$gameIdentity/savestates/$stateName.thumb.bmp"
     $transcript = [System.Collections.Generic.List[string]]::new()
     try {
         $transcript.Add("sample=$($Sample.FullName)")
         Invoke-Adb shell am force-stop $packageName | Out-Null
         Invoke-Adb push $Sample.FullName $devicePath | Out-Null
+        Invoke-AppShell -Command "rm -f $statePath $thumbnailPath" | Out-Null
         Invoke-Adb logcat -c | Out-Null
         Invoke-Adb -Arguments @('shell', 'am', 'start', '-W', '-n',
             "$packageName/.DingooPieActivity", '--es',
@@ -139,14 +196,16 @@ function Invoke-SampleTest {
             -HostPath $menuScreenshot
 
         Invoke-Adb shell input tap 300 399 | Out-Null
-        Tap-UiResource -ResourceId 'android:id/button1'
-        Start-Sleep -Milliseconds 750
-        Tap-UiResource -ResourceId 'android:id/button1'
+        $saveButton = Tap-OcrDialogButton -Text 'Save'
+        $saveOkButton = Tap-OcrDialogButton -Text 'OK'
+        $stateSize = Get-PrivateFileSize -Path $statePath
+        if ($stateSize -lt 1024) {
+            throw "Save-state file was not created or is too small: $statePath ($stateSize bytes)"
+        }
 
         Invoke-Adb shell input tap 500 399 | Out-Null
-        Tap-UiResource -ResourceId 'android:id/button1'
-        Start-Sleep -Milliseconds 750
-        Tap-UiResource -ResourceId 'android:id/button1'
+        $loadButton = Tap-OcrDialogButton -Text 'Load'
+        $loadOkButton = Tap-OcrDialogButton -Text 'OK'
         Start-Sleep -Seconds 2
         Capture-Screenshot -DevicePath '/sdcard/dingoopie-resumed.png' `
             -HostPath $resumedScreenshot
@@ -157,6 +216,12 @@ function Invoke-SampleTest {
                 $changedPixelRatio)
         }
 
+        $transcript.Add("state_path=$statePath")
+        $transcript.Add("state_size=$stateSize")
+        $transcript.Add(("ocr_save_confidence={0:F2}" -f $saveButton.confidence))
+        $transcript.Add(("ocr_save_ok_confidence={0:F2}" -f $saveOkButton.confidence))
+        $transcript.Add(("ocr_load_confidence={0:F2}" -f $loadButton.confidence))
+        $transcript.Add(("ocr_load_ok_confidence={0:F2}" -f $loadOkButton.confidence))
         $transcript.Add(("changed_pixel_ratio={0:F4}" -f $changedPixelRatio))
         $transcript.Add('result=passed')
         $transcript | Set-Content -LiteralPath $sampleLog -Encoding utf8
@@ -172,6 +237,7 @@ function Invoke-SampleTest {
         $null = & $AdbPath -s $Serial shell am force-stop $packageName 2>&1
         $null = & $AdbPath -s $Serial shell rm '-f' $devicePath `
             '/sdcard/dingoopie-save-state-window.xml' `
+            '/sdcard/dingoopie-ocr-dialog.png' `
             '/sdcard/dingoopie-save-menu.png' '/sdcard/dingoopie-resumed.png' 2>&1
     }
 }
@@ -200,9 +266,13 @@ Invoke-Adb shell run-as $packageName cp '/data/local/tmp/DingooPie.ini' `
     'files/DingooPie.ini' | Out-Null
 
 $samples = @(Get-ChildItem -LiteralPath $sampleRootPath -Recurse -File |
-    Where-Object { $_.Extension.ToLowerInvariant() -in @('.app', '.cc') } |
+    Where-Object {
+        $_.Extension.ToLowerInvariant() -in @('.app', '.cc', '.c2m', '.c2s', '.c3s')
+    } |
     Sort-Object FullName)
-if ($samples.Count -eq 0) { throw "No .app or .cc samples found under $sampleRootPath." }
+if ($samples.Count -eq 0) {
+    throw "No .app, .cc, .c2m, .c2s, or .c3s samples found under $sampleRootPath."
+}
 
 try {
     $results = for ($index = 0; $index -lt $samples.Count; $index++) {

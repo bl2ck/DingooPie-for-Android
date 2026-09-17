@@ -1,13 +1,13 @@
 #include "app/cpu/mips_compat.h"
-#include "app/runtime/app_runtime_context.h"
 
 #include <SDL2/SDL.h>
 #include <stdint.h>
-#include <string.h>
 #include <stdio.h>
+#include <string.h>
 #include <vector>
 
 #include "app/memory/app_memory.h"
+#include "app/runtime/app_runtime_context.h"
 #include "frontend/video/framebuffer.h"
 #include "shared/diagnostics/runtime_log.h"
 
@@ -977,9 +977,8 @@ static void patchCacheInstructions(GuestPackage* appInfo, const EmulatorOptions&
 
 static bool readRuntimeInsn(NativeRuntime* runtime, uint64_t address, uint32_t* out)
 {
-    const AppRuntimeProgramImage image = appRuntimeProgramImage();
-    if (address >= image.address && address + sizeof(uint32_t) <=
-        (uint64_t)image.address + image.size)
+    AppRuntimeProgramImage image = appRuntimeProgramImage();
+    if (address >= image.address && address + sizeof(uint32_t) <= (uint64_t)image.address + image.size)
     {
         uint64_t offset = address - image.address;
         *out = readLe32((const uint8_t*)image.data + offset);
@@ -1210,6 +1209,7 @@ static void hookTransparentBlit16(NativeRuntime* runtime, uint64_t address, uint
     {
         return;
     }
+
     uint32_t sourceStridePixels = (uint32_t)(sourceHeader[0] | ((uint32_t)sourceHeader[1] << 8));
     uint64_t sourceBytes = rows ?
         ((uint64_t)(rows - 1) * sourceStridePixels + columns) * sizeof(uint16_t) : 0;
@@ -2208,18 +2208,11 @@ RuntimeError runtimeCompatInstallHooks(NativeRuntime* runtime, GuestPackage* app
         printf(
             "profile:compat precise_hooks=%u blit16_hooks=%u indexed8_hooks=%u "
             "indexed_transform_hooks=%u pixel16_hooks=%u mem_hooks=%u "
-            "rowcopy_hooks=%u tiny_hooks=%u object_predicate_hooks=%u "
-            "scan_size=0x%x\n",
-            hookCount,
-            blitHookCount,
-            indexedBlitHookCount,
-            indexedTransformBlitHookCount,
-            pixelLoopHookCount,
-            memoryRoutineHookCount,
-            rowCopyHookCount,
-            tinyPredicateHookCount,
-            objectPredicateAggregateHookCount,
-            scanSize);
+            "rowcopy_hooks=%u tiny_hooks=%u object_predicate_hooks=%u scan_size=0x%x\n",
+            hookCount, blitHookCount, indexedBlitHookCount,
+            indexedTransformBlitHookCount, pixelLoopHookCount, memoryRoutineHookCount,
+            rowCopyHookCount, tinyPredicateHookCount,
+            objectPredicateAggregateHookCount, scanSize);
     }
     return RUNTIME_OK;
 }

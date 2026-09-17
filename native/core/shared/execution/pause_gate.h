@@ -11,5 +11,7 @@ bool pauseGateWaitForPausedWaiters(uint32_t timeoutMs, uint32_t minimumWaiters);
 bool pauseGateWaitForResume(void);
 bool pauseGateWaitForNoWaiters(uint32_t timeoutMs);
 uint32_t pauseGateWaiterCount(void);
+void pauseGateMarkRuntimeRestored(void);
+uint32_t pauseGateRestoreGeneration(void);
 
 #endif
