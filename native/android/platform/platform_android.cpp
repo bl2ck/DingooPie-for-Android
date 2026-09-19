@@ -33,9 +33,34 @@ Java_com_dingoopie_android_DingooPieActivity_nativeToggleGameLibraryLayout(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_dingoopie_android_DingooPieActivity_nativeRefreshGameLibrary(
-    JNIEnv*, jclass)
+    JNIEnv* env, jclass)
 {
     frontendRefreshGameLibrary();
+
+    if (!env)
+    {
+        return;
+    }
+    JniLocalRef<jobject> activity(env, (jobject)SDL_AndroidGetActivity());
+    if (!activity)
+    {
+        return;
+    }
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID method = activityClass ? env->GetMethodID(activityClass,
+        "rescanPersistedGameDirectories", "()V") : NULL;
+    if (method)
+    {
+        env->CallVoidMethod(activity, method);
+    }
+    if (env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+    }
+    if (activityClass)
+    {
+        env->DeleteLocalRef(activityClass);
+    }
 }
 
 static bool isAndroidContentGamePath(const std::string& path)

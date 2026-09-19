@@ -830,6 +830,13 @@ public final class DingooPieActivity extends SDLActivity {
             return;
         }
         gameLibraryInitializationStarted = true;
+        rescanPersistedGameDirectories();
+    }
+
+    public void rescanPersistedGameDirectories() {
+        if (activityDestroyed || gameLibraryScanning) {
+            return;
+        }
         SharedPreferences preferences =
                 getSharedPreferences(GAME_LIBRARY_PREFERENCES, MODE_PRIVATE);
         Set<String> directoryTexts = new HashSet<>(preferences.getStringSet(
